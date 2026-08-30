@@ -3,8 +3,7 @@ import logging
 
 from fastapi.testclient import TestClient
 from gods_eye.app import app, use_retrieval_engine
-from gods_eye.retrieval import FixtureRetrievalEngine
-from gods_eye.retrieval import UnavailableRetrievalEngine
+from gods_eye.retrieval import FixtureRetrievalEngine, UnavailableRetrievalEngine
 
 client = TestClient(app)
 
