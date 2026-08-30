@@ -1,12 +1,20 @@
 import hashlib
 from typing import Protocol
 
+import numpy as np
+
 from .gallery import GalleryManifest
+from .index_store import LoadedIndex, deterministic_embedding
 from .models import Dataset, SearchResult
 
 
 class RetrievalEngine(Protocol):
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]: ...
+
+
+class UnavailableRetrievalEngine:
+    def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
+        raise RuntimeError("No valid index is active")
 
 
 class FixtureRetrievalEngine:
@@ -64,4 +72,39 @@ class ManifestRetrievalEngine:
                 image_url=f"/api/images/{record.id}",
             )
             for rank, (similarity, record, provenance) in enumerate(scored[:top_k], 1)
+        ]
+
+
+class IndexedRetrievalEngine:
+    def __init__(self, loaded: LoadedIndex):
+        self.loaded = loaded
+        self.manifest = loaded.manifest
+        self.ready = True
+        self.model_id = loaded.metadata.model_id
+        self.version_id = loaded.metadata.version_id
+        self.gallery_count = loaded.metadata.gallery_count
+
+    def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
+        vector = deterministic_embedding(query, self.loaded.metadata.dimension)
+        scores, rows = self.loaded.index.search(np.asarray(vector, dtype=np.float32), self.gallery_count)
+        selected = []
+        for score, row in zip(scores, rows, strict=True):
+            if int(row) < 0:
+                continue
+            record = self.manifest.records[int(row)]
+            provenance = record.provenance_for(datasets)
+            if provenance is not None:
+                selected.append((float(score), record, provenance))
+            if len(selected) == top_k:
+                break
+        return [
+            SearchResult(
+                rank=rank,
+                similarity=score,
+                dataset=provenance.dataset,
+                id=record.id,
+                split=provenance.split,
+                image_url=f"/api/images/{record.id}",
+            )
+            for rank, (score, record, provenance) in enumerate(selected, 1)
         ]

@@ -7,8 +7,15 @@ dependencies = [
   "fastapi>=0.116,<0.117",
   "pydantic-settings>=2.10,<3",
   "pillow>=11,<13",
+  "numpy>=2,<3",
   "uvicorn[standard]>=0.35,<1",
 ]
+
+[project.optional-dependencies]
+indexing = ["faiss-cpu>=1.9,<2"]
+
+[project.scripts]
+gods-eye-index = "gods_eye.index_store:main"
 
 [dependency-groups]
 dev = [

@@ -12,7 +12,7 @@ Text-to-Image Person Retrieval research PoC. The initial vertical slice uses det
 ```bash
 uv sync
 pnpm install
-uv run uvicorn gods_eye.app:app --app-dir service --reload
+GODS_EYE_USE_FIXTURES=1 uv run uvicorn gods_eye.app:app --app-dir service --reload
 pnpm dev:web
 ```
 
@@ -35,8 +35,26 @@ uv run python -m gods_eye.gallery \
 ```
 
 The manifest is an internal service artifact. API responses expose stable IDs, dataset, and split
-provenance only; captions and absolute host paths are never returned. The production index
-lifecycle and activation command are introduced by the versioned-index slice.
+provenance only; captions and absolute host paths are never returned.
+
+## Build and activate an exact index
+
+The default backend creates a CPU `IndexFlatIP` FAISS artifact. `--backend numpy` exists only for
+small, network-free fixture tests of the same exact inner-product contract.
+
+```bash
+uv run gods-eye-index build --manifest indexes/gallery-manifest.json --versions-dir indexes/versions
+uv run gods-eye-index activate --version indexes/versions/<version> \
+  --active-pointer indexes/active --model-id fixture/deterministic-v1
+GODS_EYE_ACTIVE_INDEX=indexes/active uv run uvicorn gods_eye.app:app --app-dir service
+```
+
+Every rebuild creates an immutable directory. Activation validates model identity, manifest linkage,
+row counts, dimensions, vector normalization, stable-ID uniqueness, image resolution, and index
+metadata before atomically replacing the active pointer. Failed validation leaves the previous
+pointer untouched. `/api/health` reports process liveness; `/api/readiness` separately reports the
+active model, version, and gallery count. Without a valid index the UI remains available and gives
+recovery guidance, but search stays disabled.
 
 ## Offline checks
 

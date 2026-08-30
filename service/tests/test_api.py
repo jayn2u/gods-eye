@@ -1,14 +1,16 @@
 from fastapi.testclient import TestClient
-from gods_eye.app import app
+from gods_eye.app import app, use_retrieval_engine
+from gods_eye.retrieval import FixtureRetrievalEngine
 
 client = TestClient(app)
 
 
 def test_search_contract_is_ranked_and_path_safe() -> None:
-    response = client.post(
-        "/api/search",
-        json={"query": "person in a blue coat", "top_k": 2, "datasets": ["CUHK-PEDES", "ICFG-PEDES"]},
-    )
+    with use_retrieval_engine(FixtureRetrievalEngine()):
+        response = client.post(
+            "/api/search",
+            json={"query": "person in a blue coat", "top_k": 2, "datasets": ["CUHK-PEDES", "ICFG-PEDES"]},
+        )
     assert response.status_code == 200
     body = response.json()
     assert body["query"] == "person in a blue coat"
@@ -34,4 +36,3 @@ def test_top_k_is_bounded() -> None:
 def test_openapi_is_available() -> None:
     assert client.get("/openapi.json").status_code == 200
     assert client.get("/docs").status_code == 200
-

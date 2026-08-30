@@ -40,3 +40,10 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
 
+
+class ReadinessResponse(BaseModel):
+    ready: bool
+    model_id: str | None = None
+    active_index_version: str | None = None
+    gallery_count: int | None = None
+    guidance: str | None = None
