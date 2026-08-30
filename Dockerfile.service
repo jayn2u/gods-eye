@@ -1,0 +1,12 @@
+FROM python:3.11-slim
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY service ./service
+RUN pip install --no-cache-dir '.[indexing,clip]'
+ENV GODS_EYE_DATASET_ROOT=/datasets \
+    GODS_EYE_INDEX_ROOT=/indexes \
+    GODS_EYE_ACTIVE_INDEX=/indexes/active \
+    GODS_EYE_HF_CACHE=/models \
+    GODS_EYE_BIND_HOST=0.0.0.0
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn gods_eye.app:app --app-dir service --host ${GODS_EYE_BIND_HOST} --port ${GODS_EYE_BIND_PORT:-8000}"]

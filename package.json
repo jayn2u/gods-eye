@@ -1,0 +1,12 @@
+{
+  "name": "gods-eye",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "scripts": {
+    "dev:web": "pnpm --dir web dev",
+    "test:web": "pnpm --dir web test",
+    "test:e2e": "pnpm --dir web test:e2e",
+    "build:web": "pnpm --dir web build"
+  }
+}
+
