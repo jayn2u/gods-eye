@@ -1,0 +1,35 @@
+services:
+  service:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    environment:
+      GODS_EYE_DATASET_ROOT: /datasets
+      GODS_EYE_INDEX_ROOT: /indexes
+      GODS_EYE_ACTIVE_INDEX: /indexes/active
+      GODS_EYE_HF_CACHE: /models
+      GODS_EYE_BIND_HOST: 0.0.0.0
+      GODS_EYE_BIND_PORT: 8000
+      GODS_EYE_MODEL_ID: ${GODS_EYE_MODEL_ID:-openai/clip-vit-base-patch16}
+      GODS_EYE_MODEL_REVISION: ${GODS_EYE_MODEL_REVISION:-}
+      GODS_EYE_OFFLINE: ${GODS_EYE_OFFLINE:-false}
+      GODS_EYE_DEVICE: ${GODS_EYE_DEVICE:-auto}
+      GODS_EYE_BATCH_SIZE: ${GODS_EYE_BATCH_SIZE:-32}
+      GODS_EYE_USE_FIXTURES: ${GODS_EYE_USE_FIXTURES:-false}
+      GODS_EYE_LOG_LEVEL: ${GODS_EYE_LOG_LEVEL:-INFO}
+    volumes:
+      - ${GODS_EYE_DATASET_ROOT:-/data/jayn2u/lab_datasets}:/datasets:ro
+      - ${GODS_EYE_INDEX_ROOT:-./indexes}:/indexes:rw
+      - ${GODS_EYE_HF_CACHE:-./.cache/huggingface}:/models:rw
+    ports: ["127.0.0.1:${GODS_EYE_BIND_PORT:-8000}:8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    depends_on: [service]
+    ports: ["127.0.0.1:5173:80"]

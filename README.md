@@ -1,101 +1,138 @@
 # God’s Eye
 
-Text-to-Image Person Retrieval research PoC. The initial vertical slice uses deterministic fixtures; it does not download a model or require datasets.
+**Text-to-Image Person Retrieval** is a desktop-first research proof of concept. It ranks gallery
+images against an English description with CLIP ViT-B/16. A deterministic three-image fixture mode
+exercises the complete API and browser flow without a model download or research datasets.
 
-## Requirements
+> Research use only. This is visual similarity retrieval, not identity verification. A similarity
+> score is not a probability or evidence that two people have the same identity.
 
-- Python 3.11 and [uv](https://docs.astral.sh/uv/)
-- Node.js 22 LTS and pnpm 10
+## Prerequisites and data terms
 
-## Run locally
+- Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js 22 LTS, and pnpm 10
+- Docker with Compose v2 for the container workflow
+- Optional CUDA-capable GPU for practical full-gallery indexing
+- Separately obtained CUHK-PEDES, ICFG-PEDES, and RSTPReid datasets
 
-```bash
-uv sync
-pnpm install
-GODS_EYE_USE_FIXTURES=1 uv run uvicorn gods_eye.app:app --app-dir service --reload
-pnpm dev:web
-```
+Datasets are not bundled, copied into images, or redistributed. Obtain them from their official
+publishers and review their current terms. Treat person imagery as sensitive research data, do not
+expose the service publicly, and comply with applicable research-only, non-commercial, and
+redistribution restrictions.
 
-Open `http://127.0.0.1:5173`. API documentation is at `http://127.0.0.1:8000/docs`.
+## Configuration
 
-Search defaults to `top_k=24` across `CUHK-PEDES`, `ICFG-PEDES`, and `RSTPReid`. The accepted range is 1–100 and at least one supported dataset must be selected.
+Copy `.env.example` to `.env` and edit machine-specific paths. Command-line indexer options override
+matching environment values.
 
-## Build a normalized gallery manifest
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GODS_EYE_DATASET_ROOT` | `/data/datasets` | Parent directory containing the datasets |
+| `GODS_EYE_INDEX_ROOT` | `indexes` | Writable index/checkpoint root |
+| `GODS_EYE_ACTIVE_INDEX` | `indexes/active` | Active-version pointer file |
+| `GODS_EYE_MODEL_ID` | `openai/clip-vit-base-patch16` | Hugging Face model identity |
+| `GODS_EYE_MODEL_REVISION` | unset | Optional immutable Hub revision |
+| `GODS_EYE_HF_CACHE` | HF default | Prepared model cache |
+| `GODS_EYE_OFFLINE` | `false` | Refuse model network access |
+| `GODS_EYE_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or CUDA device |
+| `GODS_EYE_BATCH_SIZE` | `32` | Image embedding batch size |
+| `GODS_EYE_BIND_HOST` | `127.0.0.1` | Service bind address |
+| `GODS_EYE_BIND_PORT` | `8000` | Service port |
+| `GODS_EYE_USE_FIXTURES` | `false` | Use packaged deterministic gallery |
+| `GODS_EYE_LOG_LEVEL` | `INFO` | Operational log level |
 
-The gallery builder validates every referenced image, normalizes `val` to `validation`, creates
-path-stable public IDs, and collapses only byte-identical images. It exits with an actionable
-report if a record is unsafe, missing, or unreadable.
+Loopback is the safe default. A non-loopback `GODS_EYE_BIND_HOST` is an explicit operator decision
+and does not add authentication or TLS. Compose publishes only on host loopback while explicitly
+binding `0.0.0.0` inside the service container.
 
-```bash
-uv run python -m gods_eye.gallery \
-  --source CUHK-PEDES=/data/jayn2u/lab_datasets/CUHK-PEDES/imgs=/data/jayn2u/lab_datasets/CUHK-PEDES/reid_raw.json \
-  --source ICFG-PEDES=/data/jayn2u/lab_datasets/ICFG-PEDES/imgs=/data/jayn2u/lab_datasets/ICFG-PEDES/ICFG-PEDES.json \
-  --source RSTPReid=/data/jayn2u/lab_datasets/RSTPReid/imgs=/data/jayn2u/lab_datasets/RSTPReid/data_captions.json \
-  --output indexes/gallery-manifest.json
-```
-
-The manifest is an internal service artifact. API responses expose stable IDs, dataset, and split
-provenance only; captions and absolute host paths are never returned.
-
-## Build and activate an exact index
-
-The default backend creates a CPU `IndexFlatIP` FAISS artifact. `--backend numpy` exists only for
-small, network-free fixture tests of the same exact inner-product contract.
-
-```bash
-uv run gods-eye-index build --manifest indexes/gallery-manifest.json \
-  --versions-dir indexes/versions --model-id fixture/deterministic-v1 --backend numpy
-uv run gods-eye-index activate --version indexes/versions/<version> \
-  --active-pointer indexes/active --model-id fixture/deterministic-v1
-GODS_EYE_ACTIVE_INDEX=indexes/active uv run uvicorn gods_eye.app:app --app-dir service
-```
-
-Every rebuild creates an immutable directory. Activation validates model identity, manifest linkage,
-row counts, dimensions, vector normalization, stable-ID uniqueness, image resolution, and index
-metadata before atomically replacing the active pointer. Failed validation leaves the previous
-pointer untouched. `/api/health` reports process liveness; `/api/readiness` separately reports the
-active model, version, and gallery count. Without a valid index the UI remains available and gives
-recovery guidance, but search stays disabled.
-
-## Index with Hugging Face CLIP ViT-B/16
-
-Install the optional inference dependencies, then build with the configured CLIP model. Image and
-text features are both L2-normalized; exact inner product therefore represents cosine similarity.
+## Local development
 
 ```bash
 uv sync --extra indexing --extra clip
-uv run gods-eye-index build --manifest indexes/gallery-manifest.json \
-  --versions-dir indexes/versions --model-id openai/clip-vit-base-patch16 \
-  --device auto --batch-size 32
-uv run gods-eye-index activate --version indexes/versions/<version> \
-  --active-pointer indexes/active --model-id openai/clip-vit-base-patch16
-GODS_EYE_ACTIVE_INDEX=indexes/active uv run uvicorn gods_eye.app:app --app-dir service
+pnpm install --frozen-lockfile
+GODS_EYE_USE_FIXTURES=true uv run uvicorn gods_eye.app:app --app-dir service \
+  --host "${GODS_EYE_BIND_HOST:-127.0.0.1}" --port "${GODS_EYE_BIND_PORT:-8000}" --reload
+pnpm dev:web
 ```
 
-`--device auto` selects CUDA when PyTorch reports it available and otherwise uses CPU. Pass
-`--device cpu` (or a specific CUDA device) and adjust `--batch-size` for the machine. Completed
-batches remain in a model/manifest-specific checkpoint directory, so repeating an interrupted build
-with the same model, revision, manifest, and batch size skips them. Unreadable images are excluded
-and categorized in `coverage.json`; absolute host paths are not recorded.
+Run the last two commands separately and open `http://127.0.0.1:5173`. API docs are at
+`http://127.0.0.1:8000/docs`, OpenAPI at `/openapi.json`, liveness at `/api/health`, and search
+readiness at `/api/readiness`. A live process may correctly be unready until an index is activated.
 
-Prepare the model cache once online, then set `GODS_EYE_OFFLINE=1` for the server and pass
-`--offline` to the indexer for a reproducible offline demo. `--cache-dir` and `GODS_EYE_HF_CACHE`
-select a dedicated cache. Missing offline assets fail with cache-preparation guidance.
-`HF_HUB_OFFLINE=1` can additionally enforce Hub-wide offline behavior.
+## Docker Compose
 
-The real-model test is deliberately excluded from normal CI. With cached model assets, run:
+Set host paths in `.env`, then run `docker compose config`, `docker compose up --build`, and check:
 
 ```bash
-RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=1 uv run pytest -m integration
+curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:8000/api/readiness
 ```
 
-For a qualitative browser smoke check, search for `a person wearing a red top`. Confirm that ranked
-cards come from the active index and `/api/readiness` reports `openai/clip-vit-base-patch16`. This is
-a qualitative check, not an identity probability or benchmark claim.
+Compose mounts the dataset root at `/datasets` **read-only**, the independent index root at
+`/indexes` read-write, and model cache at `/models`. Images are excluded from build contexts and
+layers. Set `GODS_EYE_USE_FIXTURES=true` for a packaged smoke demo. `docker compose down` preserves
+host indexes and cache.
 
-## Offline checks
+For a real Compose index, run the gallery/build/activation commands through `docker compose run
+--rm service ...` so the active pointer records container-visible `/indexes/...` paths. The service
+container ships the same `gods-eye-index` and `gods-eye-prepare-model` commands used locally.
 
-Once dependencies have been installed, all checks run without network access, model downloads, or external datasets:
+## Dataset placement and manifest
+
+Metadata filenames vary by release; explicit `--source` values are authoritative.
+
+```text
+$GODS_EYE_DATASET_ROOT/
+  CUHK-PEDES/{imgs,reid_raw.json}
+  ICFG-PEDES/{imgs,ICFG-PEDES.json}
+  RSTPReid/{imgs,data_captions.json}
+```
+
+```bash
+uv run python -m gods_eye.gallery \
+  --source CUHK-PEDES="$GODS_EYE_DATASET_ROOT/CUHK-PEDES/imgs=$GODS_EYE_DATASET_ROOT/CUHK-PEDES/reid_raw.json" \
+  --source ICFG-PEDES="$GODS_EYE_DATASET_ROOT/ICFG-PEDES/imgs=$GODS_EYE_DATASET_ROOT/ICFG-PEDES/ICFG-PEDES.json" \
+  --source RSTPReid="$GODS_EYE_DATASET_ROOT/RSTPReid/imgs=$GODS_EYE_DATASET_ROOT/RSTPReid/data_captions.json" \
+  --output "$GODS_EYE_INDEX_ROOT/gallery-manifest.json"
+```
+
+The builder validates paths/images, normalizes `val` to `validation`, creates stable public IDs,
+and collapses only byte-identical files. API data never exposes captions or absolute host paths.
+
+## Model preparation, indexing, resume, validation, activation
+
+Prepare a dedicated cache once while online:
+
+```bash
+uv run gods-eye-prepare-model --model-id "$GODS_EYE_MODEL_ID" \
+  --cache-dir "$GODS_EYE_HF_CACHE" --device cpu
+```
+
+Build the index. Completed batches are checkpointed and reused when model, revision, manifest, and
+batch size match. Unreadable images are categorized in `coverage.json`.
+
+```bash
+uv run gods-eye-index build --manifest "$GODS_EYE_INDEX_ROOT/gallery-manifest.json" \
+  --versions-dir "$GODS_EYE_INDEX_ROOT/versions" --model-id "$GODS_EYE_MODEL_ID" \
+  --device auto --batch-size 32 --cache-dir "$GODS_EYE_HF_CACHE"
+
+# Repeat the same build command to resume after interruption.
+uv run python -c "from pathlib import Path; from gods_eye.index_store import validate_version; validate_version(Path('VERSION_DIRECTORY'))"
+uv run gods-eye-index activate --version VERSION_DIRECTORY \
+  --active-pointer "$GODS_EYE_ACTIVE_INDEX" --model-id "$GODS_EYE_MODEL_ID"
+```
+
+Activation validates artifacts before atomically changing the pointer. For a disconnected demo,
+prepare model and index online, then set `GODS_EYE_OFFLINE=true` (optionally `HF_HUB_OFFLINE=1`).
+The indexer also supports explicit `--offline`. Missing assets fail with preparation guidance.
+
+## API, logging, and tests
+
+`POST /api/search` accepts an English `query`, `top_k` 1–100, and a non-empty dataset subset. See
+Swagger for schemas. Images are served only through validated manifest IDs. Operational logs are
+one-line JSON with duration, top-K, selected datasets, versions, counts, and error category. **Raw
+query text is never logged.** Reverse proxies and third-party telemetry need their own review.
+
+Fixture-backed checks need no dataset or model download:
 
 ```bash
 uv run pytest
@@ -103,6 +140,33 @@ uv run ruff check service
 pnpm test:web
 pnpm build:web
 pnpm test:e2e
+GODS_EYE_USE_FIXTURES=true docker compose config
 ```
 
-The browser test starts the real FastAPI and Vite processes. Only the expensive retrieval seam is replaced by the deterministic fixture adapter.
+With cached model assets, run the opt-in adapter check:
+
+```bash
+RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=true uv run pytest -m integration
+```
+
+## Performance measurement
+
+After warm-up, record hardware, device, model/revision, gallery count, query count, median, p95, and
+maximum local `POST /api/search` latency without recording queries. The target is under three seconds
+on the measured system, not a universal SLA. If missed, separately measure text embedding, exact
+search, image I/O, and rendering. The combined gallery is a demo, not a benchmark split.
+
+## Troubleshooting and limitations
+
+- **Not ready:** build and activate an index; in Compose its pointer target must be valid in
+  `/indexes`.
+- **Model mismatch:** use identical model ID/revision for build, activation, and service.
+- **Offline cache error:** prepare the identical model/revision/cache while online.
+- **CUDA unavailable/OOM:** use CPU or reduce batch size, then resume.
+- **Unreadable images:** inspect `coverage.json`, correct source data, and rebuild a new version.
+- **API unreachable:** use the Vite proxy/Compose web service; non-loopback operation requires
+  deliberate origin, authentication, TLS, and network controls outside this PoC.
+- General CLIP is not person-ReID-specialized. Bias, dataset shift, and false matches are expected.
+  Never use results for identification, surveillance, automated decisions, or safety-critical use.
+- No authentication, accounts, saved queries, shortlist, or case management is provided. This MVP
+  is for one local research workstation.

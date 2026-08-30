@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import argparse
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 from PIL import Image
-
 
 DEFAULT_MODEL_ID = "openai/clip-vit-base-patch16"
 
@@ -85,3 +85,18 @@ class HuggingFaceClipEmbedder:
         with self.torch.inference_mode():
             features = self.model.get_image_features(**inputs)
         return self._normalized(features)
+
+
+def prepare_cache() -> None:
+    from .config import get_settings
+
+    settings = get_settings()
+    parser = argparse.ArgumentParser(description="Prepare CLIP assets for an offline demonstration")
+    parser.add_argument("--model-id", default=settings.model_id)
+    parser.add_argument("--revision", default=settings.model_revision)
+    parser.add_argument("--cache-dir", type=Path, default=settings.hf_cache)
+    parser.add_argument("--device", default=settings.device)
+    args = parser.parse_args()
+    HuggingFaceClipEmbedder(args.model_id, revision=args.revision, cache_dir=args.cache_dir,
+                            device=args.device, offline=False)
+    print(f"Prepared {args.model_id!r} in {args.cache_dir or 'the default Hugging Face cache'}")

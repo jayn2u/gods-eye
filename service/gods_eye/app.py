@@ -1,4 +1,6 @@
-import os
+import json
+import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -7,6 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
+from .config import get_settings
 from .index_store import IndexValidationError, load_active
 from .models import ReadinessResponse, SearchRequest, SearchResponse
 from .retrieval import (
@@ -27,13 +30,14 @@ app.add_middleware(
 
 
 def _configured_engine() -> RetrievalEngine:
-    if os.environ.get("GODS_EYE_USE_FIXTURES") == "1":
+    settings = get_settings()
+    if settings.use_fixtures:
         return FixtureRetrievalEngine()
-    pointer = os.environ.get("GODS_EYE_ACTIVE_INDEX")
-    model_id = os.environ.get("GODS_EYE_MODEL_ID", "openai/clip-vit-base-patch16")
+    pointer = settings.active_index
+    model_id = settings.model_id
     if pointer:
         try:
-            revision = os.environ.get("GODS_EYE_MODEL_REVISION")
+            revision = settings.model_revision
             loaded = load_active(Path(pointer), model_id, revision)
             if model_id == "fixture/deterministic-v1":
                 return IndexedRetrievalEngine(loaded)
@@ -42,9 +46,9 @@ def _configured_engine() -> RetrievalEngine:
             embedder = HuggingFaceClipEmbedder(
                 model_id,
                 revision=revision or loaded.metadata.model_revision,
-                device=os.environ.get("GODS_EYE_DEVICE", "auto"),
-                offline=os.environ.get("GODS_EYE_OFFLINE") == "1",
-                cache_dir=Path(value) if (value := os.environ.get("GODS_EYE_HF_CACHE")) else None,
+                device=settings.device,
+                offline=settings.offline,
+                cache_dir=settings.hf_cache,
             )
             return IndexedRetrievalEngine(loaded, embedder)
         except (IndexValidationError, RuntimeError) as exc:
@@ -53,6 +57,13 @@ def _configured_engine() -> RetrievalEngine:
 
 
 app.state.retrieval_engine = _configured_engine()
+logger = logging.getLogger("gods_eye.operations")
+logger.setLevel(getattr(logging, get_settings().log_level.upper(), logging.INFO))
+
+
+def _log(event: str, **fields: object) -> None:
+    # JSON keeps local/container collection predictable. Callers must never pass query text.
+    logger.info(json.dumps({"event": event, **fields}, separators=(",", ":"), default=str))
 
 
 def get_retrieval_engine() -> RetrievalEngine:
@@ -111,15 +122,31 @@ def search(
     request: SearchRequest,
     engine: RetrievalEngine = Depends(get_retrieval_engine),  # noqa: B008
 ) -> SearchResponse:
+    started = time.perf_counter()
     if isinstance(engine, UnavailableRetrievalEngine):
+        _log("search_failed", category="index_unavailable", top_k=request.top_k,
+             datasets=request.datasets)
         raise HTTPException(
             status_code=503,
             detail="Search is unavailable. Build and activate a compatible index first.",
         )
-    return SearchResponse(
-        query=request.query,
-        results=engine.search(request.query, request.top_k, request.datasets),
+    try:
+        results = engine.search(request.query, request.top_k, request.datasets)
+    except Exception:
+        _log("search_failed", category="retrieval_error", top_k=request.top_k,
+             datasets=request.datasets)
+        raise
+    _log(
+        "search_completed",
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        top_k=request.top_k,
+        datasets=request.datasets,
+        result_count=len(results),
+        model_id=getattr(engine, "model_id", "fixture"),
+        index_version=getattr(engine, "version_id", "fixture"),
+        gallery_count=getattr(engine, "gallery_count", 3),
     )
+    return SearchResponse(query=request.query, results=results)
 
 
 _COLORS = {"sky": "#91d8ff", "violet": "#b7a8ff", "mint": "#8fe3c2"}

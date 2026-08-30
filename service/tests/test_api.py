@@ -1,3 +1,6 @@
+import json
+import logging
+
 from fastapi.testclient import TestClient
 from gods_eye.app import app, use_retrieval_engine
 from gods_eye.retrieval import FixtureRetrievalEngine
@@ -36,3 +39,23 @@ def test_top_k_is_bounded() -> None:
 def test_openapi_is_available() -> None:
     assert client.get("/openapi.json").status_code == 200
     assert client.get("/docs").status_code == 200
+
+
+def test_operational_search_log_excludes_raw_query(caplog) -> None:
+    secret_query = "person wearing a uniquely private description"
+    with (
+        caplog.at_level(logging.INFO, logger="gods_eye.operations"),
+        use_retrieval_engine(FixtureRetrievalEngine()),
+    ):
+        response = client.post("/api/search", json={"query": secret_query, "top_k": 2})
+    assert response.status_code == 200
+    record = next(record for record in caplog.records if '"event":"search_completed"' in record.message)
+    payload = json.loads(record.message)
+    assert secret_query not in record.message
+    assert payload["top_k"] == 2
+    assert payload["result_count"] == 2
+    assert payload["datasets"] == ["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"]
+    assert payload["model_id"] == "fixture"
+    assert payload["index_version"] == "fixture"
+    assert payload["gallery_count"] == 3
+    assert payload["duration_ms"] >= 0

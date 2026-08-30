@@ -336,26 +336,30 @@ def load_active(
 
 
 def main() -> None:
+    from .config import get_settings
+
+    settings = get_settings()
     parser = argparse.ArgumentParser(
         description="Build, validate, and activate exact search indexes"
     )
     sub = parser.add_subparsers(dest="command", required=True)
     build = sub.add_parser("build")
     build.add_argument("--manifest", type=Path, required=True)
-    build.add_argument("--versions-dir", type=Path, required=True)
-    build.add_argument("--model-id", default="openai/clip-vit-base-patch16")
+    build.add_argument("--versions-dir", type=Path, default=settings.index_root / "versions")
+    build.add_argument("--model-id", default=settings.model_id)
     build.add_argument("--dimension", type=int, default=32)
     build.add_argument("--backend", choices=("faiss", "numpy"), default="faiss")
-    build.add_argument("--device", default="auto")
-    build.add_argument("--batch-size", type=int, default=32)
-    build.add_argument("--revision")
-    build.add_argument("--offline", action="store_true")
-    build.add_argument("--cache-dir", type=Path)
+    build.add_argument("--device", default=settings.device)
+    build.add_argument("--batch-size", type=int, default=settings.batch_size)
+    build.add_argument("--revision", default=settings.model_revision)
+    build.add_argument("--offline", action=argparse.BooleanOptionalAction,
+                       default=settings.offline)
+    build.add_argument("--cache-dir", type=Path, default=settings.hf_cache)
     build.add_argument("--checkpoint-dir", type=Path)
     activate = sub.add_parser("activate")
     activate.add_argument("--version", type=Path, required=True)
-    activate.add_argument("--active-pointer", type=Path, required=True)
-    activate.add_argument("--model-id", required=True)
+    activate.add_argument("--active-pointer", type=Path, default=settings.active_index)
+    activate.add_argument("--model-id", default=settings.model_id)
     args = parser.parse_args()
     if args.command == "build":
         embedder = None

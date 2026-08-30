@@ -20,6 +20,7 @@ clip = [
 
 [project.scripts]
 gods-eye-index = "gods_eye.index_store:main"
+gods-eye-prepare-model = "gods_eye.clip:prepare_cache"
 
 [dependency-groups]
 dev = [
