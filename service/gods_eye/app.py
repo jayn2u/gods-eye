@@ -30,12 +30,25 @@ def _configured_engine() -> RetrievalEngine:
     if os.environ.get("GODS_EYE_USE_FIXTURES") == "1":
         return FixtureRetrievalEngine()
     pointer = os.environ.get("GODS_EYE_ACTIVE_INDEX")
-    model_id = os.environ.get("GODS_EYE_MODEL_ID", "fixture/deterministic-v1")
+    model_id = os.environ.get("GODS_EYE_MODEL_ID", "openai/clip-vit-base-patch16")
     if pointer:
         try:
-            return IndexedRetrievalEngine(load_active(Path(pointer), model_id))
-        except IndexValidationError:
-            pass
+            revision = os.environ.get("GODS_EYE_MODEL_REVISION")
+            loaded = load_active(Path(pointer), model_id, revision)
+            if model_id == "fixture/deterministic-v1":
+                return IndexedRetrievalEngine(loaded)
+            from .clip import HuggingFaceClipEmbedder
+
+            embedder = HuggingFaceClipEmbedder(
+                model_id,
+                revision=revision or loaded.metadata.model_revision,
+                device=os.environ.get("GODS_EYE_DEVICE", "auto"),
+                offline=os.environ.get("GODS_EYE_OFFLINE") == "1",
+                cache_dir=Path(value) if (value := os.environ.get("GODS_EYE_HF_CACHE")) else None,
+            )
+            return IndexedRetrievalEngine(loaded, embedder)
+        except (IndexValidationError, RuntimeError) as exc:
+            return UnavailableRetrievalEngine(str(exc))
     return UnavailableRetrievalEngine()
 
 
@@ -87,7 +100,9 @@ def readiness(engine: RetrievalEngine = Depends(get_retrieval_engine)) -> Readin
         )
     return ReadinessResponse(
         ready=False,
-        guidance="No valid index is active. Run `gods-eye-index build`, then `gods-eye-index activate`.",
+        guidance=(engine.guidance + ". Run `gods-eye-index build`, then `gods-eye-index activate`.")
+        if isinstance(engine, UnavailableRetrievalEngine)
+        else "No valid index is active. Run `gods-eye-index build`, then activate it.",
     )
 
 

@@ -43,7 +43,8 @@ The default backend creates a CPU `IndexFlatIP` FAISS artifact. `--backend numpy
 small, network-free fixture tests of the same exact inner-product contract.
 
 ```bash
-uv run gods-eye-index build --manifest indexes/gallery-manifest.json --versions-dir indexes/versions
+uv run gods-eye-index build --manifest indexes/gallery-manifest.json \
+  --versions-dir indexes/versions --model-id fixture/deterministic-v1 --backend numpy
 uv run gods-eye-index activate --version indexes/versions/<version> \
   --active-pointer indexes/active --model-id fixture/deterministic-v1
 GODS_EYE_ACTIVE_INDEX=indexes/active uv run uvicorn gods_eye.app:app --app-dir service
@@ -55,6 +56,42 @@ metadata before atomically replacing the active pointer. Failed validation leave
 pointer untouched. `/api/health` reports process liveness; `/api/readiness` separately reports the
 active model, version, and gallery count. Without a valid index the UI remains available and gives
 recovery guidance, but search stays disabled.
+
+## Index with Hugging Face CLIP ViT-B/16
+
+Install the optional inference dependencies, then build with the configured CLIP model. Image and
+text features are both L2-normalized; exact inner product therefore represents cosine similarity.
+
+```bash
+uv sync --extra indexing --extra clip
+uv run gods-eye-index build --manifest indexes/gallery-manifest.json \
+  --versions-dir indexes/versions --model-id openai/clip-vit-base-patch16 \
+  --device auto --batch-size 32
+uv run gods-eye-index activate --version indexes/versions/<version> \
+  --active-pointer indexes/active --model-id openai/clip-vit-base-patch16
+GODS_EYE_ACTIVE_INDEX=indexes/active uv run uvicorn gods_eye.app:app --app-dir service
+```
+
+`--device auto` selects CUDA when PyTorch reports it available and otherwise uses CPU. Pass
+`--device cpu` (or a specific CUDA device) and adjust `--batch-size` for the machine. Completed
+batches remain in a model/manifest-specific checkpoint directory, so repeating an interrupted build
+with the same model, revision, manifest, and batch size skips them. Unreadable images are excluded
+and categorized in `coverage.json`; absolute host paths are not recorded.
+
+Prepare the model cache once online, then set `GODS_EYE_OFFLINE=1` for the server and pass
+`--offline` to the indexer for a reproducible offline demo. `--cache-dir` and `GODS_EYE_HF_CACHE`
+select a dedicated cache. Missing offline assets fail with cache-preparation guidance.
+`HF_HUB_OFFLINE=1` can additionally enforce Hub-wide offline behavior.
+
+The real-model test is deliberately excluded from normal CI. With cached model assets, run:
+
+```bash
+RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=1 uv run pytest -m integration
+```
+
+For a qualitative browser smoke check, search for `a person wearing a red top`. Confirm that ranked
+cards come from the active index and `/api/readiness` reports `openai/clip-vit-base-patch16`. This is
+a qualitative check, not an identity probability or benchmark claim.
 
 ## Offline checks
 

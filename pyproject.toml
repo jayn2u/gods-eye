@@ -13,6 +13,10 @@ dependencies = [
 
 [project.optional-dependencies]
 indexing = ["faiss-cpu>=1.9,<2"]
+clip = [
+  "torch>=2.4,<3",
+  "transformers>=4.45,<5",
+]
 
 [project.scripts]
 gods-eye-index = "gods_eye.index_store:main"
@@ -27,6 +31,7 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["service"]
 testpaths = ["service/tests"]
+markers = ["integration: opt-in tests that load real external model assets"]
 
 [tool.ruff]
 line-length = 100

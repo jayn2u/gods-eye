@@ -13,6 +13,9 @@ class RetrievalEngine(Protocol):
 
 
 class UnavailableRetrievalEngine:
+    def __init__(self, guidance: str = "No valid index is active"):
+        self.guidance = guidance
+
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
         raise RuntimeError("No valid index is active")
 
@@ -76,16 +79,18 @@ class ManifestRetrievalEngine:
 
 
 class IndexedRetrievalEngine:
-    def __init__(self, loaded: LoadedIndex):
+    def __init__(self, loaded: LoadedIndex, text_embedder=None):
         self.loaded = loaded
         self.manifest = loaded.manifest
         self.ready = True
         self.model_id = loaded.metadata.model_id
         self.version_id = loaded.metadata.version_id
         self.gallery_count = loaded.metadata.gallery_count
+        self.text_embedder = text_embedder
 
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
-        vector = deterministic_embedding(query, self.loaded.metadata.dimension)
+        vector = (self.text_embedder.embed_text(query) if self.text_embedder is not None
+                  else deterministic_embedding(query, self.loaded.metadata.dimension))
         scores, rows = self.loaded.index.search(np.asarray(vector, dtype=np.float32), self.gallery_count)
         selected = []
         for score, row in zip(scores, rows, strict=True):

@@ -133,3 +133,53 @@ def test_readiness_and_unavailable_search_are_distinct_from_health(tmp_path: Pat
             "gallery_count": 3,
             "guidance": None,
         }
+
+
+class RecordingEmbedder:
+    dimension = 8
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed_images(self, images) -> np.ndarray:
+        self.calls += 1
+        rows = []
+        for image in images:
+            values = np.asarray(image, dtype=np.float32)
+            vector = np.array([values[..., channel].mean() for channel in range(3)] + [1] * 5)
+            rows.append(vector / np.linalg.norm(vector))
+        return np.asarray(rows, dtype=np.float32)
+
+    def embed_text(self, text: str) -> np.ndarray:
+        vector = np.array([1, 0, 0, 1, 1, 1, 1, 1], dtype=np.float32)
+        return vector / np.linalg.norm(vector)
+
+
+def test_real_embedding_path_resumes_batches_and_reports_unreadable_images(tmp_path: Path) -> None:
+    manifest_path = fixture_manifest(tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    corrupt = Path(manifest["roots"]["ICFG-PEDES"]) / manifest["records"][1]["relative_path"]
+    corrupt.write_bytes(b"not an image")
+    checkpoints = tmp_path / "checkpoints"
+
+    first_embedder = RecordingEmbedder()
+    first = build_index(
+        manifest_path, tmp_path / "versions", model_id="test/clip", backend="numpy",
+        embedder=first_embedder, batch_size=1, checkpoint_dir=checkpoints,
+        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    coverage = json.loads((first / "coverage.json").read_text())
+    assert (coverage["successful"], coverage["skipped"], coverage["failed"]) == (2, 1, 0)
+    assert coverage["failures"][0]["category"] == "unreadable_image"
+    loaded = validate_version(first, "test/clip")
+    assert loaded.metadata.dimension == 8
+    assert first_embedder.calls == 2
+
+    second_embedder = RecordingEmbedder()
+    second = build_index(
+        manifest_path, tmp_path / "versions", model_id="test/clip", backend="numpy",
+        embedder=second_embedder, batch_size=1, checkpoint_dir=checkpoints,
+        now=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    assert second_embedder.calls == 0
+    assert validate_version(second).metadata.gallery_count == 2
