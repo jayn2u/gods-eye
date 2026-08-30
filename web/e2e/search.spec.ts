@@ -7,6 +7,17 @@ test('submits through the real service and renders ranked fixture cards', async 
   await expect(page.getByRole('article')).toHaveCount(3)
   await expect(page.getByRole('article').first()).toContainText('#1')
   await expect(page.getByRole('article').first()).toContainText('CUHK-PEDES')
+  await expect(page.getByText('not an identity probability')).toBeVisible()
+  await page.getByRole('button', {name:'Open result 1 from CUHK-PEDES'}).click()
+  await expect(page.getByRole('heading', {name:'Result #1'})).toBeVisible()
+  await page.getByRole('button', {name:'Back to results'}).click()
+  await expect(page.getByRole('heading', {name:'Closest visual matches'})).toBeVisible()
+})
+
+test('explains the desktop-only requirement on narrow viewports', async ({page}) => {
+  await page.setViewportSize({width: 900, height: 800})
+  await page.goto('/')
+  await expect(page.getByRole('alert')).toContainText('Desktop display required')
 })
 
 test('preserves a blank input and explains validation', async ({page}) => {
@@ -15,4 +26,3 @@ test('preserves a blank input and explains validation', async ({page}) => {
   await expect(page.getByRole('alert')).toHaveText('Enter a description to search')
   await expect(page.getByLabel('Person description')).toHaveValue('')
 })
-
