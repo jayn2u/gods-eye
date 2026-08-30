@@ -3,10 +3,10 @@ from contextlib import contextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 
 from .models import SearchRequest, SearchResponse
-from .retrieval import FixtureRetrievalEngine, RetrievalEngine
+from .retrieval import FixtureRetrievalEngine, ManifestRetrievalEngine, RetrievalEngine
 
 app = FastAPI(title="God's Eye API", version="0.1.0", docs_url="/docs")
 app.add_middleware(
@@ -32,6 +32,10 @@ def use_retrieval_engine(engine: RetrievalEngine) -> Iterator[None]:
         app.state.retrieval_engine = previous
 
 
+def activate_manifest(manifest) -> None:
+    app.state.retrieval_engine = ManifestRetrievalEngine(manifest)
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -40,7 +44,7 @@ def health() -> dict[str, str]:
 @app.post("/api/search", response_model=SearchResponse)
 def search(
     request: SearchRequest,
-    engine: RetrievalEngine = Depends(get_retrieval_engine),
+    engine: RetrievalEngine = Depends(get_retrieval_engine),  # noqa: B008
 ) -> SearchResponse:
     return SearchResponse(
         query=request.query,
@@ -51,11 +55,16 @@ def search(
 _COLORS = {"sky": "#91d8ff", "violet": "#b7a8ff", "mint": "#8fe3c2"}
 
 
-@app.get("/api/images/{name}.svg", include_in_schema=False)
+@app.get("/api/images/{name}", include_in_schema=False)
 def fixture_image(name: str) -> Response:
-    color = _COLORS.get(name)
+    engine = app.state.retrieval_engine
+    if isinstance(engine, ManifestRetrievalEngine):
+        path = engine.manifest.resolve(name)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
+    color = _COLORS.get(name.removesuffix(".svg"))
     if color is None:
         raise HTTPException(status_code=404, detail="Image not found")
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="360" height="480" viewBox="0 0 360 480"><rect width="360" height="480" fill="#101827"/><circle cx="180" cy="120" r="52" fill="{color}"/><path d="M80 410c0-120 40-210 100-210s100 90 100 210" fill="{color}"/><text x="180" y="455" text-anchor="middle" fill="#dcecff" font-family="sans-serif">Fixture portrait</text></svg>'''
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=3600"})
-

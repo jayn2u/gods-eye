@@ -1,5 +1,4 @@
 from fastapi.testclient import TestClient
-
 from gods_eye.app import app
 
 client = TestClient(app)
