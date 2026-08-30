@@ -156,6 +156,10 @@ maximum local `POST /api/search` latency without recording queries. The target i
 on the measured system, not a universal SLA. If missed, separately measure text embedding, exact
 search, image I/O, and rendering. The combined gallery is a demo, not a benchmark split.
 
+For a reproducible coverage, artifact-validation, ranked-result, and latency JSON record, run
+`gods-eye-acceptance` after building the manifest and validated index. The observed local acceptance
+run and exact commands are documented in [docs/full-gallery-validation.md](docs/full-gallery-validation.md).
+
 ## Troubleshooting and limitations
 
 - **Not ready:** build and activate an index; in Compose its pointer target must be valid in

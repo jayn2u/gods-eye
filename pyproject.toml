@@ -21,6 +21,7 @@ clip = [
 [project.scripts]
 gods-eye-index = "gods_eye.index_store:main"
 gods-eye-prepare-model = "gods_eye.clip:prepare_cache"
+gods-eye-acceptance = "gods_eye.acceptance:main"
 
 [dependency-groups]
 dev = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -38,6 +39,11 @@ class HuggingFaceClipEmbedder:
         offline: bool = False,
         cache_dir: Path | None = None,
     ):
+        # Some processor sub-loaders consult the Hub's process-level offline flag rather than
+        # forwarding local_files_only consistently. Set it before importing Transformers so an
+        # explicitly offline process never performs network probes.
+        if offline:
+            os.environ["HF_HUB_OFFLINE"] = "1"
         try:
             import torch
             from transformers import AutoProcessor, CLIPModel
