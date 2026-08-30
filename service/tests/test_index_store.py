@@ -1,6 +1,6 @@
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -46,14 +46,18 @@ def build(tmp_path: Path) -> Path:
         tmp_path / "versions",
         dimension=16,
         backend="numpy",
-        now=datetime(2026, 8, 31, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 31, tzinfo=UTC),
     )
 
 
 def test_builds_complete_immutable_version_and_exact_ranking(tmp_path: Path) -> None:
     version = build(tmp_path)
     assert {path.name for path in version.iterdir()} == {
-        "manifest.json", "embeddings.npy", "index.faiss", "metadata.json", "coverage.json"
+        "manifest.json",
+        "embeddings.npy",
+        "index.faiss",
+        "metadata.json",
+        "coverage.json",
     }
     loaded = validate_version(version, "fixture/deterministic-v1")
     assert loaded.metadata.gallery_count == 3
@@ -164,9 +168,14 @@ def test_real_embedding_path_resumes_batches_and_reports_unreadable_images(tmp_p
 
     first_embedder = RecordingEmbedder()
     first = build_index(
-        manifest_path, tmp_path / "versions", model_id="test/clip", backend="numpy",
-        embedder=first_embedder, batch_size=1, checkpoint_dir=checkpoints,
-        now=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        manifest_path,
+        tmp_path / "versions",
+        model_id="test/clip",
+        backend="numpy",
+        embedder=first_embedder,
+        batch_size=1,
+        checkpoint_dir=checkpoints,
+        now=datetime(2026, 9, 1, tzinfo=UTC),
     )
     coverage = json.loads((first / "coverage.json").read_text())
     assert (coverage["successful"], coverage["skipped"], coverage["failed"]) == (2, 1, 0)
@@ -177,9 +186,14 @@ def test_real_embedding_path_resumes_batches_and_reports_unreadable_images(tmp_p
 
     second_embedder = RecordingEmbedder()
     second = build_index(
-        manifest_path, tmp_path / "versions", model_id="test/clip", backend="numpy",
-        embedder=second_embedder, batch_size=1, checkpoint_dir=checkpoints,
-        now=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        manifest_path,
+        tmp_path / "versions",
+        model_id="test/clip",
+        backend="numpy",
+        embedder=second_embedder,
+        batch_size=1,
+        checkpoint_dir=checkpoints,
+        now=datetime(2026, 9, 2, tzinfo=UTC),
     )
     assert second_embedder.calls == 0
     assert validate_version(second).metadata.gallery_count == 2

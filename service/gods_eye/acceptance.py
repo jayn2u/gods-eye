@@ -38,18 +38,46 @@ def coverage(manifest: GalleryManifest) -> dict[str, Any]:
 
     def rows(counter: Counter) -> dict[str, dict[str, int]]:
         return {
-            dataset: {
-                split: counter[(dataset, split)]
-                for split in ("train", "validation", "test")
-            }
+            dataset: {split: counter[(dataset, split)] for split in ("train", "validation", "test")}
             for dataset in ALL_DATASETS
         }
 
+    source_rows = rows(source)
+    active_rows = rows(active)
+    duplicate_rows = rows(aliases)
+
+    def zero_rows() -> dict[str, dict[str, int]]:
+        return rows(Counter())
+
+    accepted_rows = {
+        dataset: {split: source_rows[dataset][split] for split in ("train", "validation", "test")}
+        for dataset in ALL_DATASETS
+    }
     return {
         "totals": manifest.report,
-        "source_by_dataset_split": rows(source),
-        "active_by_canonical_dataset_split": rows(active),
-        "duplicate_aliases_by_dataset_split": rows(aliases),
+        "by_dataset_split": {
+            dataset: {
+                split: {
+                    "source": source_rows[dataset][split],
+                    "accepted": accepted_rows[dataset][split],
+                    "duplicate": duplicate_rows[dataset][split],
+                    "skipped": 0,
+                    "failed": 0,
+                    "active": active_rows[dataset][split],
+                }
+                for split in ("train", "validation", "test")
+            }
+            for dataset in ALL_DATASETS
+        },
+        "source_by_dataset_split": source_rows,
+        "accepted_by_dataset_split": accepted_rows,
+        "duplicate_by_dataset_split": duplicate_rows,
+        "skipped_by_dataset_split": zero_rows(),
+        "failed_by_dataset_split": zero_rows(),
+        "active_by_dataset_split": active_rows,
+        # Compatibility names retained for existing report consumers.
+        "active_by_canonical_dataset_split": active_rows,
+        "duplicate_aliases_by_dataset_split": duplicate_rows,
     }
 
 
@@ -79,8 +107,16 @@ def evaluate(
     from .retrieval import IndexedRetrievalEngine
 
     loaded = validate_version(version_dir, model_id, revision)
-    embedder = HuggingFaceClipEmbedder(
-        model_id, revision=revision, cache_dir=cache_dir, device=device, offline=offline
+    from .config import ClipRuntimeConfig
+
+    embedder = HuggingFaceClipEmbedder.from_config(
+        ClipRuntimeConfig(
+            model_id=model_id,
+            revision=revision,
+            cache_dir=cache_dir,
+            device=device,
+            offline=offline,
+        )
     )
     engine = IndexedRetrievalEngine(loaded, embedder)
     query_reports = []
@@ -130,7 +166,9 @@ def evaluate(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate and report a full-gallery acceptance run")
+    parser = argparse.ArgumentParser(
+        description="Validate and report a full-gallery acceptance run"
+    )
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--version", type=Path)
     parser.add_argument("--model-id", default="openai/clip-vit-base-patch16")

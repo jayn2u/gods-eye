@@ -1,8 +1,24 @@
 from functools import lru_cache
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass(frozen=True)
+class ClipRuntimeConfig:
+    model_id: str
+    revision: str | None = None
+    device: str = "auto"
+    offline: bool = False
+    cache_dir: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not self.model_id.strip():
+            raise ValueError("CLIP model_id must not be blank")
+        if not self.device.strip():
+            raise ValueError("CLIP device must not be blank")
 
 
 class Settings(BaseSettings):
@@ -21,6 +37,16 @@ class Settings(BaseSettings):
     bind_port: int = 8000
     use_fixtures: bool = False
     log_level: str = "INFO"
+
+    @property
+    def clip_runtime(self) -> ClipRuntimeConfig:
+        return ClipRuntimeConfig(
+            model_id=self.model_id,
+            revision=self.model_revision,
+            device=self.device,
+            offline=self.offline,
+            cache_dir=self.hf_cache,
+        )
 
     @field_validator("model_revision", mode="before")
     @classmethod

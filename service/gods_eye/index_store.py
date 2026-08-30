@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -98,6 +98,13 @@ class LoadedIndex:
     index: FlatIndex
 
 
+@dataclass(frozen=True)
+class EmbeddingResult:
+    manifest: GalleryManifest
+    vectors: np.ndarray
+    failures: list[dict[str, str]]
+
+
 def _write_index(vectors: np.ndarray, path: Path, backend: str) -> None:
     if backend == "faiss":
         try:
@@ -133,6 +140,156 @@ def _read_index(path: Path, backend: str) -> FlatIndex:
     raise IndexValidationError(f"Unsupported index backend {backend!r}")
 
 
+def embed_manifest(
+    manifest: GalleryManifest,
+    *,
+    model_id: str,
+    dimension: int = 32,
+    embedder=None,
+    batch_size: int = 32,
+    checkpoint_dir: Path,
+    model_revision: str | None = None,
+) -> EmbeddingResult:
+    digest = manifest_digest(manifest)
+    if embedder is None:
+        vectors = np.stack(
+            [deterministic_embedding(record.id, dimension) for record in manifest.records]
+        )
+        return EmbeddingResult(manifest, vectors, [])
+
+    dimension = embedder.dimension
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    signature_path = checkpoint_dir / "signature.json"
+    signature = {
+        "model_id": model_id,
+        "model_revision": model_revision,
+        "manifest_sha256": digest,
+        "dimension": dimension,
+        "batch_size": batch_size,
+    }
+    if signature_path.exists() and json.loads(signature_path.read_text()) != signature:
+        raise IndexValidationError("Checkpoint does not match model/config/manifest")
+    signature_path.write_text(json.dumps(signature, sort_keys=True) + "\n")
+    failures: list[dict[str, str]] = []
+    successful = []
+    all_vectors = []
+    records_by_id = {record.id: record for record in manifest.records}
+    for start in range(0, len(manifest.records), batch_size):
+        records = manifest.records[start : start + batch_size]
+        shard = checkpoint_dir / f"{start:09d}.npz"
+        if shard.exists():
+            saved = np.load(shard, allow_pickle=False)
+            ids = saved["ids"].tolist()
+            batch_vectors = saved["vectors"]
+            failures.extend(json.loads(str(saved["failures_json"].item())))
+            try:
+                batch_records = [records_by_id[value] for value in ids]
+            except KeyError as exc:
+                raise IndexValidationError("Checkpoint contains an unknown image ID") from exc
+        else:
+            images, batch_records, batch_failures = [], [], []
+            for record in records:
+                path = manifest.resolve(record.id)
+                try:
+                    if path is None:
+                        raise FileNotFoundError("manifest image is no longer available")
+                    with Image.open(path) as source:
+                        images.append(source.convert("RGB"))
+                    batch_records.append(record)
+                except (OSError, UnidentifiedImageError) as exc:
+                    failure = {
+                        "id": record.id,
+                        "category": "unreadable_image",
+                        "error": type(exc).__name__,
+                    }
+                    failures.append(failure)
+                    batch_failures.append(failure)
+            batch_vectors = (
+                embedder.embed_images(images)
+                if images
+                else np.empty((0, dimension), dtype=np.float32)
+            )
+            temporary = shard.with_suffix(".tmp.npz")
+            np.savez(
+                temporary,
+                ids=np.array([record.id for record in batch_records]),
+                vectors=np.asarray(batch_vectors, dtype=np.float32),
+                failures_json=json.dumps(batch_failures),
+            )
+            os.replace(temporary, shard)
+        successful.extend(batch_records)
+        all_vectors.append(batch_vectors)
+    if not successful:
+        raise IndexValidationError("No readable images were available to index")
+    indexed_manifest = GalleryManifest(
+        records=successful,
+        roots=manifest.roots,
+        report={**manifest.report, "unreadable_images": len(failures)},
+    )
+    return EmbeddingResult(indexed_manifest, np.concatenate(all_vectors), failures)
+
+
+def publish_index(
+    result: EmbeddingResult,
+    source_manifest: GalleryManifest,
+    versions_dir: Path,
+    *,
+    model_id: str,
+    dimension: int,
+    backend: str,
+    created: datetime,
+    model_revision: str | None,
+) -> Path:
+    digest = manifest_digest(source_manifest)
+    seed = f"{created.isoformat()}:{model_id}:{digest}"
+    version_id = (
+        created.strftime("%Y%m%dT%H%M%S%fZ") + "-" + hashlib.sha256(seed.encode()).hexdigest()[:8]
+    )
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    final = versions_dir / version_id
+    if final.exists():
+        raise IndexValidationError(f"Immutable version already exists: {version_id}")
+    staging = Path(tempfile.mkdtemp(prefix=f".{version_id}-", dir=versions_dir))
+    try:
+        vectors = np.ascontiguousarray(result.vectors, dtype=np.float32)
+        result.manifest.write(staging / "manifest.json")
+        np.save(staging / "embeddings.npy", vectors, allow_pickle=False)
+        _write_index(vectors, staging / "index.faiss", backend)
+        indexed_digest = manifest_digest(result.manifest)
+        coverage = {
+            "successful": len(result.manifest.records),
+            "skipped": len(result.failures),
+            "failed": 0,
+            "failures": result.failures,
+            **source_manifest.report,
+        }
+        (staging / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
+        metadata = IndexMetadata(
+            version=1,
+            version_id=version_id,
+            model_id=model_id,
+            dimension=dimension,
+            normalized=True,
+            backend=backend,
+            manifest_sha256=indexed_digest,
+            manifest_file="manifest.json",
+            embeddings_file="embeddings.npy",
+            index_file="index.faiss",
+            created_at=created.isoformat(),
+            gallery_count=len(result.manifest.records),
+            dataset_configuration=sorted(source_manifest.roots),
+            model_revision=model_revision,
+            processor_id=model_id if model_id != "fixture/deterministic-v1" else None,
+        )
+        (staging / "metadata.json").write_text(json.dumps(asdict(metadata), indent=2) + "\n")
+        validate_version(staging, expected_model_id=model_id)
+        os.replace(staging, final)
+        return final
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 def build_index(
     manifest_path: Path,
     versions_dir: Path,
@@ -147,118 +304,32 @@ def build_index(
     model_revision: str | None = None,
 ) -> Path:
     manifest = GalleryManifest.read(manifest_path)
-    digest = manifest_digest(manifest)
-    created = now or datetime.now(timezone.utc)
-    seed = f"{created.isoformat()}:{model_id}:{digest}"
-    version_id = (
-        created.strftime("%Y%m%dT%H%M%S%fZ")
-        + "-"
-        + hashlib.sha256(seed.encode()).hexdigest()[:8]
+    checkpoint = checkpoint_dir or (
+        versions_dir
+        / ".checkpoints"
+        / hashlib.sha256(
+            f"{model_id}:{model_revision}:{manifest_digest(manifest)}".encode()
+        ).hexdigest()[:20]
     )
-    versions_dir.mkdir(parents=True, exist_ok=True)
-    final = versions_dir / version_id
-    if final.exists():
-        raise IndexValidationError(f"Immutable version already exists: {version_id}")
-    staging = Path(tempfile.mkdtemp(prefix=f".{version_id}-", dir=versions_dir))
-    try:
-        failures: list[dict[str, str]] = []
-        if embedder is None:
-            vectors = np.stack(
-                [deterministic_embedding(record.id, dimension) for record in manifest.records]
-            )
-            indexed_manifest = manifest
-        else:
-            dimension = embedder.dimension
-            checkpoint = checkpoint_dir or (versions_dir / ".checkpoints" / hashlib.sha256(
-                f"{model_id}:{model_revision}:{digest}".encode()
-            ).hexdigest()[:20])
-            checkpoint.mkdir(parents=True, exist_ok=True)
-            signature_path = checkpoint / "signature.json"
-            signature = {"model_id": model_id, "model_revision": model_revision,
-                         "manifest_sha256": digest, "dimension": dimension,
-                         "batch_size": batch_size}
-            if signature_path.exists() and json.loads(signature_path.read_text()) != signature:
-                raise IndexValidationError("Checkpoint does not match model/config/manifest")
-            signature_path.write_text(json.dumps(signature, sort_keys=True) + "\n")
-            successful = []
-            all_vectors = []
-            for start in range(0, len(manifest.records), batch_size):
-                records = manifest.records[start : start + batch_size]
-                shard = checkpoint / f"{start:09d}.npz"
-                if shard.exists():
-                    saved = np.load(shard, allow_pickle=False)
-                    ids = saved["ids"].tolist()
-                    batch_vectors = saved["vectors"]
-                    failures.extend(json.loads(str(saved["failures_json"].item())))
-                    records_by_id = {record.id: record for record in manifest.records}
-                    try:
-                        batch_records = [records_by_id[value] for value in ids]
-                    except KeyError as exc:
-                        raise IndexValidationError("Checkpoint contains an unknown image ID") from exc
-                else:
-                    images, batch_records = [], []
-                    batch_failures = []
-                    for record in records:
-                        path = manifest.resolve(record.id)
-                        try:
-                            if path is None:
-                                raise FileNotFoundError("manifest image is no longer available")
-                            with Image.open(path) as source:
-                                images.append(source.convert("RGB"))
-                            batch_records.append(record)
-                        except (OSError, UnidentifiedImageError) as exc:
-                            failure = {"id": record.id, "category": "unreadable_image",
-                                       "error": type(exc).__name__}
-                            failures.append(failure)
-                            batch_failures.append(failure)
-                    batch_vectors = (embedder.embed_images(images) if images else
-                                     np.empty((0, dimension), dtype=np.float32))
-                    temporary = shard.with_suffix(".tmp.npz")
-                    np.savez(temporary, ids=np.array([r.id for r in batch_records]),
-                             vectors=np.asarray(batch_vectors, dtype=np.float32),
-                             failures_json=json.dumps(batch_failures))
-                    os.replace(temporary, shard)
-                successful.extend(batch_records)
-                all_vectors.append(batch_vectors)
-            if not successful:
-                raise IndexValidationError("No readable images were available to index")
-            vectors = np.concatenate(all_vectors)
-            indexed_manifest = GalleryManifest(
-                records=successful, roots=manifest.roots,
-                report={**manifest.report, "unreadable_images": len(failures)},
-            )
-        vectors = np.ascontiguousarray(vectors, dtype=np.float32)
-        indexed_manifest.write(staging / "manifest.json")
-        np.save(staging / "embeddings.npy", vectors, allow_pickle=False)
-        _write_index(vectors, staging / "index.faiss", backend)
-        indexed_digest = manifest_digest(indexed_manifest)
-        coverage = {"successful": len(indexed_manifest.records), "skipped": len(failures),
-                    "failed": 0, "failures": failures, **manifest.report}
-        (staging / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
-        metadata = IndexMetadata(
-            version=1,
-            version_id=version_id,
-            model_id=model_id,
-            dimension=dimension,
-            normalized=True,
-            backend=backend,
-            manifest_sha256=indexed_digest,
-            manifest_file="manifest.json",
-            embeddings_file="embeddings.npy",
-            index_file="index.faiss",
-            created_at=created.isoformat(),
-            gallery_count=len(indexed_manifest.records),
-            dataset_configuration=sorted(manifest.roots),
-            model_revision=model_revision,
-            processor_id=model_id if embedder is not None else None,
-        )
-        (staging / "metadata.json").write_text(json.dumps(asdict(metadata), indent=2) + "\n")
-        validate_version(staging, expected_model_id=model_id)
-        os.replace(staging, final)
-        return final
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    result = embed_manifest(
+        manifest,
+        model_id=model_id,
+        dimension=dimension,
+        embedder=embedder,
+        batch_size=batch_size,
+        checkpoint_dir=checkpoint,
+        model_revision=model_revision,
+    )
+    return publish_index(
+        result,
+        manifest,
+        versions_dir,
+        model_id=model_id,
+        dimension=result.vectors.shape[1],
+        backend=backend,
+        created=now or datetime.now(UTC),
+        model_revision=model_revision,
+    )
 
 
 def validate_version(
@@ -282,7 +353,10 @@ def validate_version(
             "Model revision mismatch: index uses "
             f"{metadata.model_revision!r}, service expects {expected_model_revision!r}"
         )
-    if metadata.model_id != "fixture/deterministic-v1" and metadata.processor_id != metadata.model_id:
+    if (
+        metadata.model_id != "fixture/deterministic-v1"
+        and metadata.processor_id != metadata.model_id
+    ):
         raise IndexValidationError("Index processor identity does not match its model")
     try:
         manifest = GalleryManifest.read(version_dir / metadata.manifest_file)
@@ -352,8 +426,7 @@ def main() -> None:
     build.add_argument("--device", default=settings.device)
     build.add_argument("--batch-size", type=int, default=settings.batch_size)
     build.add_argument("--revision", default=settings.model_revision)
-    build.add_argument("--offline", action=argparse.BooleanOptionalAction,
-                       default=settings.offline)
+    build.add_argument("--offline", action=argparse.BooleanOptionalAction, default=settings.offline)
     build.add_argument("--cache-dir", type=Path, default=settings.hf_cache)
     build.add_argument("--checkpoint-dir", type=Path)
     activate = sub.add_parser("activate")
@@ -365,10 +438,16 @@ def main() -> None:
         embedder = None
         if args.model_id != "fixture/deterministic-v1":
             from .clip import HuggingFaceClipEmbedder
+            from .config import ClipRuntimeConfig
 
-            embedder = HuggingFaceClipEmbedder(
-                args.model_id, revision=args.revision, device=args.device,
-                offline=args.offline, cache_dir=args.cache_dir,
+            embedder = HuggingFaceClipEmbedder.from_config(
+                ClipRuntimeConfig(
+                    model_id=args.model_id,
+                    revision=args.revision,
+                    device=args.device,
+                    offline=args.offline,
+                    cache_dir=args.cache_dir,
+                )
             )
         print(
             build_index(
@@ -384,7 +463,9 @@ def main() -> None:
             )
         )
     else:
-        print(activate_version(args.version, args.active_pointer, args.model_id).metadata.version_id)
+        print(
+            activate_version(args.version, args.active_pointer, args.model_id).metadata.version_id
+        )
 
 
 if __name__ == "__main__":

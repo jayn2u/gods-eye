@@ -160,7 +160,9 @@ def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest
         for row_number, row in enumerate(_load_rows(metadata, dataset), 1):
             source_rows += 1
             try:
-                relative = _relative_path(row.get("img_path", row.get("file_path")), dataset, row_number)
+                relative = _relative_path(
+                    row.get("img_path", row.get("file_path")), dataset, row_number
+                )
                 split = _split(row.get("split"), dataset, row_number)
                 provenance = Provenance(dataset, split, relative, str(row.get("id", "")))
                 key = (dataset, split, relative)
@@ -175,12 +177,16 @@ def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest
                     image.verify()
                 candidates[key] = (hashlib.sha256(content).hexdigest(), [provenance])
             except (OSError, UnidentifiedImageError, GalleryBuildError) as exc:
-                errors.append(f"{dataset} row {row_number} ({row.get('file_path', row.get('img_path'))!r}): {exc}")
+                errors.append(
+                    f"{dataset} row {row_number} ({row.get('file_path', row.get('img_path'))!r}): {exc}"
+                )
 
     if errors:
         preview = "\n- ".join(errors[:20])
         suffix = f"\n... and {len(errors) - 20} more" if len(errors) > 20 else ""
-        raise GalleryBuildError(f"Gallery validation failed with {len(errors)} error(s):\n- {preview}{suffix}")
+        raise GalleryBuildError(
+            f"Gallery validation failed with {len(errors)} error(s):\n- {preview}{suffix}"
+        )
 
     by_hash: dict[str, list[Provenance]] = {}
     for digest, provenances in candidates.values():

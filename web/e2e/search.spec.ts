@@ -26,3 +26,14 @@ test('preserves a blank input and explains validation', async ({page}) => {
   await expect(page.getByRole('alert')).toHaveText('Enter a description to search')
   await expect(page.getByLabel('Person description')).toHaveValue('')
 })
+
+test('renders the observed rank-one result from the active full CLIP index', async ({page}) => {
+  test.skip(process.env.GODS_EYE_REAL_INDEX !== '1', 'requires the validated full CLIP artifact')
+  await page.goto('/')
+  await page.getByLabel('Person description').fill('a person wearing a red shirt and dark trousers')
+  await page.getByRole('button', {name:'Search gallery'}).click()
+  const first = page.getByRole('article').first()
+  await expect(first).toContainText('#1')
+  await expect(first).toContainText('img_f033e0c72ab17aa25cdcef31')
+  await expect(first).toContainText('ICFG-PEDES · test')
+})

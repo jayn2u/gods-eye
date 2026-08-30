@@ -67,7 +67,9 @@ def test_all_metadata_shapes_stable_ids_and_exact_dedup(tmp_path: Path) -> None:
         "ICFG-PEDES",
         "RSTPReid",
     }
-    validation = next(record for record in manifest.records if record.relative_path == "val/p2/b.png")
+    validation = next(
+        record for record in manifest.records if record.relative_path == "val/p2/b.png"
+    )
     assert validation.split == "validation"
     assert validation.id == stable_id("CUHK-PEDES", "validation", "val/p2/b.png")
     assert any(record.aliases for record in manifest.records)
@@ -129,7 +131,9 @@ def test_default_search_includes_every_dataset(tmp_path: Path) -> None:
     engine = ManifestRetrievalEngine(build_manifest(tiny_sources(tmp_path)))
     client = TestClient(app)
     with use_retrieval_engine(engine):
-        results = client.post("/api/search", json={"query": "person", "top_k": 10}).json()["results"]
+        results = client.post("/api/search", json={"query": "person", "top_k": 10}).json()[
+            "results"
+        ]
     assert {result["dataset"] for result in results} == {
         "CUHK-PEDES",
         "ICFG-PEDES",

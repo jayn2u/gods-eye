@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .config import ClipRuntimeConfig
+
 DEFAULT_MODEL_ID = "openai/clip-vit-base-patch16"
 
 
@@ -19,7 +21,9 @@ def resolve_device(requested: str = "auto") -> str:
     try:
         import torch
     except ImportError as exc:  # pragma: no cover - dependency extra owns this path
-        raise ClipLoadError("PyTorch is required for CLIP inference; install the `clip` extra.") from exc
+        raise ClipLoadError(
+            "PyTorch is required for CLIP inference; install the `clip` extra."
+        ) from exc
     if requested == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if requested.startswith("cuda") and not torch.cuda.is_available():
@@ -72,14 +76,22 @@ class HuggingFaceClipEmbedder:
             ) from exc
         self.dimension = int(self.model.config.projection_dim)
 
+    @classmethod
+    def from_config(cls, config: ClipRuntimeConfig) -> HuggingFaceClipEmbedder:
+        return cls(
+            config.model_id,
+            revision=config.revision,
+            device=config.device,
+            offline=config.offline,
+            cache_dir=config.cache_dir,
+        )
+
     def _normalized(self, features) -> np.ndarray:
         features = self.torch.nn.functional.normalize(features, dim=-1)
         return np.ascontiguousarray(features.detach().cpu().float().numpy(), dtype=np.float32)
 
     def embed_text(self, text: str) -> np.ndarray:
-        inputs = self.processor(
-            text=[text], return_tensors="pt", padding=True, truncation=True
-        )
+        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True)
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         with self.torch.inference_mode():
             features = self.model.get_text_features(**inputs)
@@ -103,6 +115,12 @@ def prepare_cache() -> None:
     parser.add_argument("--cache-dir", type=Path, default=settings.hf_cache)
     parser.add_argument("--device", default=settings.device)
     args = parser.parse_args()
-    HuggingFaceClipEmbedder(args.model_id, revision=args.revision, cache_dir=args.cache_dir,
-                            device=args.device, offline=False)
+    HuggingFaceClipEmbedder.from_config(
+        ClipRuntimeConfig(
+            model_id=args.model_id,
+            revision=args.revision,
+            cache_dir=args.cache_dir,
+            device=args.device,
+        )
+    )
     print(f"Prepared {args.model_id!r} in {args.cache_dir or 'the default Hugging Face cache'}")

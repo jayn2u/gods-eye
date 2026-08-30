@@ -12,17 +12,17 @@ unique referenced paths, 262 byte-identical duplicates, 114,970 canonical active
 and zero missing, unsafe, or unreadable images. Exact-content deduplication therefore found 261
 additional duplicate files beyond the one repeated ICFG metadata path.
 
-| Dataset | Split | Source images | Duplicate aliases | Active canonical images |
-| --- | --- | ---: | ---: | ---: |
-| CUHK-PEDES | train | 34,054 | 10 | 34,044 |
-| CUHK-PEDES | validation | 3,078 | 2 | 3,076 |
-| CUHK-PEDES | test | 3,074 | 1 | 3,073 |
-| ICFG-PEDES | train | 34,674 | 177 | 34,497 |
-| ICFG-PEDES | validation | 0 | 0 | 0 |
-| ICFG-PEDES | test | 19,848 | 47 | 19,801 |
-| RSTPReid | train | 18,505 | 24 | 18,481 |
-| RSTPReid | validation | 1,000 | 2 | 998 |
-| RSTPReid | test | 1,000 | 0 | 1,000 |
+| Dataset | Split | Source | Accepted | Duplicate | Skipped | Failed | Active |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| CUHK-PEDES | train | 34,054 | 34,054 | 10 | 0 | 0 | 34,044 |
+| CUHK-PEDES | validation | 3,078 | 3,078 | 2 | 0 | 0 | 3,076 |
+| CUHK-PEDES | test | 3,074 | 3,074 | 1 | 0 | 0 | 3,073 |
+| ICFG-PEDES | train | 34,674 | 34,674 | 177 | 0 | 0 | 34,497 |
+| ICFG-PEDES | validation | 0 | 0 | 0 | 0 | 0 | 0 |
+| ICFG-PEDES | test | 19,848 | 19,848 | 47 | 0 | 0 | 19,801 |
+| RSTPReid | train | 18,505 | 18,505 | 24 | 0 | 0 | 18,481 |
+| RSTPReid | validation | 1,000 | 1,000 | 2 | 0 | 0 | 998 |
+| RSTPReid | test | 1,000 | 1,000 | 0 | 0 | 0 | 1,000 |
 
 The environment had 251 GiB RAM and 173 GiB free system disk space. `nvidia-smi` could not
 communicate with the NVIDIA driver, so CUDA was unavailable. CLIP ViT-B/16 assets were prepared in
@@ -50,11 +50,11 @@ met the three-second target; it is a measurement on this workstation, not a univ
 | a person in a black coat with white shoes | `img_2019c0c6ac6c18305c330d9b` (ICFG-PEDES, test) | 0.378938 |
 
 The generated JSON outside the repository contains all 24 ranked IDs for each query. These are
-qualitative results only. The browser could not be exercised in the managed execution sandbox:
-loopback requests were refused even after uvicorn reported startup, and a FastAPI TestClient startup
-spent more than six minutes rechecking all 114,970 dataset paths before the bounded attempt was
-stopped. The documented browser verification step remains required on the host workstation; no
-browser result is claimed here.
+qualitative results only. A later browser acceptance run used this exact active artifact, the cached
+CLIP model in offline CPU mode, the live FastAPI service, Vite, and Chromium. The first fixed query
+completed through the real HTTP boundary and displayed the recorded rank-one ID
+`img_f033e0c72ab17aa25cdcef31` with `ICFG-PEDES · test`. The opt-in Playwright test records this
+check and is skipped unless `GODS_EYE_REAL_INDEX=1` is explicitly supplied.
 
 ## Reproduce and resume
 

@@ -1,41 +1,110 @@
 import React from 'react'
-import{createRoot}from'react-dom/client'
-import'./styles.css'
-import{errorMessage,nextVisibleCount,validateSearch}from'./search'
-const GALLERIES=['CUHK-PEDES','ICFG-PEDES','RSTPReid']
-const STEPS=['Compose','Search progress','Results','Image detail']
-type Result={rank:number;similarity:number;dataset:string;id:string;split:string;image_url:string}
-type Stage='Encoding query'|'Searching index'|'Loading results'
-function App(){
- const[query,setQuery]=React.useState(''),[datasets,setDatasets]=React.useState([...GALLERIES]),[topK,setTopK]=React.useState(24)
- const[results,setResults]=React.useState<Result[]>([]),[visible,setVisible]=React.useState(24),[error,setError]=React.useState('')
- const[ready,setReady]=React.useState<boolean|null>(null),[guidance,setGuidance]=React.useState(''),[step,setStep]=React.useState(0)
- const[stage,setStage]=React.useState<Stage>('Encoding query'),[selected,setSelected]=React.useState<number|null>(null)
- const active=React.useRef<{id:number;controller:AbortController}|null>(null),sequence=React.useRef(0),back=React.useRef<HTMLButtonElement>(null)
- async function readiness(){try{const r=await fetch('/api/readiness');if(!r.ok)throw 0;const s=await r.json();setReady(s.ready);setGuidance(s.guidance||'')}catch{setReady(false);setGuidance('The search service is unavailable. Check that the API is running.')}}
- React.useEffect(()=>{void readiness();return()=>active.current?.controller.abort()},[])
- React.useEffect(()=>{if(step===3)back.current?.focus()},[step])
- function toggle(d:string){setDatasets(v=>v.includes(d)?v.filter(x=>x!==d):[...v,d])}
- async function submit(e?:React.FormEvent){e?.preventDefault();setError('');const invalid=validateSearch(query,datasets,topK);if(invalid){setError(invalid);setStep(0);return}
-  active.current?.controller.abort();const controller=new AbortController(),id=++sequence.current;active.current={id,controller};setStage('Encoding query');setStep(1);await Promise.resolve();if(id!==sequence.current)return;setStage('Searching index')
-  try{const r=await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query,top_k:topK,datasets}),signal:controller.signal});if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(errorMessage(r.status,b.detail))}const data=await r.json();if(id!==sequence.current)return;setStage('Loading results');setResults(data.results);setVisible(24);setSelected(null);setStep(2)}catch(x){if(controller.signal.aborted||id!==sequence.current)return;setError(x instanceof Error?x.message:'Search could not be completed.');setStep(0)}}
- function cancel(){active.current?.controller.abort();sequence.current++;setStep(0)}
- function close(){setStep(2);requestAnimationFrame(()=>document.querySelector<HTMLButtonElement>(`[data-card="${selected}"]`)?.focus())}
- const detail=selected===null?null:results[selected],stages:Stage[]=['Encoding query','Searching index','Loading results'],stageIndex=stages.indexOf(stage)
- return <><div className="desktop-required" role="alert"><strong>Desktop display required</strong><span>Use a viewport at least 1200 pixels wide.</span></div><main className="shell">
-  <header className="masthead"><div><p className="eyebrow">TEXT-TO-IMAGE PERSON RETRIEVAL</p><h1>God’s Eye</h1></div><p>Search a research gallery using visible descriptions—not identity.</p></header>
-  <nav aria-label="Search workflow"><ol className="steps">{STEPS.map((s,i)=><li key={s} className={i===step?'active':i<step?'complete':''} aria-current={i===step?'step':undefined}><span>{String(i+1).padStart(2,'0')}</span>{s}</li>)}</ol></nav>
-  {step===0&&<section className="panel compose" aria-labelledby="compose-title"><p className="section-number">01 / COMPOSE</p><h2 id="compose-title">Who are you looking for?</h2><p className="lede">Describe clothing, colors, accessories, and other visible attributes in English.</p><form onSubmit={submit} noValidate>
-   <label htmlFor="query">Person description</label><textarea autoFocus id="query" value={query} onChange={e=>setQuery(e.target.value)} aria-describedby="query-help error" placeholder="A person wearing a pale blue coat and carrying a black shoulder bag…"/><small id="query-help">Do not enter names, camera locations, or time ranges.</small>
-   <div className="controls"><fieldset><legend>Search galleries</legend><div className="checks">{GALLERIES.map(d=><label className="check" key={d}><input type="checkbox" checked={datasets.includes(d)} onChange={()=>toggle(d)}/><span>{d}</span></label>)}</div></fieldset><label className="select-label" htmlFor="top-k">Maximum results<select id="top-k" value={topK} onChange={e=>setTopK(+e.target.value)}><option>12</option><option>24</option><option>48</option></select></label></div>
-   {ready===false&&<aside className="notice" role="status"><strong>Search index unavailable</strong><p>{guidance}</p><button type="button" className="text-button" onClick={readiness}>Check again</button></aside>}{error&&<aside id="error" className="notice" role="alert"><strong>Search interrupted</strong><p>{error}</p><button type="button" className="text-button" onClick={()=>void submit()}>Retry search</button></aside>}<button className="primary" disabled={ready!==true}>Search gallery <span aria-hidden>→</span></button>
-  </form></section>}
-  {step===1&&<section className="panel progress-panel" aria-live="polite" aria-labelledby="progress-title"><p className="section-number">02 / SEARCH PROGRESS</p><h2 id="progress-title">Searching the gallery</h2><p className="query-quote">“{query}”</p><div className="scanner" aria-hidden><span/></div><ol className="progress-list">{stages.map((s,i)=><li key={s} className={i<stageIndex?'done':i===stageIndex?'current':''}><span>{i<stageIndex?'✓':i+1}</span>{s}</li>)}</ol><button className="secondary" onClick={cancel}>Cancel search</button></section>}
-  {step===2&&<section className="results" aria-labelledby="results-title"><div className="results-heading"><div><p className="section-number">03 / RESULTS</p><h2 id="results-title">Closest visual matches</h2><p>Showing {Math.min(visible,results.length)} of {results.length} results for “{query}”</p></div><button className="secondary" onClick={()=>setStep(0)}>Refine search</button></div><p className="score-note"><strong>About similarity:</strong> Visual-text closeness, not an identity probability.</p>
-   {!results.length?<div className="empty"><h3>No matches returned</h3><p>Try a broader description or another gallery.</p><button className="primary" onClick={()=>setStep(0)}>Revise description</button></div>:<><div className="grid" aria-live="polite">{results.slice(0,visible).map((r,i)=><article className="card" key={r.id}><button data-card={i} onClick={()=>{setSelected(i);setStep(3)}} aria-label={`Open result ${r.rank} from ${r.dataset}`}><img src={r.image_url} alt={`Gallery result ranked ${r.rank}`} loading="lazy"/><div><strong>#{r.rank}</strong><span>Similarity {r.similarity.toFixed(3)}</span></div><p>{r.dataset} · {r.split}</p><code>{r.id}</code></button></article>)}</div>{visible<results.length&&<button className="load-more" onClick={()=>setVisible(v=>nextVisibleCount(v,results.length))}>Load 24 more</button>}</>}
-  </section>}
-  {step===3&&detail&&<section className="panel detail" aria-labelledby="detail-title" onKeyDown={e=>{if(e.key==='Escape')close();if(e.key==='ArrowLeft'&&selected!>0)setSelected(selected!-1);if(e.key==='ArrowRight'&&selected!<results.length-1)setSelected(selected!+1)}}><div className="detail-head"><div><p className="section-number">04 / IMAGE DETAIL</p><h2 id="detail-title">Result #{detail.rank}</h2></div><button ref={back} className="secondary" onClick={close}>Back to results</button></div><div className="detail-body"><img src={detail.image_url} alt={`Expanded gallery result ranked ${detail.rank}`}/><dl><div><dt>Similarity</dt><dd>{detail.similarity.toFixed(4)}</dd></div><div><dt>Dataset</dt><dd>{detail.dataset}</dd></div><div><dt>Split</dt><dd>{detail.split}</dd></div><div><dt>Image ID</dt><dd><code>{detail.id}</code></dd></div></dl></div><div className="detail-nav"><button className="secondary" disabled={selected===0} onClick={()=>setSelected(selected!-1)}>← Previous</button><span>{selected!+1} / {results.length}</span><button className="secondary" disabled={selected===results.length-1} onClick={()=>setSelected(selected!+1)}>Next →</button></div></section>}
-  <footer><strong>Research-only local demo.</strong> This system retrieves visually similar images; it does not identify people. Dataset images must not be redistributed.</footer>
- </main></>
+import { createRoot } from 'react-dom/client'
+import { fetchReadiness, searchGallery } from './api'
+import { nextVisibleCount, validateSearch } from './search'
+import { ComposeScreen, DetailScreen, ProgressScreen, ResultsScreen } from './screens'
+import { GALLERIES, WORKFLOW_STEPS, type SearchResult } from './types'
+import './styles.css'
+
+function App() {
+  const [query, setQuery] = React.useState('')
+  const [datasets, setDatasets] = React.useState<string[]>([...GALLERIES])
+  const [topK, setTopK] = React.useState(24)
+  const [results, setResults] = React.useState<SearchResult[]>([])
+  const [visible, setVisible] = React.useState(24)
+  const [error, setError] = React.useState('')
+  const [ready, setReady] = React.useState<boolean | null>(null)
+  const [guidance, setGuidance] = React.useState('')
+  const [step, setStep] = React.useState(0)
+  const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null)
+  const activeRequest = React.useRef<{ id: number; controller: AbortController } | null>(null)
+  const requestSequence = React.useRef(0)
+  const backButton = React.useRef<HTMLButtonElement>(null)
+
+  async function checkReadiness() {
+    try {
+      const status = await fetchReadiness()
+      setReady(status.ready)
+      setGuidance(status.guidance || '')
+    } catch {
+      setReady(false)
+      setGuidance('The search service is unavailable. Check that the API is running.')
+    }
+  }
+
+  React.useEffect(() => {
+    void checkReadiness()
+    return () => activeRequest.current?.controller.abort()
+  }, [])
+  React.useEffect(() => { if (step === 3) backButton.current?.focus() }, [step])
+
+  function toggleDataset(dataset: string) {
+    setDatasets(current => current.includes(dataset)
+      ? current.filter(item => item !== dataset)
+      : [...current, dataset])
+  }
+
+  async function submit(event?: React.FormEvent) {
+    event?.preventDefault()
+    setError('')
+    const invalid = validateSearch(query, datasets, topK)
+    if (invalid) { setError(invalid); setStep(0); return }
+    activeRequest.current?.controller.abort()
+    const controller = new AbortController()
+    const requestId = ++requestSequence.current
+    activeRequest.current = { id: requestId, controller }
+    setStep(1)
+    try {
+      const matches = await searchGallery(query, topK, datasets, controller.signal)
+      if (requestId !== requestSequence.current) return
+      setResults(matches)
+      setVisible(24)
+      setSelectedIndex(null)
+      setStep(2)
+    } catch (caught) {
+      if (controller.signal.aborted || requestId !== requestSequence.current) return
+      setError(caught instanceof Error ? caught.message : 'Search could not be completed.')
+      setStep(0)
+    }
+  }
+
+  function cancelSearch() {
+    activeRequest.current?.controller.abort()
+    requestSequence.current++
+    setStep(0)
+  }
+
+  function closeDetail() {
+    setStep(2)
+    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(
+      `[data-card="${selectedIndex}"]`,
+    )?.focus())
+  }
+
+  const detail = selectedIndex === null ? null : results[selectedIndex]
+  return <><div className="desktop-required" role="alert"><strong>Desktop display required</strong><span>Use a viewport at least 1200 pixels wide.</span></div><main className="shell">
+    <header className="masthead"><div><p className="eyebrow">TEXT-TO-IMAGE PERSON RETRIEVAL</p><h1>God’s Eye</h1></div><p>Search a research gallery using visible descriptions—not identity.</p></header>
+    <nav aria-label="Search workflow"><ol className="steps">{WORKFLOW_STEPS.map((label, index) => <li key={label} className={index === step ? 'active' : index < step ? 'complete' : ''} aria-current={index === step ? 'step' : undefined}><span>{String(index + 1).padStart(2, '0')}</span>{label}</li>)}</ol></nav>
+    {step === 0 && <ComposeScreen
+      query={query} datasets={datasets} topK={topK} ready={ready} guidance={guidance}
+      error={error} onQuery={setQuery} onToggle={toggleDataset} onTopK={setTopK}
+      onSubmit={submit} onReadiness={() => void checkReadiness()}
+    />}
+    {step === 1 && <ProgressScreen
+      query={query}
+      onCancel={cancelSearch}
+    />}
+    {step === 2 && <ResultsScreen
+      query={query} results={results} visible={visible} onRefine={() => setStep(0)}
+      onSelect={index => { setSelectedIndex(index); setStep(3) }}
+      onMore={() => setVisible(current => nextVisibleCount(current, results.length))}
+    />}
+    {step === 3 && detail && selectedIndex !== null && <DetailScreen
+      detail={detail} selectedIndex={selectedIndex} total={results.length}
+      backRef={backButton} onClose={closeDetail} onMove={setSelectedIndex}
+    />}
+    <footer><strong>Research-only local demo.</strong> This system retrieves visually similar images; it does not identify people. Dataset images must not be redistributed.</footer>
+  </main></>
 }
+
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>)

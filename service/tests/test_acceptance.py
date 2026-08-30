@@ -27,3 +27,12 @@ def test_coverage_reports_source_active_and_duplicate_counts() -> None:
     assert result["source_by_dataset_split"]["ICFG-PEDES"]["test"] == 1
     assert result["active_by_canonical_dataset_split"]["ICFG-PEDES"]["test"] == 0
     assert result["duplicate_aliases_by_dataset_split"]["ICFG-PEDES"]["test"] == 1
+    row = result["by_dataset_split"]["ICFG-PEDES"]["test"]
+    assert row == {
+        "source": 1,
+        "accepted": 1,
+        "duplicate": 1,
+        "skipped": 0,
+        "failed": 0,
+        "active": 0,
+    }

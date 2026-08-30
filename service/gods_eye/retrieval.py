@@ -89,9 +89,14 @@ class IndexedRetrievalEngine:
         self.text_embedder = text_embedder
 
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
-        vector = (self.text_embedder.embed_text(query) if self.text_embedder is not None
-                  else deterministic_embedding(query, self.loaded.metadata.dimension))
-        scores, rows = self.loaded.index.search(np.asarray(vector, dtype=np.float32), self.gallery_count)
+        vector = (
+            self.text_embedder.embed_text(query)
+            if self.text_embedder is not None
+            else deterministic_embedding(query, self.loaded.metadata.dimension)
+        )
+        scores, rows = self.loaded.index.search(
+            np.asarray(vector, dtype=np.float32), self.gallery_count
+        )
         selected = []
         for score, row in zip(scores, rows, strict=True):
             if int(row) < 0:
