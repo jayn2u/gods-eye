@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "sources": [
+    {
+      "name": "CUHK-PEDES",
+      "drive_id": "1ndPhowljgd6ic4QyoQR-Wl8jRrEqFzYG",
+      "filename": "CUHK-PEDES.zip",
+      "size": 296766536,
+      "sha256": "40498f0069f10b5332f329e5e39507664faa4b7b176eaaa1e0b4f6c411decbb9",
+      "wrapper": "CUHK-PEDES",
+      "metadata": "reid_raw.json"
+    },
+    {
+      "name": "ICFG-PEDES",
+      "drive_id": "1r8-nRBpV9c1zFfSWOOLMfQb_frLwKxWa",
+      "filename": "ICFG-PEDES.zip",
+      "size": 1140985834,
+      "sha256": "0e842b04371ddd85b3c5b17c605d502d2855d7ffa0e9770dc06336b9f8f11f8f",
+      "wrapper": "ICFG-PEDES",
+      "metadata": "ICFG-PEDES.json"
+    },
+    {
+      "name": "RSTPReid",
+      "drive_id": "1nTiSFALnwfBA1KXAX1nVgxb61PBgFBOt",
+      "filename": "RSTPReid.zip",
+      "size": 502352170,
+      "sha256": "711c31696d2fc2cf19e660a8d8a631c68b6240be0a1a694360c37f385dc57fa2",
+      "wrapper": null,
+      "metadata": "data_captions.json"
+    }
+  ]
+}

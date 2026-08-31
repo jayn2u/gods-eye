@@ -24,7 +24,7 @@ class ClipRuntimeConfig:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GODS_EYE_", env_file=".env", extra="ignore")
 
-    dataset_root: Path = Path("/data/datasets")
+    dataset_root: Path = Path("data/datasets")
     index_root: Path = Path("indexes")
     active_index: Path = Path("indexes/active")
     model_id: str = "openai/clip-vit-base-patch16"

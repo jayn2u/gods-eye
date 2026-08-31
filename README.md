@@ -12,10 +12,11 @@ exercises the complete API and browser flow without a model download or research
 - Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js 22 LTS, and pnpm 10
 - Docker with Compose v2 for the container workflow
 - Optional CUDA-capable GPU for practical full-gallery indexing
-- Separately obtained CUHK-PEDES, ICFG-PEDES, and RSTPReid datasets
+- Explicit acceptance of the CUHK-PEDES, ICFG-PEDES, and RSTPReid data terms
 
-Datasets are not bundled, copied into images, or redistributed. Obtain them from their official
-publishers and review their current terms. Treat person imagery as sensitive research data, do not
+Datasets are not bundled, copied into images, or redistributed. The pinned public Google Drive
+files are third-party mirrors, not proof of publisher authorization. Review the current publisher
+terms before accepting the download. Treat person imagery as sensitive research data, do not
 expose the service publicly, and comply with applicable research-only, non-commercial, and
 redistribution restrictions.
 
@@ -26,7 +27,8 @@ matching environment values.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GODS_EYE_DATASET_ROOT` | `/data/datasets` | Parent directory containing the datasets |
+| `GODS_EYE_DATA_HOME` | `./data` | Host acquisition root used by Compose tooling |
+| `GODS_EYE_DATASET_ROOT` | `./data/datasets` | Verified Dataset Installation root |
 | `GODS_EYE_INDEX_ROOT` | `indexes` | Writable index/checkpoint root |
 | `GODS_EYE_ACTIVE_INDEX` | `indexes/active` | Active-version pointer file |
 | `GODS_EYE_MODEL_ID` | `openai/clip-vit-base-patch16` | Hugging Face model identity |
@@ -76,15 +78,46 @@ For a real Compose index, run the gallery/build/activation commands through `doc
 --rm service ...` so the active pointer records container-visible `/indexes/...` paths. The service
 container ships the same `gods-eye-index` and `gods-eye-prepare-model` commands used locally.
 
-## Dataset placement and manifest
+## Dataset acquisition and manifest
+
+The explicit installer downloads the three pinned public Drive archives into the gitignored
+`data/archives/`, verifies exact size and SHA-256, safely extracts into staging, validates required
+metadata and image directories, and atomically publishes `data/datasets/<dataset>`. A verified
+Installation Receipt prevents partial extraction from being treated as installed. Archives remain
+available for repair until explicitly cleaned.
+
+```bash
+# Installs all three sources and writes indexes/gallery-manifest.json.
+uv run gods-eye-datasets install --accept-data-terms
+
+# One dataset, inspection, offline verification, and optional archive cleanup.
+uv run gods-eye-datasets install CUHK-PEDES --accept-data-terms
+uv run gods-eye-datasets status
+uv run gods-eye-datasets verify
+uv run gods-eye-datasets clean --archives
+
+# Compose-only equivalent. The normal service never gets write access to datasets.
+docker compose --profile tools run --rm dataset-installer \
+  --data-root /data --index-root /indexes install --accept-data-terms
+```
+
+Downloads use resumable `.part` files. Installation requires free space for the retained archive,
+staging tree, and final tree. Re-run `install` to resume or skip verified installations; use
+`--force` to rebuild one. CI may set `GODS_EYE_ACCEPT_DATA_TERMS=true` only after its operator has
+reviewed and accepted the terms. The installer prints the separate `gods-eye-index build` command
+when acquisition completes; it never starts model indexing or the web service.
+
+The resulting layout is:
 
 Metadata filenames vary by release; explicit `--source` values are authoritative.
 
 ```text
-$GODS_EYE_DATASET_ROOT/
+./data/datasets/
   CUHK-PEDES/{imgs,reid_raw.json}
   ICFG-PEDES/{imgs,ICFG-PEDES.json}
   RSTPReid/{imgs,data_captions.json}
+./data/install-state/
+  {CUHK-PEDES,ICFG-PEDES,RSTPReid}.receipt.json
 ```
 
 ```bash
@@ -147,6 +180,10 @@ With cached model assets, run the opt-in adapter check:
 
 ```bash
 RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=true uv run pytest -m integration
+
+# Checks that each pinned Drive file is public and still has its registered filename; no archive download.
+RUN_DATASET_SOURCE_CHECK=1 uv run pytest \
+  service/tests/test_datasets.py -m integration
 ```
 
 ## Performance measurement
