@@ -31,6 +31,8 @@ elif args[:2] == ["compose", "version"]:
     if "compose" in failures:
         raise SystemExit(1)
     print("2.32.4")
+elif "build" in args and args[-1] == "launcher":
+    raise SystemExit(0)
 elif args[:2] == ["image", "inspect"]:
     raise SystemExit(0)
 elif args[:1] == ["run"] and "gods-eye-datasets" in args:
