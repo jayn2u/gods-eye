@@ -9,6 +9,7 @@ dependencies = [
   "pillow>=11,<13",
   "numpy>=2,<3",
   "uvicorn[standard]>=0.35,<1",
+  "gdown>=5.2,<6",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,7 @@ clip = [
 gods-eye-index = "gods_eye.index_store:main"
 gods-eye-prepare-model = "gods_eye.clip:prepare_cache"
 gods-eye-acceptance = "gods_eye.acceptance:main"
+gods-eye-datasets = "gods_eye.datasets:main"
 
 [dependency-groups]
 dev = [
@@ -45,3 +47,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["service/gods_eye"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"service/gods_eye/dataset_registry.json" = "gods_eye/dataset_registry.json"

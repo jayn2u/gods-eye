@@ -2,6 +2,7 @@
 .env
 .cache
 indexes
+data
 node_modules
 web/node_modules
 web/dist

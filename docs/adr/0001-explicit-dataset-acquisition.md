@@ -1,0 +1,3 @@
+# Keep dataset acquisition explicit and verified
+
+Dataset acquisition is an explicit operator workflow, separate from service startup and retrieval indexing. Supported Google Drive sources are pinned in a version-controlled Dataset Registry; archives are resumed and integrity-checked, installations are built and validated in staging before atomic publication, and an Installation Receipt distinguishes a complete installation from partial files. This costs extra local storage and an explicit setup step, but prevents network availability, changed remote files, or interrupted extraction from silently changing service readiness or a reproducible gallery.

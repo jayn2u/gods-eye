@@ -18,7 +18,7 @@ services:
       GODS_EYE_USE_FIXTURES: ${GODS_EYE_USE_FIXTURES:-false}
       GODS_EYE_LOG_LEVEL: ${GODS_EYE_LOG_LEVEL:-INFO}
     volumes:
-      - ${GODS_EYE_DATASET_ROOT:-/data/jayn2u/lab_datasets}:/datasets:ro
+      - ${GODS_EYE_DATASET_ROOT:-./data/datasets}:/datasets:ro
       - ${GODS_EYE_INDEX_ROOT:-./indexes}:/indexes:rw
       - ${GODS_EYE_HF_CACHE:-./.cache/huggingface}:/models:rw
     ports: ["127.0.0.1:${GODS_EYE_BIND_PORT:-8000}:8000"]
@@ -27,6 +27,16 @@ services:
       interval: 10s
       timeout: 3s
       retries: 6
+  dataset-installer:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    entrypoint: ["gods-eye-datasets"]
+    command: ["--data-root", "/data", "--index-root", "/indexes", "status"]
+    volumes:
+      - ${GODS_EYE_DATA_HOME:-./data}:/data:rw
+      - ${GODS_EYE_INDEX_ROOT:-./indexes}:/indexes:rw
   web:
     build:
       context: .
