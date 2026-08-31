@@ -13,6 +13,17 @@ export GODS_EYE_DOCKER_BIN
 GODS_EYE_DOCKER_BIN=$(command -v docker)
 export GODS_EYE_HOST_COMPOSE_VERSION
 GODS_EYE_HOST_COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || true)
+export GODS_EYE_DOCKER_COMPOSE_PLUGIN
+if GODS_EYE_DOCKER_COMPOSE_PLUGIN=$(docker info --format '{{range .ClientInfo.Plugins}}{{if eq .Name "compose"}}{{.Path}}{{end}}{{end}}' 2>/dev/null); then
+    :
+else
+    printf '%s\n' "Docker daemon is unavailable; start Docker Engine, then run './gods-eye doctor' again." >&2
+    exit 2
+fi
+if [ -z "$GODS_EYE_DOCKER_COMPOSE_PLUGIN" ]; then
+    printf '%s\n' "Docker Compose plugin could not be located; install Compose v2 before running God's Eye." >&2
+    exit 2
+fi
 
 release_manifest=${GODS_EYE_RELEASE_MANIFEST:-$SCRIPT_DIR/release-images.env}
 if [ -f "$release_manifest" ]; then

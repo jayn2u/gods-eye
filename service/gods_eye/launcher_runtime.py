@@ -149,6 +149,14 @@ def start_runtime(
     api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     environment = _runtime_env(web_port, api_port, offline)
+    compose_check = _run(["docker", "compose", "version", "--short"], environment)
+    if compose_check.returncode != 0:
+        print(
+            "Docker Compose is unusable inside the Launcher environment. "
+            "Run './gods-eye doctor' for diagnostics before starting the Demo Runtime.",
+            file=sys.stderr,
+        )
+        return EXIT_PREPARATION_FAILED
     with mutation_lock(layout, "start"):
         started = _run([*compose, "up", "-d", "service", "web"], environment)
         if started.returncode != 0:

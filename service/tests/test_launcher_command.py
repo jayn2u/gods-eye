@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -21,8 +23,14 @@ from pathlib import Path
 
 args = sys.argv[1:]
 failures = set(os.getenv("GODS_EYE_FAKE_DOCKER_FAILURES", "").split(","))
+docker_log = os.getenv("GODS_EYE_FAKE_DOCKER_LOG")
+if docker_log:
+    with Path(docker_log).open("a") as stream:
+        stream.write(__import__("json").dumps(args) + "\\n")
 if args == ["--version"]:
     print("Docker version 27.5.1")
+elif args[:2] == ["info", "--format"] and "ClientInfo.Plugins" in args[2]:
+    print("/plugins/docker-compose")
 elif args[:1] == ["info"]:
     if "info" in failures:
         raise SystemExit(1)
@@ -34,7 +42,10 @@ elif args[:2] == ["compose", "version"]:
 elif "build" in args and args[-1] == "launcher":
     raise SystemExit(0)
 elif args[:2] == ["image", "inspect"]:
-    raise SystemExit(0)
+    raise SystemExit(1 if os.getenv("GODS_EYE_FAKE_SERVICE_IMAGE_MISSING") == "1" else 0)
+elif args[:1] == ["build"]:
+    print(os.getenv("GODS_EYE_FAKE_SERVICE_BUILD_ERROR", ""), file=sys.stderr)
+    raise SystemExit(int(os.getenv("GODS_EYE_FAKE_SERVICE_BUILD_EXIT", "0")))
 elif args[:1] == ["run"] and "gods-eye-datasets" in args:
     if "--skip-manifest" not in args:
         raise SystemExit(98)
@@ -197,6 +208,120 @@ def test_prepare_acquires_datasets_without_building_the_manifest(tmp_path: Path)
     assert operations[-1] == "smoke-search"
     assert "Stage 3/7" in result.stdout
     assert log.exists()
+
+
+def test_prepare_builds_from_container_project_and_mounts_host_storage(tmp_path: Path) -> None:
+    env, _ = _prepare_env(tmp_path)
+    docker_log = tmp_path / "docker-calls.jsonl"
+    host_root = ROOT
+    env.update(
+        GODS_EYE_FAKE_DOCKER_LOG=str(docker_log),
+        GODS_EYE_FAKE_SERVICE_IMAGE_MISSING="1",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--accept-data-terms"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in docker_log.read_text().splitlines()]
+    service_build = next(call for call in calls if call[:1] == ["build"])
+    container_root = Path(env["GODS_EYE_PROJECT_ROOT"])
+    assert service_build == [
+        "build",
+        "--file",
+        str(container_root / "Dockerfile.service"),
+        "--tag",
+        "gods-eye-service:local",
+        str(container_root),
+    ]
+    acquisition = next(call for call in calls if "gods-eye-datasets" in call)
+    assert f"{host_root / 'data'}:/data:rw" in acquisition
+    assert f"{host_root / 'indexes'}:/indexes:rw" in acquisition
+
+
+def test_prepare_service_build_failure_preserves_safe_diagnostic_log(tmp_path: Path) -> None:
+    env, _ = _prepare_env(tmp_path)
+    secret = "hf_private-value"
+    env.update(
+        GODS_EYE_FAKE_SERVICE_IMAGE_MISSING="1",
+        GODS_EYE_FAKE_SERVICE_BUILD_EXIT="9",
+        GODS_EYE_FAKE_SERVICE_BUILD_ERROR=f"access_token={secret} build context rejected",
+    )
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--accept-data-terms"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 4
+    assert "Log:" in result.stderr
+    logs = list((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/logs").glob("prepare-*.log"))
+    assert len(logs) == 1
+    diagnostic = logs[0].read_text()
+    assert "docker build" in diagnostic
+    assert "build context rejected" in diagnostic
+    assert "[REDACTED]" in diagnostic
+    assert secret not in diagnostic
+
+
+@pytest.mark.integration
+def test_real_launcher_builds_service_from_container_project_path() -> None:
+    if os.getenv("RUN_PREPARATION_BUILD_SMOKE") != "1":
+        pytest.skip("set RUN_PREPARATION_BUILD_SMOKE=1 to build through the Launcher container")
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+    identity = uuid.uuid4().hex
+    image = f"gods-eye-service:path-smoke-{identity}"
+    container = f"gods-eye-path-smoke-{identity}"
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--profile",
+                "tools",
+                "run",
+                "--rm",
+                "--no-deps",
+                "--name",
+                container,
+                "--entrypoint",
+                "docker",
+                "launcher",
+                "build",
+                "--file",
+                "/workspace/Dockerfile.service",
+                "--tag",
+                image,
+                "/workspace",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=600,
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container], check=False, capture_output=True, text=True
+        )
+        subprocess.run(
+            ["docker", "image", "rm", "-f", image],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
 
 def test_prepare_does_not_declare_prepared_when_real_search_smoke_fails(tmp_path: Path) -> None:
