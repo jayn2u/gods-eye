@@ -18,6 +18,9 @@ args = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as stream:
     stream.write(json.dumps(args) + '\\n')
 if args[:2] == ['compose', 'version']:
+    if os.environ.get('GODS_EYE_INSIDE_LAUNCHER') == '1' and os.environ.get('FAKE_LAUNCHER_COMPOSE') == 'unusable':
+        print('compose plugin cannot execute', file=sys.stderr)
+        raise SystemExit(1)
     print('2.32.4')
 elif args[:2] == ['info', '--format']:
     print('/plugins/docker-compose')
@@ -25,7 +28,8 @@ elif 'build' in args and args[-1] == 'launcher':
     raise SystemExit(0)
 elif 'run' in args and 'launcher' in args:
     command = args[args.index('launcher') + 1:]
-    raise SystemExit(subprocess.call([sys.executable, '-m', 'gods_eye.launcher', *command], env=os.environ))
+    child_env = {**os.environ, 'GODS_EYE_INSIDE_LAUNCHER': '1'}
+    raise SystemExit(subprocess.call([sys.executable, '-m', 'gods_eye.launcher', *command], env=child_env))
 elif 'compose' in args and 'exec' in args:
     if os.environ.get('FAKE_READY') == '1':
         print(json.dumps({'ready': True, 'gallery_count': 3}))
@@ -129,6 +133,21 @@ def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
 
     assert result.returncode == 4
     assert "./gods-eye prepare" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+
+
+def test_start_rejects_unusable_launcher_compose_before_runtime_mutation(tmp_path):
+    result, calls = _run(
+        tmp_path,
+        "start",
+        "--detach",
+        "--no-open",
+        extra_env={"FAKE_LAUNCHER_COMPOSE": "unusable"},
+    )
+
+    assert result.returncode == 4
+    assert "Compose" in result.stderr
+    assert "Launcher" in result.stderr
     assert not any("compose" in call and "up" in call for call in calls)
 
 

@@ -33,6 +33,9 @@ if args[:3] == ["compose", "version", "--short"]:
     else:
         raise SystemExit(1)
 elif args[:2] == ["info", "--format"]:
+    if os.getenv("GODS_EYE_FAKE_DAEMON_AVAILABLE", "1") != "1":
+        print("daemon unavailable", file=sys.stderr)
+        raise SystemExit(1)
     if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
         print("/plugins/docker-compose")
 elif "build" in args and args[-1] == "launcher":
@@ -124,6 +127,21 @@ def test_root_launcher_stops_when_compose_plugin_cannot_be_mounted(tmp_path: Pat
 
     assert result.returncode == 2
     assert "Compose plugin" in result.stderr
+    assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
+
+
+def test_root_launcher_reports_daemon_failure_without_claiming_compose_is_missing(
+    tmp_path: Path,
+) -> None:
+    result, calls = _run(
+        tmp_path,
+        "doctor",
+        GODS_EYE_FAKE_DAEMON_AVAILABLE="0",
+    )
+
+    assert result.returncode == 2
+    assert "Docker daemon" in result.stderr
+    assert "Compose plugin could not be located" not in result.stderr
     assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
 
 
