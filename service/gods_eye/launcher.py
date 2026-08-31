@@ -8,7 +8,8 @@ backwards compatibility with existing automation using this public seam.
 from __future__ import annotations
 
 from . import launcher_cli as _cli
-from .launcher_cli import (  # noqa: F401
+from .launcher_assets import prepare_datasets
+from .launcher_common import (  # noqa: F401
     EXIT_BUSY,
     EXIT_CONFIRMATION,
     EXIT_OK,
@@ -17,20 +18,19 @@ from .launcher_cli import (  # noqa: F401
     EXIT_PREREQUISITE,
     EXIT_TERMS_REQUIRED,
     EXIT_USAGE,
-    LauncherBusyError,
     RuntimeLayout,
-    compatibility_plan,
     current_compatibility,
-    doctor,
+)
+from .launcher_doctor import doctor, required_capacity_bytes  # noqa: F401
+from .launcher_lifecycle import (  # noqa: F401
+    LauncherBusyError,
+    compatibility_plan,
     mutation_lock,
-    prepare_datasets,
     render_busy,
-    required_capacity_bytes,
     reset_assets,
-    runtime_passthrough,
-    start_runtime,
     update_state,
 )
+from .launcher_runtime import runtime_passthrough, start_runtime  # noqa: F401
 
 
 def main(argv: list[str] | None = None) -> int:
