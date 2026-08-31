@@ -150,6 +150,9 @@ class DatasetAcquirer:
     def _archive(self, source: DatasetSource) -> Path:
         return self.archives / source.filename
 
+    def _receipt(self, source: DatasetSource) -> Path:
+        return self.state / f"{source.name}.receipt.json"
+
     def _download_and_verify(self, source: DatasetSource, archive: Path) -> None:
         if (
             archive.exists()
@@ -209,9 +212,6 @@ class DatasetAcquirer:
                 "installed_at": datetime.now(UTC).isoformat(),
                 "required_paths": list(source.required_paths),
             }
-            (staging / ".installation-receipt.json").write_text(
-                json.dumps(receipt, indent=2) + "\n"
-            )
             backup = final.with_name(final.name + ".previous")
             if backup.exists():
                 shutil.rmtree(backup)
@@ -226,6 +226,10 @@ class DatasetAcquirer:
             else:
                 if backup.exists():
                     shutil.rmtree(backup)
+            receipt_path = self._receipt(source)
+            pending_receipt = receipt_path.with_suffix(receipt_path.suffix + ".tmp")
+            pending_receipt.write_text(json.dumps(receipt, indent=2) + "\n")
+            os.replace(pending_receipt, receipt_path)
         finally:
             shutil.rmtree(staging_parent, ignore_errors=True)
 
@@ -238,7 +242,7 @@ class DatasetAcquirer:
 
     def _verify_source(self, source: DatasetSource) -> bool:
         root = self.installations / source.name
-        receipt_path = root / ".installation-receipt.json"
+        receipt_path = self._receipt(source)
         try:
             receipt: dict[str, Any] = json.loads(receipt_path.read_text())
         except (OSError, ValueError):

@@ -116,6 +116,8 @@ Metadata filenames vary by release; explicit `--source` values are authoritative
   CUHK-PEDES/{imgs,reid_raw.json}
   ICFG-PEDES/{imgs,ICFG-PEDES.json}
   RSTPReid/{imgs,data_captions.json}
+./data/install-state/
+  {CUHK-PEDES,ICFG-PEDES,RSTPReid}.receipt.json
 ```
 
 ```bash
@@ -178,6 +180,10 @@ With cached model assets, run the opt-in adapter check:
 
 ```bash
 RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=true uv run pytest -m integration
+
+# Checks that each pinned Drive file is public and still has its registered filename; no archive download.
+RUN_DATASET_SOURCE_CHECK=1 uv run pytest \
+  service/tests/test_datasets.py -m integration
 ```
 
 ## Performance measurement

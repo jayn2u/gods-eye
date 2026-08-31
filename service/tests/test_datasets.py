@@ -1,6 +1,9 @@
 import hashlib
 import io
 import json
+import os
+import re
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -63,7 +66,8 @@ def test_install_publishes_receipts_and_gallery_manifest_atomically(tmp_path: Pa
     result = acquirer.install([item.name for item in sources], accept_terms=True)
 
     assert result.installed == ["CUHK-PEDES", "RSTPReid"]
-    assert (tmp_path / "data/datasets/CUHK-PEDES/.installation-receipt.json").is_file()
+    assert (tmp_path / "data/install-state/CUHK-PEDES.receipt.json").is_file()
+    assert not (tmp_path / "data/datasets/CUHK-PEDES/.installation-receipt.json").exists()
     assert (tmp_path / "data/datasets/RSTPReid/imgs/train/person.jpg").is_file()
     manifest = json.loads((tmp_path / "indexes/gallery-manifest.json").read_text())
     assert len(manifest["records"]) == 1  # exact-byte duplicate is collapsed
@@ -121,3 +125,24 @@ def test_status_verify_and_clean_archives(tmp_path: Path) -> None:
     assert acquirer.verify(["RSTPReid"]) == {"RSTPReid": False}
     acquirer.clean_archives()
     assert not (tmp_path / "data/archives/RSTPReid.zip").exists()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_DATASET_SOURCE_CHECK") != "1",
+    reason="set RUN_DATASET_SOURCE_CHECK=1 to query the public Google Drive sources",
+)
+@pytest.mark.parametrize("dataset_source", load_registry(), ids=lambda item: item.name)
+def test_public_drive_source_is_available_with_registered_filename(
+    dataset_source: DatasetSource,
+) -> None:
+    request = urllib.request.Request(
+        f"https://drive.google.com/file/d/{dataset_source.drive_id}/view",
+        headers={"User-Agent": "gods-eye-dataset-source-check/1"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        page = response.read().decode("utf-8", errors="replace")
+
+    title = re.search(r"<title>(.*?) - Google Drive</title>", page)
+    assert title is not None
+    assert title.group(1) == dataset_source.filename
