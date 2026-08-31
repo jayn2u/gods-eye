@@ -73,6 +73,32 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
     assert "127.0.0.1" in result.stdout
 
 
+def test_fixture_preparation_command_produces_runtime_state_and_local_assets(
+    tmp_path: Path,
+) -> None:
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_PROJECT_ROOT": str(tmp_path),
+        "GODS_EYE_USE_FIXTURES": "true",
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-m", "gods_eye.launcher", "prepare", "--yes"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads((tmp_path / ".gods-eye/state.json").read_text())
+    assert state["preparation"]["gallery_manifest"]["status"] == "verified"
+    assert state["preparation"]["smoke_test"]["fixture"] is True
+    assert (tmp_path / "indexes/gallery-manifest.json").is_file()
+    assert (tmp_path / "indexes/active").is_dir()
+
+
 @pytest.mark.integration
 def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -> None:
     if os.getenv("RUN_LAUNCHER_COMPOSE_SMOKE") != "1":
@@ -80,24 +106,6 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
     if shutil.which("docker") is None:
         pytest.skip("Docker CLI is not installed")
 
-    runtime = tmp_path / ".gods-eye"
-    runtime.mkdir()
-    (runtime / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "terms_acceptance": {},
-                "compatibility": {},
-                "preparation": {
-                    "dataset_acquisition": {"status": "verified"},
-                    "model": {"status": "verified"},
-                    "gallery_manifest": {"status": "verified"},
-                    "index": {"status": "active"},
-                    "smoke_test": {"status": "verified"},
-                },
-            }
-        )
-    )
     environment = {
         **os.environ,
         "PYTHONPATH": str(ROOT / "service"),
@@ -106,7 +114,18 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
         "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "1",
         "COMPOSE_FILE": f"{ROOT / 'compose.yaml'}:{ROOT / 'compose.smoke.yaml'}",
         "COMPOSE_PROJECT_NAME": f"gods-eye-smoke-{tmp_path.name}",
+        "GODS_EYE_USE_FIXTURES": "true",
     }
+    prepare = subprocess.run(
+        [sys.executable, "-m", "gods_eye.launcher", "prepare", "--yes"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert prepare.returncode == 0, prepare.stderr
+    produced = json.loads((tmp_path / ".gods-eye/state.json").read_text())
+    assert produced["preparation"]["smoke_test"]["fixture"] is True
     start = subprocess.run(
         [
             sys.executable,

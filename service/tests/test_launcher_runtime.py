@@ -64,6 +64,21 @@ def _prepared(root: Path) -> None:
     )
 
 
+def _offline_assets(root: Path) -> None:
+    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        (root / "data/datasets" / name).mkdir(parents=True, exist_ok=True)
+        receipt = root / "data/install-state" / f"{name}.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}")
+    model = root / ".cache/huggingface/model.ready"
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_text("ok")
+    manifest = root / "indexes/gallery-manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}")
+    (root / "indexes/active").mkdir()
+
+
 def _run(root: Path, *arguments: str, prepared: bool = True, extra_env=None, input_text=None):
     if prepared:
         _prepared(root)
@@ -114,6 +129,7 @@ def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
 
 
 def test_offline_start_inherits_release_compose_files_and_adds_network_isolation(tmp_path):
+    _offline_assets(tmp_path)
     result, calls = _run(
         tmp_path,
         "start",
@@ -129,6 +145,18 @@ def test_offline_start_inherits_release_compose_files_and_adds_network_isolation
     assert "/workspace/compose.yaml" in command
     assert "/workspace/compose.release.yaml" in command
     assert "/workspace/compose.offline.yaml" in command
+
+
+def test_offline_start_reports_each_missing_local_asset_without_starting_compose(tmp_path):
+    result, calls = _run(tmp_path, "start", "--detach", "--offline", "--no-open")
+
+    assert result.returncode == 4
+    assert "Dataset Installation: CUHK-PEDES" in result.stderr
+    assert "CLIP ViT-B/16 model cache" in result.stderr
+    assert "Gallery Manifest: indexes/gallery-manifest.json" in result.stderr
+    assert "active retrieval index: indexes/active" in result.stderr
+    assert "No network access or downloads were attempted" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
 
 
 def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):

@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,34 @@ from pathlib import Path
 from .clip import DEFAULT_MODEL_ID
 
 OOM_EXIT_CODE = 75
+
+
+class PreparationProgress:
+    """Operator progress and a query-free detailed audit log for stages 4-7."""
+
+    def __init__(self, root: Path, preparation: dict):
+        self.started = time.monotonic()
+        self.preparation = preparation
+        logs = root / ".gods-eye" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        self.path = logs / f"prepare-model-index-{stamp}.log"
+
+    def stage(self, number: int, label: str, state_key: str) -> float:
+        elapsed = time.monotonic() - self.started
+        previous = self.preparation.get(state_key, {}).get("duration_seconds")
+        estimate = f"about {previous:.1f}s from the last verified run" if previous else "measuring"
+        message = f"Stage {number}/7 — {label} (elapsed {elapsed:.1f}s; estimate {estimate})"
+        print(message)
+        with self.path.open("a") as stream:
+            stream.write(message + "\n")
+        return time.monotonic()
+
+    def complete(self, state_key: str, stage_started: float, detail: str) -> float:
+        duration = time.monotonic() - stage_started
+        with self.path.open("a") as stream:
+            stream.write(f"{state_key}: verified in {duration:.1f}s; {detail}\n")
+        return duration
 
 
 class PreparationError(RuntimeError):
@@ -148,10 +177,11 @@ def prepare_model_index(
     paths = PreparationPaths(root)
     state = json.loads(state_path.read_text())
     preparation = state.setdefault("preparation", {})
+    progress = PreparationProgress(root, preparation)
     args = _arguments(paths, model_id, model_revision)
     now = lambda: datetime.now(UTC).isoformat()
 
-    print("Step 4/7 - CLIP ViT-B/16 model")
+    stage_started = progress.stage(4, "CLIP ViT-B/16 model preparation", "model")
     model_state = preparation.get("model", {})
     compatible_model = (
         model_state.get("model_id") == model_id and model_state.get("revision") == model_revision
@@ -169,10 +199,13 @@ def prepare_model_index(
             "model_id": model_id,
             "revision": model_revision,
             "completed_at": now(),
+            "duration_seconds": progress.complete("model", stage_started, "model cache verified"),
         }
         _save_state(state_path, state)
+    elif compatible_model:
+        progress.complete("model", stage_started, "compatible model cache reused")
 
-    print("Step 5/7 - Gallery Manifest")
+    stage_started = progress.stage(5, "Gallery Manifest generation", "gallery_manifest")
     manifest_state = preparation.get("gallery_manifest", {})
     manifest_compatible = manifest_state.get("path") == str(paths.manifest)
     if manifest_compatible:
@@ -189,10 +222,15 @@ def prepare_model_index(
             "schema_version": 1,
             "path": str(paths.manifest),
             "completed_at": now(),
+            "duration_seconds": progress.complete(
+                "gallery_manifest", stage_started, "manifest records verified"
+            ),
         }
         _save_state(state_path, state)
+    elif manifest_compatible:
+        progress.complete("gallery_manifest", stage_started, "compatible manifest reused")
 
-    print("Step 6/7 - GPU index build, validation, and activation")
+    stage_started = progress.stage(6, "GPU index build and atomic activation", "index")
     index_state = preparation.get("index", {})
     index_compatible = (
         index_state.get("model_id") == model_id
@@ -255,10 +293,15 @@ def prepare_model_index(
             "batch_size": batch_size,
             "gallery_manifest_completed_at": preparation["gallery_manifest"]["completed_at"],
             "completed_at": now(),
+            "duration_seconds": progress.complete(
+                "index", stage_started, f"active index verified with batch size {batch_size}"
+            ),
         }
         _save_state(state_path, state)
+    elif index_compatible:
+        progress.complete("index", stage_started, "compatible active index reused")
 
-    print("Step 7/7 - Model load, active index, and real-search smoke test")
+    stage_started = progress.stage(7, "real-search smoke test", "smoke_test")
     adapter.run("smoke-search", *args["smoke"])
     preparation["smoke_test"] = {
         "status": "verified",
@@ -266,5 +309,9 @@ def prepare_model_index(
         "model_revision": model_revision,
         "index_completed_at": preparation["index"]["completed_at"],
         "completed_at": now(),
+        "duration_seconds": progress.complete(
+            "smoke_test", stage_started, "model load, active index, and search verified"
+        ),
     }
     _save_state(state_path, state)
+    print(f"Detailed preparation log: {progress.path}")

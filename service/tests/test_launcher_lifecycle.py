@@ -158,7 +158,7 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
         "preparation": {
             "dataset_acquisition": {"status": "verified"},
             "model": {"status": "verified"},
-            "manifest": {"status": "verified"},
+            "gallery_manifest": {"status": "verified"},
             "index": {"status": "verified"},
             "smoke_test": {"status": "verified"},
         },
@@ -177,7 +177,7 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
     assert preview.returncode == 0
     preview_report = json.loads(preview.stdout)
     assert preview_report["status"] == "planned"
-    assert preview_report["invalidate"] == ["manifest", "index", "smoke_test"]
+    assert preview_report["invalidate"] == ["gallery_manifest", "index", "smoke_test"]
     assert applied.returncode == 0
     preparation = json.loads((runtime / "state.json").read_text())["preparation"]
     assert set(preparation) == {"dataset_acquisition", "model"}

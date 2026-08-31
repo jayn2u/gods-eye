@@ -438,9 +438,12 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
     )
 
     assert first.returncode == 0, first.stderr
-    assert "Step 4/7 - CLIP ViT-B/16 model" in first.stdout
-    assert "Step 5/7 - Gallery Manifest" in first.stdout
-    assert "Step 6/7 - GPU index build, validation, and activation" in first.stdout
+    assert "Stage 4/7 — CLIP ViT-B/16 model preparation (elapsed" in first.stdout
+    assert "Stage 5/7 — Gallery Manifest generation (elapsed" in first.stdout
+    assert "Stage 6/7 — GPU index build and atomic activation (elapsed" in first.stdout
+    assert "Stage 7/7 — real-search smoke test (elapsed" in first.stdout
+    assert "estimate measuring" in first.stdout
+    assert "Detailed preparation log:" in first.stdout
     assert second.returncode == 0, second.stderr
     assert second.stdout.count("reused (verified)") == 3
     calls = [json.loads(line) for line in call_log.read_text().splitlines()]
@@ -463,6 +466,11 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
     assert state["preparation"]["model"]["model_id"] == "openai/clip-vit-base-patch16"
     assert state["preparation"]["gallery_manifest"]["status"] == "verified"
     assert state["preparation"]["index"]["status"] == "active"
+    detailed_logs = list(
+        (Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/logs").glob("prepare-model-index-*.log")
+    )
+    assert len(detailed_logs) == 2
+    assert "raw natural-language" not in detailed_logs[0].read_text()
 
 
 def test_prepare_halves_batch_after_gpu_oom_and_reuses_checkpoint(tmp_path: Path) -> None:
