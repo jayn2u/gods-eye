@@ -1,0 +1,6 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY service/gods_eye/__init__.py service/gods_eye/launcher.py service/gods_eye/dataset_registry.json ./gods_eye/
+
+ENTRYPOINT ["python", "-m", "gods_eye.launcher"]

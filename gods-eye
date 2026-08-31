@@ -1,0 +1,17 @@
+#!/bin/sh
+
+set -eu
+
+if ! command -v docker >/dev/null 2>&1; then
+    printf '%s\n' "God's Eye requires Docker Engine. Install Docker, then run './gods-eye doctor' again." >&2
+    exit 2
+fi
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export GODS_EYE_HOST_PROJECT_ROOT="$SCRIPT_DIR"
+export GODS_EYE_DOCKER_BIN
+GODS_EYE_DOCKER_BIN=$(command -v docker)
+export GODS_EYE_HOST_COMPOSE_VERSION
+GODS_EYE_HOST_COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || true)
+
+exec docker compose --project-directory "$SCRIPT_DIR" --profile tools run --rm launcher "$@"

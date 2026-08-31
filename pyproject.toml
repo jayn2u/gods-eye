@@ -24,6 +24,7 @@ gods-eye-index = "gods_eye.index_store:main"
 gods-eye-prepare-model = "gods_eye.clip:prepare_cache"
 gods-eye-acceptance = "gods_eye.acceptance:main"
 gods-eye-datasets = "gods_eye.datasets:main"
+gods-eye-launcher = "gods_eye.launcher:main"
 
 [dependency-groups]
 dev = [
