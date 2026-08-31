@@ -14,4 +14,33 @@ GODS_EYE_DOCKER_BIN=$(command -v docker)
 export GODS_EYE_HOST_COMPOSE_VERSION
 GODS_EYE_HOST_COMPOSE_VERSION=$(docker compose version --short 2>/dev/null || true)
 
+release_manifest=${GODS_EYE_RELEASE_MANIFEST:-$SCRIPT_DIR/release-images.env}
+if [ -f "$release_manifest" ]; then
+    release_version=$(sed -n 's/^GODS_EYE_RELEASE_VERSION=//p' "$release_manifest" | head -n 1)
+    service_image=$(sed -n 's/^GODS_EYE_SERVICE_IMAGE=//p' "$release_manifest" | head -n 1)
+    web_image=$(sed -n 's/^GODS_EYE_WEB_IMAGE=//p' "$release_manifest" | head -n 1)
+    if ! printf '%s\n' "$release_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        || ! printf '%s\n' "$service_image" | grep -Eq "^ghcr\.io/jayn2u/gods-eye-service@sha256:[0-9a-f]{64}$" \
+        || ! printf '%s\n' "$web_image" | grep -Eq "^ghcr\.io/jayn2u/gods-eye-web@sha256:[0-9a-f]{64}$"; then
+        printf '%s\n' "release-images.env contains an invalid immutable image reference." >&2
+        exit 65
+    fi
+    export GODS_EYE_IMAGE_MODE=release
+    export GODS_EYE_RELEASE_VERSION="$release_version"
+    export GODS_EYE_SERVICE_IMAGE="$service_image"
+    export GODS_EYE_WEB_IMAGE="$web_image"
+    export GODS_EYE_COMPOSE_FILE=compose.yaml:compose.release.yaml
+    printf 'Using immutable release images for %s.\n' "$release_version" >&2
+    exec docker compose \
+        --project-directory "$SCRIPT_DIR" \
+        -f "$SCRIPT_DIR/compose.yaml" \
+        -f "$SCRIPT_DIR/compose.release.yaml" \
+        --profile tools run --rm launcher "$@"
+fi
+
+export GODS_EYE_IMAGE_MODE=local
+export GODS_EYE_COMPOSE_FILE=compose.yaml
+export GODS_EYE_SERVICE_IMAGE=gods-eye-service:local
+export GODS_EYE_WEB_IMAGE=gods-eye-web:local
+printf '%s\n' "Building service and web images from local source." >&2
 exec docker compose --project-directory "$SCRIPT_DIR" --profile tools run --rm launcher "$@"
