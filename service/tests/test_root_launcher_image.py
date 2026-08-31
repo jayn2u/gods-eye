@@ -98,35 +98,42 @@ def test_real_docker_replaces_isolated_stale_launcher_image(tmp_path: Path) -> N
         pytest.skip("Docker CLI is not installed")
 
     image = f"gods-eye-launcher:stale-test-{uuid.uuid4().hex}"
-    subprocess.run(
-        [
-            "docker",
-            "compose",
-            "--project-directory",
-            str(ROOT),
-            "--profile",
-            "tools",
-            "build",
-            "launcher",
-        ],
-        cwd=ROOT,
-        env={**os.environ, "GODS_EYE_LAUNCHER_IMAGE": image},
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    dockerfile = tmp_path / "Dockerfile"
-    dockerfile.write_text(
-        f"FROM {image}\n"
-        "RUN printf '%s\\n' 'import argparse' 'p=argparse.ArgumentParser()' "
-        '\'p.add_subparsers(dest="command", required=True).add_parser("doctor")\' '
-        "'p.parse_args()' > /stale.py\n"
-        'ENTRYPOINT ["python", "/stale.py"]\n'
-    )
-    subprocess.run(
-        ["docker", "build", "-t", image, str(tmp_path)], check=True, capture_output=True, text=True
-    )
+    _run_real_docker_stale_image_smoke(tmp_path, image)
+
+
+def _run_real_docker_stale_image_smoke(tmp_path: Path, image: str) -> None:
     try:
+        subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--project-directory",
+                str(ROOT),
+                "--profile",
+                "tools",
+                "build",
+                "launcher",
+            ],
+            cwd=ROOT,
+            env={**os.environ, "GODS_EYE_LAUNCHER_IMAGE": image},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        dockerfile = tmp_path / "Dockerfile"
+        dockerfile.write_text(
+            f"FROM {image}\n"
+            "RUN printf '%s\\n' 'import argparse' 'p=argparse.ArgumentParser()' "
+            '\'p.add_subparsers(dest="command", required=True).add_parser("doctor")\' '
+            "'p.parse_args()' > /stale.py\n"
+            'ENTRYPOINT ["python", "/stale.py"]\n'
+        )
+        subprocess.run(
+            ["docker", "build", "-t", image, str(tmp_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         stale = subprocess.run(
             ["docker", "run", "--rm", image, "prepare", "--help"],
             check=False,
@@ -149,3 +156,23 @@ def test_real_docker_replaces_isolated_stale_launcher_image(tmp_path: Path) -> N
             assert "invalid choice" not in result.stderr
     finally:
         subprocess.run(["docker", "image", "rm", "-f", image], check=False, capture_output=True)
+
+
+def test_real_docker_smoke_cleans_image_when_initial_build_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image = "gods-eye-launcher:stale-test-setup-failure"
+    calls: list[list[str]] = []
+
+    def fail_then_clean(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if len(calls) == 1:
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", fail_then_clean)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _run_real_docker_stale_image_smoke(tmp_path, image)
+
+    assert calls[-1] == ["docker", "image", "rm", "-f", image]
