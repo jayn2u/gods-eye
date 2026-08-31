@@ -49,7 +49,11 @@ def test_development_checkout_clearly_selects_local_builds(tmp_path: Path) -> No
     result = _run_launcher(tmp_path)
 
     assert result.returncode == 0
-    assert "Building service and web images from local source" in result.stderr
+    assert "Preparing the local Launcher image from the current checkout" in result.stderr
+    assert " build launcher" in result.docker_log  # type: ignore[attr-defined]
+    assert result.docker_log.index(" build launcher") < result.docker_log.index(
+        " run --rm launcher"
+    )  # type: ignore[attr-defined]
     assert "mode=local" in result.docker_log  # type: ignore[attr-defined]
     assert "compose_file=/workspace/compose.yaml" in result.docker_log  # type: ignore[attr-defined]
     assert "compose.release.yaml" not in result.docker_log  # type: ignore[attr-defined]
@@ -74,6 +78,7 @@ def test_release_manifest_selects_only_digest_pinned_images(tmp_path: Path) -> N
     assert f"service=ghcr.io/jayn2u/gods-eye-service@sha256:{service_digest}" in result.docker_log  # type: ignore[attr-defined]
     assert f"web=ghcr.io/jayn2u/gods-eye-web@sha256:{web_digest}" in result.docker_log  # type: ignore[attr-defined]
     assert "compose.release.yaml" in result.docker_log  # type: ignore[attr-defined]
+    assert " build launcher" not in result.docker_log  # type: ignore[attr-defined]
 
 
 def test_release_manifest_rejects_mutable_or_untrusted_images(tmp_path: Path) -> None:

@@ -20,6 +20,8 @@ import sys
 args = sys.argv[1:]
 if args[:2] == ["compose", "version"]:
     print("2.32.4")
+elif "build" in args and args[-1] == "launcher":
+    raise SystemExit(0)
 elif "run" in args and "launcher" in args:
     command = args[args.index("launcher") + 1 :]
     raise SystemExit(subprocess.call(
