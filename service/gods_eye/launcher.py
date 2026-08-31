@@ -12,6 +12,7 @@ from pathlib import Path
 EXIT_OK = 0
 EXIT_PREREQUISITE = 2
 EXIT_USAGE = 64
+EXIT_PREPARATION = 1
 STATE_SCHEMA_VERSION = 1
 MINIMUM_VRAM_MIB = 8 * 1024
 MODEL_RESERVE_BYTES = 2 * 1024**3
@@ -226,6 +227,16 @@ def doctor(layout: RuntimeLayout) -> list[Check]:
     return checks
 
 
+def _preparation_vram_mib() -> int:
+    override = os.getenv("GODS_EYE_GPU_VRAM_MIB")
+    if override is not None:
+        return int(override)
+    check = _check_gpu()[2]
+    if check.status != "pass":
+        raise ValueError(check.detail)
+    return int(check.detail.split()[0])
+
+
 def _print_human(checks: list[Check]) -> None:
     print("God's Eye Full Demo doctor")
     print("STATUS  CHECK               DETAILS")
@@ -240,9 +251,27 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor_parser = subparsers.add_parser("doctor")
     doctor_parser.add_argument("--json", action="store_true")
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--batch-size", type=int)
     args = parser.parse_args(argv)
     root = Path(os.getenv("GODS_EYE_PROJECT_ROOT", "/workspace"))
-    checks = doctor(RuntimeLayout(root))
+    layout = RuntimeLayout(root)
+    if args.command == "prepare":
+        from .preparation import PreparationError, prepare_model_index
+
+        layout.initialize()
+        try:
+            prepare_model_index(
+                root,
+                layout.state_path,
+                vram_mib=_preparation_vram_mib(),
+                batch_override=args.batch_size,
+            )
+        except (PreparationError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return EXIT_PREPARATION
+        return EXIT_OK
+    checks = doctor(layout)
     failed = any(check.status == "fail" for check in checks)
     if args.json:
         print(

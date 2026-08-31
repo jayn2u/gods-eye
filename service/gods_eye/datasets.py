@@ -119,7 +119,7 @@ class DatasetAcquirer:
             self._download_and_verify(source, archive)
             self._extract_and_publish(source, archive)
             installed.append(source.name)
-        manifest_path = self._write_manifest()
+        manifest_path = self.write_manifest()
         return InstallResult(installed, skipped, manifest_path)
 
     def status(self) -> dict[str, str]:
@@ -253,7 +253,8 @@ class DatasetAcquirer:
             and all((root / item).exists() for item in source.required_paths)
         )
 
-    def _write_manifest(self) -> Path:
+    def write_manifest(self) -> Path:
+        """Publish a Gallery Manifest from every verified Dataset Installation."""
         sources: dict[Dataset, tuple[Path, Path]] = {}
         for source in self.sources.values():
             if self._verify_source(source):
