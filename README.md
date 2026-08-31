@@ -1,213 +1,96 @@
 # God’s Eye
 
-**Text-to-Image Person Retrieval** is a desktop-first research proof of concept. It ranks gallery
-images against an English description with CLIP ViT-B/16. A deterministic three-image fixture mode
-exercises the complete API and browser flow without a model download or research datasets.
+God’s Eye is a desktop-first research demo for finding person images from an English description.
+The Full Demo ranks the CUHK-PEDES, ICFG-PEDES, and RSTPReid galleries with CLIP ViT-B/16.
 
-> Research use only. This is visual similarity retrieval, not identity verification. A similarity
-> score is not a probability or evidence that two people have the same identity.
+> **Research use only.** This is visual-similarity retrieval, not identity verification. Scores are
+> neither probabilities nor evidence of identity. Do not use the app for identification,
+> surveillance, automated decisions, or safety-critical work.
 
-## Prerequisites and data terms
+## Requirements
 
-- Python 3.11, [uv](https://docs.astral.sh/uv/), Node.js 22 LTS, and pnpm 10
-- Docker with Compose v2 for the container workflow
-- Optional CUDA-capable GPU for practical full-gallery indexing
-- Explicit acceptance of the CUHK-PEDES, ICFG-PEDES, and RSTPReid data terms
+The supported Full Demo environment is:
 
-Datasets are not bundled, copied into images, or redistributed. The pinned public Google Drive
-files are third-party mirrors, not proof of publisher authorization. Review the current publisher
-terms before accepting the download. Treat person imagery as sensitive research data, do not
-expose the service publicly, and comply with applicable research-only, non-commercial, and
-redistribution restrictions.
+- Ubuntu/Linux on `amd64`
+- Docker Engine with Compose v2
+- an NVIDIA GPU with at least 8 GiB VRAM, a compatible driver, and NVIDIA Container Toolkit
+- enough project-disk space for three retained archives, extracted images, the model cache, index,
+  and a safety reserve; `doctor` calculates the current requirement
 
-## Configuration
+You do **not** need host Python, Node.js, `uv`, or `pnpm`. The Launcher checks every prerequisite
+without changing the host. The API and web app bind only to `127.0.0.1`.
 
-Copy `.env.example` to `.env` and edit machine-specific paths. Command-line indexer options override
-matching environment values.
+The datasets are sensitive third-party research data and are not bundled or redistributed. The
+configured Google Drive files are mirrors, not proof of publisher authorization. Before download,
+`prepare` shows the official sources and terms, mirror locations, sizes, restrictions, and an
+explicit acceptance prompt. Confirm that your use complies with the current publisher terms.
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `GODS_EYE_DATA_HOME` | `./data` | Host acquisition root used by Compose tooling |
-| `GODS_EYE_DATASET_ROOT` | `./data/datasets` | Verified Dataset Installation root |
-| `GODS_EYE_INDEX_ROOT` | `indexes` | Writable index/checkpoint root |
-| `GODS_EYE_ACTIVE_INDEX` | `indexes/active` | Active-version pointer file |
-| `GODS_EYE_MODEL_ID` | `openai/clip-vit-base-patch16` | Hugging Face model identity |
-| `GODS_EYE_MODEL_REVISION` | unset | Optional immutable Hub revision |
-| `GODS_EYE_HF_CACHE` | HF default | Prepared model cache |
-| `GODS_EYE_OFFLINE` | `false` | Refuse model network access |
-| `GODS_EYE_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or CUDA device |
-| `GODS_EYE_BATCH_SIZE` | `32` | Image embedding batch size |
-| `GODS_EYE_BIND_HOST` | `127.0.0.1` | Service bind address |
-| `GODS_EYE_BIND_PORT` | `8000` | Service port |
-| `GODS_EYE_USE_FIXTURES` | `false` | Use packaged deterministic gallery |
-| `GODS_EYE_LOG_LEVEL` | `INFO` | Operational log level |
+## Quickstart
 
-Loopback is the safe default. A non-loopback `GODS_EYE_BIND_HOST` is an explicit operator decision
-and does not add authentication or TLS. Compose publishes only on host loopback while explicitly
-binding `0.0.0.0` inside the service container.
-
-## Local development
+From the repository root, run:
 
 ```bash
-uv sync --extra indexing --extra clip
-pnpm install --frozen-lockfile
-GODS_EYE_USE_FIXTURES=true uv run uvicorn gods_eye.app:app --app-dir service \
-  --host "${GODS_EYE_BIND_HOST:-127.0.0.1}" --port "${GODS_EYE_BIND_PORT:-8000}" --reload
-pnpm dev:web
+./gods-eye doctor
+./gods-eye prepare
+./gods-eye start
 ```
 
-Run the last two commands separately and open `http://127.0.0.1:5173`. API docs are at
-`http://127.0.0.1:8000/docs`, OpenAPI at `/openapi.json`, liveness at `/api/health`, and search
-readiness at `/api/readiness`. A live process may correctly be unready until an index is activated.
+`prepare` is the long, one-time step. It asks you to accept the data terms and safely resumes after
+an interruption. `start` waits for both API health and search readiness, then opens the actual
+loopback URL (normally `http://127.0.0.1:5173`). Press `Ctrl+C` to stop the containers; prepared
+datasets, model files, and indexes remain on disk.
 
-## Docker Compose
-
-Set host paths in `.env`, then run `docker compose config`, `docker compose up --build`, and check:
+For unattended preparation, confirmation and data acceptance remain separate:
 
 ```bash
-curl http://127.0.0.1:8000/api/health
-curl http://127.0.0.1:8000/api/readiness
+./gods-eye prepare --yes --accept-data-terms
 ```
 
-Compose mounts the dataset root at `/datasets` **read-only**, the independent index root at
-`/indexes` read-write, and model cache at `/models`. Images are excluded from build contexts and
-layers. Set `GODS_EYE_USE_FIXTURES=true` for a packaged smoke demo. `docker compose down` preserves
-host indexes and cache.
+## What preparation does
 
-For a real Compose index, run the gallery/build/activation commands through `docker compose run
---rm service ...` so the active pointer records container-visible `/indexes/...` paths. The service
-container ships the same `gods-eye-index` and `gods-eye-prepare-model` commands used locally.
+`./gods-eye prepare` verifies and resumes seven stages: preflight, terms acknowledgement, Dataset
+Acquisition, CLIP model preparation, Gallery Manifest generation, GPU index build and atomic
+activation, and a real-search smoke test. It records compatible completed stages and detailed logs
+under the gitignored `.gods-eye/` directory. It does not report the Full Demo as prepared unless the
+final search succeeds.
 
-## Dataset acquisition and manifest
+Development checkouts build the service and web images from local source. Tagged releases can use
+the repository's immutable `release-images.env`; the Launcher always reports which mode it chose.
+Datasets, model files, and indexes are never stored in images.
 
-The explicit installer downloads the three pinned public Drive archives into the gitignored
-`data/archives/`, verifies exact size and SHA-256, safely extracts into staging, validates required
-metadata and image directories, and atomically publishes `data/datasets/<dataset>`. A verified
-Installation Receipt prevents partial extraction from being treated as installed. Archives remain
-available for repair until explicitly cleaned.
-
-```bash
-# Installs all three sources and writes indexes/gallery-manifest.json.
-uv run gods-eye-datasets install --accept-data-terms
-
-# One dataset, inspection, offline verification, and optional archive cleanup.
-uv run gods-eye-datasets install CUHK-PEDES --accept-data-terms
-uv run gods-eye-datasets status
-uv run gods-eye-datasets verify
-uv run gods-eye-datasets clean --archives
-
-# Compose-only equivalent. The normal service never gets write access to datasets.
-docker compose --profile tools run --rm dataset-installer \
-  --data-root /data --index-root /indexes install --accept-data-terms
-```
-
-Downloads use resumable `.part` files. Installation requires free space for the retained archive,
-staging tree, and final tree. Re-run `install` to resume or skip verified installations; use
-`--force` to rebuild one. CI may set `GODS_EYE_ACCEPT_DATA_TERMS=true` only after its operator has
-reviewed and accepted the terms. The installer prints the separate `gods-eye-index build` command
-when acquisition completes; it never starts model indexing or the web service.
-
-The resulting layout is:
-
-Metadata filenames vary by release; explicit `--source` values are authoritative.
+## Launcher commands
 
 ```text
-./data/datasets/
-  CUHK-PEDES/{imgs,reid_raw.json}
-  ICFG-PEDES/{imgs,ICFG-PEDES.json}
-  RSTPReid/{imgs,data_captions.json}
-./data/install-state/
-  {CUHK-PEDES,ICFG-PEDES,RSTPReid}.receipt.json
+./gods-eye doctor                         Check every supported-environment prerequisite
+./gods-eye prepare [--batch-size N]       Prepare or resume the real Full Demo
+./gods-eye start [--detach] [--no-open]   Start after readiness succeeds
+./gods-eye start --offline                Refuse model/network fallback while starting
+./gods-eye status                         Show runtime containers
+./gods-eye logs                           Show recent runtime logs
+./gods-eye stop                           Stop containers and preserve prepared assets
+./gods-eye update                         Preview asset compatibility changes
+./gods-eye reset TARGET                   Preview and confirm explicit asset removal
 ```
 
-```bash
-uv run python -m gods_eye.gallery \
-  --source CUHK-PEDES="$GODS_EYE_DATASET_ROOT/CUHK-PEDES/imgs=$GODS_EYE_DATASET_ROOT/CUHK-PEDES/reid_raw.json" \
-  --source ICFG-PEDES="$GODS_EYE_DATASET_ROOT/ICFG-PEDES/imgs=$GODS_EYE_DATASET_ROOT/ICFG-PEDES/ICFG-PEDES.json" \
-  --source RSTPReid="$GODS_EYE_DATASET_ROOT/RSTPReid/imgs=$GODS_EYE_DATASET_ROOT/RSTPReid/data_captions.json" \
-  --output "$GODS_EYE_INDEX_ROOT/gallery-manifest.json"
-```
+Reset targets are `--index`, `--model-cache`, `--installed-datasets`, `--archives`, or `--all`.
+With no target, `reset` removes nothing. State-changing commands reject concurrent mutations.
 
-The builder validates paths/images, normalizes `val` to `validation`, creates stable public IDs,
-and collapses only byte-identical files. API data never exposes captions or absolute host paths.
+## Recovery
 
-## Model preparation, indexing, resume, validation, activation
+- If `doctor` fails, apply every item in its combined **Fix** report, then rerun it.
+- If preparation stops, rerun `./gods-eye prepare`; verified downloads and checkpoints are reused.
+- If `start` says the demo is incomplete, run `./gods-eye prepare`. It never downloads data or
+  accepts terms silently.
+- If readiness fails, run `./gods-eye logs`. Model/revision mismatch and missing offline assets need
+  a new compatible preparation.
+- If CUDA runs out of memory, preparation halves its conservative batch size and retries. You can
+  also choose a smaller positive value with `--batch-size`.
+- If ports 5173 or 8000 are occupied, the Launcher selects free loopback ports and prints the URL.
 
-Prepare a dedicated cache once while online:
+## Detailed setup and development
 
-```bash
-uv run gods-eye-prepare-model --model-id "$GODS_EYE_MODEL_ID" \
-  --cache-dir "$GODS_EYE_HF_CACHE" --device cpu
-```
-
-Build the index. Completed batches are checkpointed and reused when model, revision, manifest, and
-batch size match. Unreadable images are categorized in `coverage.json`.
-
-```bash
-uv run gods-eye-index build --manifest "$GODS_EYE_INDEX_ROOT/gallery-manifest.json" \
-  --versions-dir "$GODS_EYE_INDEX_ROOT/versions" --model-id "$GODS_EYE_MODEL_ID" \
-  --device auto --batch-size 32 --cache-dir "$GODS_EYE_HF_CACHE"
-
-# Repeat the same build command to resume after interruption.
-uv run python -c "from pathlib import Path; from gods_eye.index_store import validate_version; validate_version(Path('VERSION_DIRECTORY'))"
-uv run gods-eye-index activate --version VERSION_DIRECTORY \
-  --active-pointer "$GODS_EYE_ACTIVE_INDEX" --model-id "$GODS_EYE_MODEL_ID"
-```
-
-Activation validates artifacts before atomically changing the pointer. For a disconnected demo,
-prepare model and index online, then set `GODS_EYE_OFFLINE=true` (optionally `HF_HUB_OFFLINE=1`).
-The indexer also supports explicit `--offline`. Missing assets fail with preparation guidance.
-
-## API, logging, and tests
-
-`POST /api/search` accepts an English `query`, `top_k` 1–100, and a non-empty dataset subset. See
-Swagger for schemas. Images are served only through validated manifest IDs. Operational logs are
-one-line JSON with duration, top-K, selected datasets, versions, counts, and error category. **Raw
-query text is never logged.** Reverse proxies and third-party telemetry need their own review.
-
-Fixture-backed checks need no dataset or model download:
-
-```bash
-uv run pytest
-uv run ruff check service
-pnpm test:web
-pnpm build:web
-pnpm test:e2e
-GODS_EYE_USE_FIXTURES=true docker compose config
-```
-
-With cached model assets, run the opt-in adapter check:
-
-```bash
-RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=true uv run pytest -m integration
-
-# Checks that each pinned Drive file is public and still has its registered filename; no archive download.
-RUN_DATASET_SOURCE_CHECK=1 uv run pytest \
-  service/tests/test_datasets.py -m integration
-```
-
-## Performance measurement
-
-After warm-up, record hardware, device, model/revision, gallery count, query count, median, p95, and
-maximum local `POST /api/search` latency without recording queries. The target is under three seconds
-on the measured system, not a universal SLA. If missed, separately measure text embedding, exact
-search, image I/O, and rendering. The combined gallery is a demo, not a benchmark split.
-
-For a reproducible coverage, artifact-validation, ranked-result, and latency JSON record, run
-`gods-eye-acceptance` after building the manifest and validated index. The observed local acceptance
-run and exact commands are documented in [docs/full-gallery-validation.md](docs/full-gallery-validation.md).
-
-## Troubleshooting and limitations
-
-- **Not ready:** build and activate an index; in Compose its pointer target must be valid in
-  `/indexes`.
-- **Model mismatch:** use identical model ID/revision for build, activation, and service.
-- **Offline cache error:** prepare the identical model/revision/cache while online.
-- **CUDA unavailable/OOM:** use CPU or reduce batch size, then resume.
-- **Unreadable images:** inspect `coverage.json`, correct source data, and rebuild a new version.
-- **API unreachable:** use the Vite proxy/Compose web service; non-loopback operation requires
-  deliberate origin, authentication, TLS, and network controls outside this PoC.
-- General CLIP is not person-ReID-specialized. Bias, dataset shift, and false matches are expected.
-  Never use results for identification, surveillance, automated decisions, or safety-critical use.
-- No authentication, accounts, saved queries, shortlist, or case management is provided. This MVP
-  is for one local research workstation.
+- [Full Demo lifecycle and storage](docs/setup/full-demo.md)
+- [Local development and tests](docs/setup/local-development.md)
+- [Dataset Acquisition and Gallery Manifest](docs/setup/datasets.md)
+- [Model preparation and index management](docs/setup/model-and-index.md)
+- [Offline operation, validation, and limitations](docs/setup/offline-and-validation.md)

@@ -1,6 +1,7 @@
 .git
 .env
 .cache
+.gods-eye
 indexes
 data
 node_modules

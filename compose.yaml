@@ -1,5 +1,6 @@
 services:
   service:
+    image: ${GODS_EYE_SERVICE_IMAGE:-gods-eye-service:local}
     build:
       context: .
       dockerfile: Dockerfile.service
@@ -37,9 +38,31 @@ services:
     volumes:
       - ${GODS_EYE_DATA_HOME:-./data}:/data:rw
       - ${GODS_EYE_INDEX_ROOT:-./indexes}:/indexes:rw
+  launcher:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: Dockerfile.launcher
+    image: ${GODS_EYE_LAUNCHER_IMAGE:-gods-eye-launcher:local}
+    environment:
+      GODS_EYE_PROJECT_ROOT: /workspace
+      GODS_EYE_HOST_PROJECT_ROOT: ${GODS_EYE_HOST_PROJECT_ROOT:-.}
+      GODS_EYE_LAUNCHER_IMAGE: ${GODS_EYE_LAUNCHER_IMAGE:-gods-eye-launcher:local}
+      GODS_EYE_HOST_COMPOSE_VERSION: ${GODS_EYE_HOST_COMPOSE_VERSION:-}
+      GODS_EYE_IMAGE_MODE: ${GODS_EYE_IMAGE_MODE:-local}
+      GODS_EYE_RELEASE_VERSION: ${GODS_EYE_RELEASE_VERSION:-development}
+      GODS_EYE_SERVICE_IMAGE: ${GODS_EYE_SERVICE_IMAGE:-gods-eye-service:local}
+      GODS_EYE_WEB_IMAGE: ${GODS_EYE_WEB_IMAGE:-gods-eye-web:local}
+      COMPOSE_FILE: ${GODS_EYE_COMPOSE_FILE:-/workspace/compose.yaml}
+    network_mode: host
+    volumes:
+      - ${GODS_EYE_HOST_PROJECT_ROOT:-.}:/workspace:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${GODS_EYE_DOCKER_BIN:-/usr/bin/docker}:/usr/local/bin/docker:ro
   web:
+    image: ${GODS_EYE_WEB_IMAGE:-gods-eye-web:local}
     build:
       context: .
       dockerfile: Dockerfile.web
     depends_on: [service]
-    ports: ["127.0.0.1:5173:80"]
+    ports: ["127.0.0.1:${GODS_EYE_WEB_PORT:-5173}:80"]

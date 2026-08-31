@@ -1,0 +1,10 @@
+services:
+  service:
+    environment:
+      GODS_EYE_OFFLINE: "true"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+
+networks:
+  default:
+    internal: true

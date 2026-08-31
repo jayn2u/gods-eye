@@ -1,0 +1,7 @@
+services:
+  service:
+    build: !reset null
+    pull_policy: missing
+  web:
+    build: !reset null
+    pull_policy: missing
