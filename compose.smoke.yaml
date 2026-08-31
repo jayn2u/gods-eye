@@ -1,0 +1,19 @@
+# Test-only override: exercises the real service/web containers without datasets,
+# Hugging Face downloads, or GPU access.
+services:
+  service:
+    build:
+      context: ${GODS_EYE_SOURCE_ROOT:-.}
+      dockerfile: Dockerfile.service
+    environment:
+      GODS_EYE_USE_FIXTURES: "true"
+      GODS_EYE_DEVICE: cpu
+      GODS_EYE_OFFLINE: "true"
+    volumes:
+      - ${GODS_EYE_SMOKE_DATA_ROOT:-./data/datasets}:/datasets:ro
+      - ${GODS_EYE_SMOKE_INDEX_ROOT:-./indexes}:/indexes:rw
+      - ${GODS_EYE_SMOKE_MODEL_ROOT:-./.cache/huggingface}:/models:rw
+  web:
+    build:
+      context: ${GODS_EYE_SOURCE_ROOT:-.}
+      dockerfile: Dockerfile.web
