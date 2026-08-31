@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[2]
 
 
@@ -15,6 +17,7 @@ def _fake_docker(bin_dir: Path) -> None:
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 args = sys.argv[1:]
 failures = set(os.getenv("GODS_EYE_FAKE_DOCKER_FAILURES", "").split(","))
@@ -28,6 +31,23 @@ elif args[:2] == ["compose", "version"]:
     if "compose" in failures:
         raise SystemExit(1)
     print("2.32.4")
+elif args[:2] == ["image", "inspect"]:
+    raise SystemExit(0)
+elif args[:1] == ["run"] and "gods-eye-datasets" in args:
+    if "--skip-manifest" not in args:
+        raise SystemExit(98)
+    project = Path(os.environ["GODS_EYE_PROJECT_ROOT"])
+    marker = project / ".fake-installer-interrupted"
+    part = project / "data/archives/CUHK-PEDES.zip.part"
+    if os.getenv("GODS_EYE_FAKE_INSTALLER_INTERRUPT_ONCE") == "1" and not marker.exists():
+        marker.write_text("interrupted")
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"resumable")
+        raise SystemExit(130)
+    if part.exists():
+        part.unlink()
+    print(os.getenv("GODS_EYE_FAKE_INSTALLER_OUTPUT", ""))
+    raise SystemExit(int(os.getenv("GODS_EYE_FAKE_INSTALLER_EXIT", "0")))
 elif args[:1] == ["run"]:
     if "gpu" in failures:
         raise SystemExit(1)
@@ -124,8 +144,99 @@ def _prepare_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "GODS_EYE_PREPARATION_RUNNER": str(runner),
         "GODS_EYE_FAKE_PREPARE_LOG": str(log),
         "GODS_EYE_GPU_VRAM_MIB": "24564",
+        "GODS_EYE_DOCTOR_SYSTEM": "Linux",
+        "GODS_EYE_DOCTOR_MACHINE": "x86_64",
+        "GODS_EYE_DOCTOR_FREE_BYTES": str(40 * 1024**3),
+        "GODS_EYE_DOCTOR_PORTS_AVAILABLE": "1",
     }
     return env, log
+
+
+def test_prepare_requires_separate_dataset_terms_acceptance(tmp_path: Path) -> None:
+    env, log = _prepare_env(tmp_path)
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 3
+    assert "official source" in result.stdout.lower()
+    assert "mirror" in result.stdout.lower()
+    assert "sensitive" in result.stdout.lower()
+    assert "--accept-data-terms" in result.stderr
+    assert not log.exists()
+
+
+def test_prepare_acquires_datasets_without_building_the_manifest(tmp_path: Path) -> None:
+    env, log = _prepare_env(tmp_path)
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--accept-data-terms"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/state.json").read_text())
+    assert state["preparation"]["dataset_acquisition"]["status"] == "verified"
+    assert state["preparation"]["gallery_manifest"]["status"] == "verified"
+    assert "Stage 3/7" in result.stdout
+    assert log.exists()
+
+
+def test_cancelled_dataset_acquisition_resumes_with_saved_acceptance(tmp_path: Path) -> None:
+    env, _ = _prepare_env(tmp_path)
+    env["GODS_EYE_FAKE_INSTALLER_INTERRUPT_ONCE"] = "1"
+
+    interrupted = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--accept-data-terms"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert interrupted.returncode == 130
+    project = Path(env["GODS_EYE_PROJECT_ROOT"])
+    assert (project / "data/archives/CUHK-PEDES.zip.part").read_bytes() == b"resumable"
+
+    resumed = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert "Using dataset terms acceptance" in resumed.stdout
+    assert not (project / "data/archives/CUHK-PEDES.zip.part").exists()
+
+
+def test_prepare_does_not_run_downstream_without_verified_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gods_eye import launcher
+
+    project = tmp_path / "project"
+    project.mkdir()
+    runner_log = tmp_path / "runner.log"
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("GODS_EYE_FAKE_PREPARE_LOG", str(runner_log))
+    monkeypatch.setattr(launcher, "prepare_datasets", lambda *args, **kwargs: launcher.EXIT_OK)
+
+    result = launcher.main(["prepare", "--yes", "--accept-data-terms"])
+
+    assert result == launcher.EXIT_PREPARATION_FAILED
+    assert not runner_log.exists()
 
 
 def test_operator_can_verify_a_supported_workstation_as_json(tmp_path: Path) -> None:
@@ -283,7 +394,7 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
     env, call_log = _prepare_env(tmp_path)
 
     first = subprocess.run(
-        [str(ROOT / "gods-eye"), "prepare"],
+        [str(ROOT / "gods-eye"), "prepare", "--accept-data-terms"],
         cwd=ROOT,
         env=env,
         text=True,
@@ -332,7 +443,13 @@ def test_prepare_halves_batch_after_gpu_oom_and_reuses_checkpoint(tmp_path: Path
     env["GODS_EYE_FAKE_PREPARE_PLAN"] = str(plan)
 
     result = subprocess.run(
-        [str(ROOT / "gods-eye"), "prepare", "--batch-size", "64"],
+        [
+            str(ROOT / "gods-eye"),
+            "prepare",
+            "--batch-size",
+            "64",
+            "--accept-data-terms",
+        ],
         cwd=ROOT,
         env=env,
         text=True,
@@ -358,7 +475,7 @@ def test_prepare_reports_terminal_index_failure_without_activation(tmp_path: Pat
     env["GODS_EYE_FAKE_PREPARE_PLAN"] = str(plan)
 
     result = subprocess.run(
-        [str(ROOT / "gods-eye"), "prepare"],
+        [str(ROOT / "gods-eye"), "prepare", "--accept-data-terms"],
         cwd=ROOT,
         env=env,
         text=True,

@@ -30,6 +30,9 @@ class DatasetSource:
     sha256: str
     wrapper: str | None
     metadata: str
+    official_source: str | None = None
+    terms_url: str | None = None
+    usage_restrictions: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.sha256) != 64 or any(
@@ -46,7 +49,7 @@ class DatasetSource:
 class InstallResult:
     installed: list[str]
     skipped: list[str]
-    manifest: Path
+    manifest: Path | None
 
 
 Downloader = Callable[[DatasetSource, Path], None]
@@ -93,7 +96,12 @@ class DatasetAcquirer:
         self.state = data_root / "install-state"
 
     def install(
-        self, names: Iterable[str] | None = None, *, accept_terms: bool = False, force: bool = False
+        self,
+        names: Iterable[str] | None = None,
+        *,
+        accept_terms: bool = False,
+        force: bool = False,
+        build_gallery_manifest: bool = True,
     ) -> InstallResult:
         if not accept_terms:
             raise DatasetAcquisitionError("Pass --accept-data-terms to acknowledge dataset terms")
@@ -119,7 +127,7 @@ class DatasetAcquirer:
             self._download_and_verify(source, archive)
             self._extract_and_publish(source, archive)
             installed.append(source.name)
-        manifest_path = self.write_manifest()
+        manifest_path = self.write_manifest() if build_gallery_manifest else None
         return InstallResult(installed, skipped, manifest_path)
 
     def status(self) -> dict[str, str]:
@@ -282,6 +290,7 @@ def main(argv: list[str] | None = None) -> None:
     install.add_argument("datasets", nargs="*")
     install.add_argument("--accept-data-terms", action="store_true")
     install.add_argument("--force", action="store_true")
+    install.add_argument("--skip-manifest", action="store_true")
     verify = commands.add_parser("verify")
     verify.add_argument("datasets", nargs="*")
     commands.add_parser("status")
@@ -291,7 +300,12 @@ def main(argv: list[str] | None = None) -> None:
     manager = _manager(args)
     if args.command == "install":
         accepted = args.accept_data_terms or os.getenv("GODS_EYE_ACCEPT_DATA_TERMS") == "true"
-        result = manager.install(args.datasets, accept_terms=accepted, force=args.force)
+        result = manager.install(
+            args.datasets,
+            accept_terms=accepted,
+            force=args.force,
+            build_gallery_manifest=not args.skip_manifest,
+        )
         print(json.dumps(asdict(result), default=str, indent=2))
         print(f"Next: gods-eye-index build --manifest {result.manifest} ...")
     elif args.command == "verify":

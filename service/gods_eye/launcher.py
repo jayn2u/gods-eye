@@ -1,13 +1,16 @@
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -16,6 +19,8 @@ from pathlib import Path
 EXIT_OK = 0
 EXIT_PREREQUISITE = 2
 EXIT_CONFIRMATION = 3
+EXIT_TERMS_REQUIRED = 3
+EXIT_PREPARATION_FAILED = 4
 EXIT_USAGE = 64
 EXIT_PREPARATION = 1
 EXIT_BUSY = 75
@@ -241,9 +246,22 @@ def _check_gpu() -> tuple[Check, Check, Check]:
 
 
 def required_capacity_bytes() -> int:
-    registry = json.loads(Path(__file__).with_name("dataset_registry.json").read_text())
+    registry = _registry()
     archive_bytes = sum(source["size"] for source in registry["sources"])
     return archive_bytes * 3 + MODEL_RESERVE_BYTES + INDEX_RESERVE_BYTES + SAFETY_RESERVE_BYTES
+
+
+def _registry() -> dict[str, object]:
+    return json.loads(Path(__file__).with_name("dataset_registry.json").read_text())
+
+
+def _source_fingerprints(registry: dict[str, object]) -> dict[str, str]:
+    return {
+        source["name"]: hashlib.sha256(
+            json.dumps(source, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        for source in registry["sources"]
+    }
 
 
 def _check_storage(layout: RuntimeLayout) -> tuple[Check, Check]:
@@ -455,6 +473,149 @@ def update_state(layout: RuntimeLayout, *, apply: bool, as_json: bool) -> int:
     return EXIT_OK
 
 
+def _print_dataset_terms(registry: dict[str, object]) -> None:
+    print("Dataset terms acknowledgement")
+    for source in registry["sources"]:
+        print(f"- {source['name']} ({source['size'] / 1024**3:.2f} GiB)")
+        print(f"  Official source: {source['official_source']}")
+        print(f"  Terms/license: {source['terms_url']}")
+        print(f"  Mirror: Google Drive file {source['drive_id']}")
+        print(f"  Restriction: {source['usage_restrictions']}")
+    print(
+        "Sensitive-data warning: these person-image research datasets may contain "
+        "identifiable people."
+    )
+
+
+def _stage(number: int, label: str, started: float, estimate: str) -> None:
+    elapsed = time.monotonic() - started
+    print(f"Stage {number}/7 — {label} (elapsed {elapsed:.1f}s; estimated {estimate})")
+
+
+def _safe_log_output(value: str) -> str:
+    value = re.sub(
+        r"(?i)(token|access_token|api_key)=([^\s&]+)",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        value,
+    )
+    return re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", value)
+
+
+def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_yes: bool) -> int:
+    """Acquire and verify Dataset Sources. Caller owns the Launcher mutation lock."""
+    started = time.monotonic()
+    _stage(1, "Preflight and storage calculation", started, "under 1 minute")
+    print(f"Calculated storage requirement: {required_capacity_bytes()} bytes")
+    checks = doctor(layout)
+    if any(check.status == "fail" for check in checks):
+        _print_human(checks)
+        return EXIT_PREREQUISITE
+
+    registry = _registry()
+    _stage(2, "Dataset terms acknowledgement", started, "operator decision")
+    _print_dataset_terms(registry)
+    state = layout.read_state()
+    expected_acceptance = {
+        "registry_version": registry["schema_version"],
+        "source_fingerprints": _source_fingerprints(registry),
+    }
+    saved_acceptance = state.get("terms_acceptance") or {}
+    acceptance_is_compatible = all(
+        saved_acceptance.get(key) == value for key, value in expected_acceptance.items()
+    )
+    if saved_acceptance and not acceptance_is_compatible:
+        state["preparation"].pop("dataset_acquisition", None)
+        layout.write_state(state)
+    if acceptance_is_compatible:
+        accept_data_terms = True
+        print("Using dataset terms acceptance for the unchanged Dataset Registry sources.")
+    if not accept_data_terms and not assume_yes and sys.stdin.isatty():
+        accept_data_terms = (
+            input("Type 'yes' to accept the displayed dataset terms: ").strip().lower() == "yes"
+        )
+    if not accept_data_terms:
+        print(
+            "Dataset terms require explicit acceptance; rerun with --accept-data-terms.",
+            file=sys.stderr,
+        )
+        return EXIT_TERMS_REQUIRED
+    if not acceptance_is_compatible:
+        state["terms_acceptance"] = {
+            "accepted_at": _utc_now(),
+            **expected_acceptance,
+        }
+        layout.write_state(state)
+
+    _stage(3, "Dataset Acquisition", started, "depends on network throughput")
+    state["preparation"].pop("dataset_acquisition", None)
+    layout.write_state(state)
+    host_root = Path(os.getenv("GODS_EYE_HOST_PROJECT_ROOT", str(layout.root)))
+    service_image = os.getenv("GODS_EYE_SERVICE_IMAGE", "gods-eye-service:local")
+    if _run("docker", "image", "inspect", service_image).returncode != 0:
+        build = _run(
+            "docker",
+            "build",
+            "--file",
+            str(host_root / "Dockerfile.service"),
+            "--tag",
+            service_image,
+            str(host_root),
+        )
+        if build.returncode != 0:
+            print(
+                "Could not build the local service image for Dataset Acquisition.", file=sys.stderr
+            )
+            return EXIT_PREPARATION_FAILED
+    result = _run(
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "gods-eye-datasets",
+        "--volume",
+        f"{host_root / 'data'}:/data:rw",
+        "--volume",
+        f"{host_root / 'indexes'}:/indexes:rw",
+        service_image,
+        "--data-root",
+        "/data",
+        "--index-root",
+        "/indexes",
+        "install",
+        "--accept-data-terms",
+        "--skip-manifest",
+    )
+    log_path = (
+        layout.logs_dir / f"prepare-{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ')}.log"
+    )
+    log_path.write_text(
+        "Stage 3/7 — Dataset Acquisition\n"
+        + _safe_log_output(result.stdout)
+        + _safe_log_output(result.stderr)
+        + (
+            "Dataset Acquisition completed\n"
+            if result.returncode == 0
+            else "Dataset Acquisition interrupted\n"
+        )
+    )
+    if result.returncode != 0:
+        print(
+            f"Dataset Acquisition did not complete; rerun prepare to resume. Log: {log_path}",
+            file=sys.stderr,
+        )
+        return result.returncode if result.returncode > 0 else EXIT_PREPARATION_FAILED
+    state = layout.read_state()
+    state["preparation"]["dataset_acquisition"] = {
+        "status": "verified",
+        "registry_version": registry["schema_version"],
+        "selected_sources": [source["name"] for source in registry["sources"]],
+        "completed_at": _utc_now(),
+    }
+    layout.write_state(state)
+    print(f"Dataset Acquisition completed. Detailed log: {log_path}")
+    return EXIT_OK
+
+
 def _print_human(checks: list[Check]) -> None:
     print("God's Eye Full Demo doctor")
     print("STATUS  CHECK               DETAILS")
@@ -471,6 +632,8 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--json", action="store_true")
     prepare_parser = subparsers.add_parser("prepare")
     prepare_parser.add_argument("--batch-size", type=int)
+    prepare_parser.add_argument("--yes", action="store_true")
+    prepare_parser.add_argument("--accept-data-terms", action="store_true")
     reset_parser = subparsers.add_parser("reset")
     reset_parser.add_argument("--index", action="store_true")
     reset_parser.add_argument("--model-cache", action="store_true")
@@ -490,6 +653,22 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             with mutation_lock(layout, "prepare"):
+                result = prepare_datasets(
+                    layout,
+                    accept_data_terms=args.accept_data_terms,
+                    assume_yes=args.yes,
+                )
+                if result != EXIT_OK:
+                    return result
+                acquisition = (
+                    layout.read_state().get("preparation", {}).get("dataset_acquisition", {})
+                )
+                if acquisition.get("status") != "verified":
+                    print(
+                        "Dataset Acquisition must be verified before model and index preparation.",
+                        file=sys.stderr,
+                    )
+                    return EXIT_PREPARATION_FAILED
                 prepare_model_index(
                     root,
                     layout.state_path,
