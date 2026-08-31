@@ -54,16 +54,16 @@ def _check_docker() -> tuple[Check, Check]:
         daemon.stdout.strip() if daemon_ok else "Docker daemon is unavailable",
         None if daemon_ok else "Start Docker Engine and ensure your user can access it.",
     )
-    compose_version = os.getenv("GODS_EYE_HOST_COMPOSE_VERSION")
-    if compose_version is None:
-        compose = run("docker", "compose", "version", "--short")
-        compose_version = compose.stdout.strip() if compose.returncode == 0 else ""
+    compose = run("docker", "compose", "version", "--short")
+    compose_version = compose.stdout.strip() if compose.returncode == 0 else ""
     compose_ok = bool(compose_version)
     return daemon_check, Check(
         "compose",
         "pass" if compose_ok else "fail",
         compose_version if compose_ok else "Docker Compose v2 is unavailable",
-        None if compose_ok else "Install the Docker Compose v2 plugin.",
+        None
+        if compose_ok
+        else "Make the Docker Compose v2 plugin available inside the Launcher environment.",
     )
 
 

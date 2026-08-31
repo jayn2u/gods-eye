@@ -28,7 +28,13 @@ log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
 with log.open("a") as stream:
     stream.write(" ".join(args) + "\\n")
 if args[:3] == ["compose", "version", "--short"]:
-    print("2.32.4")
+    if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
+        print("2.32.4")
+    else:
+        raise SystemExit(1)
+elif args[:2] == ["info", "--format"]:
+    if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
+        print("/plugins/docker-compose")
 elif "build" in args and args[-1] == "launcher":
     raise SystemExit(int(os.getenv("GODS_EYE_FAKE_BUILD_EXIT", "0")))
 elif "run" in args and "launcher" in args:
@@ -73,7 +79,11 @@ def test_local_root_command_builds_launcher_before_preserving_help(
     result, calls = _run(tmp_path, command, "--help")
 
     assert result.returncode == 0, result.stderr
-    command_calls = [call for call in calls if call != "compose version --short"]
+    command_calls = [
+        call
+        for call in calls
+        if call != "compose version --short" and not call.startswith("info --format")
+    ]
     assert command_calls[0].endswith("--profile tools build launcher")
     assert command_calls[1].endswith(f"--profile tools run --rm launcher {command} --help")
     assert "Preparing the local Launcher image from the current checkout." in result.stderr
@@ -84,10 +94,37 @@ def test_local_launcher_build_failure_never_runs_cached_image(tmp_path: Path) ->
     result, calls = _run(tmp_path, "prepare", "--help", GODS_EYE_FAKE_BUILD_EXIT="42")
 
     assert result.returncode == 42
-    command_calls = [call for call in calls if call != "compose version --short"]
+    command_calls = [
+        call
+        for call in calls
+        if call != "compose version --short" and not call.startswith("info --format")
+    ]
     assert len(command_calls) == 1
     assert command_calls[0].endswith("--profile tools build launcher")
     assert "Could not build the local Launcher image" in result.stderr
+
+
+def test_root_launcher_mounts_the_active_compose_plugin_before_running(tmp_path: Path) -> None:
+    result, calls = _run(tmp_path, "prepare", "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert any(call.startswith("info --format") for call in calls)
+    build = next(call for call in calls if call.endswith("--profile tools build launcher"))
+    run = next(call for call in calls if "--profile tools run --rm launcher" in call)
+    assert calls.index(build) < calls.index(run)
+
+
+def test_root_launcher_stops_when_compose_plugin_cannot_be_mounted(tmp_path: Path) -> None:
+    result, calls = _run(
+        tmp_path,
+        "prepare",
+        "--help",
+        GODS_EYE_FAKE_COMPOSE_AVAILABLE="0",
+    )
+
+    assert result.returncode == 2
+    assert "Compose plugin" in result.stderr
+    assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
 
 
 @pytest.mark.integration
@@ -176,3 +213,24 @@ def test_real_docker_smoke_cleans_image_when_initial_build_fails(
         _run_real_docker_stale_image_smoke(tmp_path, image)
 
     assert calls[-1] == ["docker", "image", "rm", "-f", image]
+
+
+@pytest.mark.integration
+def test_real_root_doctor_uses_compose_inside_launcher() -> None:
+    if os.getenv("RUN_LAUNCHER_COMPOSE_SMOKE") != "1":
+        pytest.skip("set RUN_LAUNCHER_COMPOSE_SMOKE=1 to exercise Launcher Compose mounting")
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "doctor", "--json"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    checks = __import__("json").loads(result.stdout)["checks"]
+    compose = next(check for check in checks if check["name"] == "compose")
+    assert compose["status"] == "pass"

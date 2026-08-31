@@ -17,6 +17,7 @@ def _fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         '"${GODS_EYE_WEB_IMAGE:-}" "${GODS_EYE_COMPOSE_FILE:-}" '
         '"$*" >> "$GODS_EYE_FAKE_DOCKER_LOG"\n'
         'if [ "$1 $2 $3" = "compose version --short" ]; then printf "2.32.4\\n"; fi\n'
+        'if [ "$1" = "info" ]; then printf "/usr/libexec/docker/cli-plugins/docker-compose\\n"; fi\n'
     )
     docker.chmod(0o755)
     return bin_dir, log

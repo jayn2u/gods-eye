@@ -59,6 +59,7 @@ services:
       - ${GODS_EYE_HOST_PROJECT_ROOT:-.}:/workspace:rw
       - /var/run/docker.sock:/var/run/docker.sock
       - ${GODS_EYE_DOCKER_BIN:-/usr/bin/docker}:/usr/local/bin/docker:ro
+      - ${GODS_EYE_DOCKER_COMPOSE_PLUGIN:-/usr/libexec/docker/cli-plugins/docker-compose}:/usr/local/lib/docker/cli-plugins/docker-compose:ro
   web:
     image: ${GODS_EYE_WEB_IMAGE:-gods-eye-web:local}
     build:

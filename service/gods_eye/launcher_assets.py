@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,10 @@ def _safe_log_output(value: str) -> str:
     return re.sub(r"(?i)Bearer\s+\S+", "Bearer [REDACTED]", value)
 
 
+def _preparation_log_path(layout: RuntimeLayout) -> Path:
+    return layout.logs_dir / f"prepare-{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ')}.log"
+
+
 def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_yes: bool) -> int:
     started = time.monotonic()
     _stage(1, "Preflight and storage calculation", started, "under 1 minute")
@@ -103,20 +108,31 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
     state["preparation"].pop("dataset_acquisition", None)
     layout.write_state(state)
     host_root = Path(os.getenv("GODS_EYE_HOST_PROJECT_ROOT", str(layout.root)))
+    build_root = layout.root
     service_image = os.getenv("GODS_EYE_SERVICE_IMAGE", "gods-eye-service:local")
     if run("docker", "image", "inspect", service_image).returncode != 0:
-        build = run(
+        build_command = (
             "docker",
             "build",
             "--file",
-            str(host_root / "Dockerfile.service"),
+            str(build_root / "Dockerfile.service"),
             "--tag",
             service_image,
-            str(host_root),
+            str(build_root),
         )
+        build = run(*build_command)
         if build.returncode != 0:
+            log_path = _preparation_log_path(layout)
+            log_path.write_text(
+                "Stage 3/7 — Dataset Acquisition service image build\n"
+                + f"Command: {_safe_log_output(shlex.join(build_command))}\n"
+                + _safe_log_output(build.stdout)
+                + _safe_log_output(build.stderr)
+                + f"Service image build failed with exit code {build.returncode}\n"
+            )
             print(
-                "Could not build the local service image for Dataset Acquisition.", file=sys.stderr
+                f"Could not build the local service image for Dataset Acquisition. Log: {log_path}",
+                file=sys.stderr,
             )
             return EXIT_PREPARATION_FAILED
     result = run(
@@ -138,9 +154,7 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
         "--accept-data-terms",
         "--skip-manifest",
     )
-    log_path = (
-        layout.logs_dir / f"prepare-{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%S%fZ')}.log"
-    )
+    log_path = _preparation_log_path(layout)
     log_path.write_text(
         "Stage 3/7 — Dataset Acquisition\n"
         + _safe_log_output(result.stdout)

@@ -19,6 +19,8 @@ with open(os.environ['FAKE_DOCKER_LOG'], 'a') as stream:
     stream.write(json.dumps(args) + '\\n')
 if args[:2] == ['compose', 'version']:
     print('2.32.4')
+elif args[:2] == ['info', '--format']:
+    print('/plugins/docker-compose')
 elif 'build' in args and args[-1] == 'launcher':
     raise SystemExit(0)
 elif 'run' in args and 'launcher' in args:
