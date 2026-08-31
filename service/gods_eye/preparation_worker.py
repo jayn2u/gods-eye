@@ -9,7 +9,9 @@ from .config import ClipRuntimeConfig
 from .datasets import DatasetAcquirer, load_registry
 from .gallery import GalleryManifest
 from .index_store import activate_version, build_index, load_active, validate_version
+from .models import SUPPORTED_DATASETS
 from .preparation import OOM_EXIT_CODE
+from .retrieval import IndexedRetrievalEngine
 
 
 def _model(args: argparse.Namespace, *, offline: bool) -> None:
@@ -52,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
     verify_index.add_argument("active", type=Path)
     verify_index.add_argument("--model-id", required=True)
     verify_index.add_argument("--revision")
+    smoke = commands.add_parser("smoke-search")
+    smoke.add_argument("active", type=Path)
+    smoke.add_argument("--model-id", required=True)
+    smoke.add_argument("--revision")
+    smoke.add_argument("--cache-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare-model":
@@ -90,8 +97,19 @@ def main(argv: list[str] | None = None) -> int:
                     args.version, args.active_pointer, args.model_id
                 ).metadata.version_id
             )
-        else:
+        elif args.operation == "verify-index":
             print(load_active(args.active, args.model_id, args.revision).metadata.version_id)
+        else:
+            loaded = load_active(args.active, args.model_id, args.revision)
+            embedder = HuggingFaceClipEmbedder.from_config(
+                ClipRuntimeConfig(args.model_id, args.revision, "cuda", True, args.cache_dir)
+            )
+            results = IndexedRetrievalEngine(loaded, embedder).search(
+                "a person wearing dark clothing", 1, list(SUPPORTED_DATASETS)
+            )
+            if not results:
+                raise RuntimeError("real-search smoke test returned no results")
+            print(f"ok:{loaded.metadata.version_id}:{len(results)}")
     except RuntimeError as exc:
         if "out of memory" in str(exc).lower():
             print(str(exc), file=sys.stderr)

@@ -111,11 +111,13 @@ elif operation == "activate-index":
     path = root / "indexes/active"
 elif operation == "verify-index":
     path = Path(args[1])
+elif operation == "smoke-search":
+    path = Path(args[1])
 else:
     raise SystemExit(64)
 if operation == "build-index":
     path.mkdir(parents=True, exist_ok=True)
-elif operation in {"validate-index", "verify-index", "verify-model", "verify-manifest"}:
+elif operation in {"validate-index", "verify-index", "verify-model", "verify-manifest", "smoke-search"}:
     if not path.exists():
         raise SystemExit(1)
 else:
@@ -188,8 +190,33 @@ def test_prepare_acquires_datasets_without_building_the_manifest(tmp_path: Path)
     state = json.loads((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/state.json").read_text())
     assert state["preparation"]["dataset_acquisition"]["status"] == "verified"
     assert state["preparation"]["gallery_manifest"]["status"] == "verified"
+    assert state["preparation"]["smoke_test"]["status"] == "verified"
+    operations = [json.loads(line)[0] for line in log.read_text().splitlines()]
+    assert operations[-1] == "smoke-search"
     assert "Stage 3/7" in result.stdout
     assert log.exists()
+
+
+def test_prepare_does_not_declare_prepared_when_real_search_smoke_fails(tmp_path: Path) -> None:
+    env, log = _prepare_env(tmp_path)
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"smoke-search": ["fail"]}))
+    env["GODS_EYE_FAKE_PREPARE_PLAN"] = str(plan)
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--accept-data-terms"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    state = json.loads((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/state.json").read_text())
+    assert result.returncode == 1
+    assert "smoke" in result.stderr.lower() or "adapter failure" in result.stderr.lower()
+    assert "smoke_test" not in state["preparation"]
+    assert json.loads(log.read_text().splitlines()[-1])[0] == "smoke-search"
 
 
 def test_cancelled_dataset_acquisition_resumes_with_saved_acceptance(tmp_path: Path) -> None:
@@ -426,9 +453,11 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
         "build-index",
         "validate-index",
         "activate-index",
+        "smoke-search",
         "verify-model",
         "verify-manifest",
         "verify-index",
+        "smoke-search",
     ]
     state = json.loads((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/state.json").read_text())
     assert state["preparation"]["model"]["model_id"] == "openai/clip-vit-base-patch16"

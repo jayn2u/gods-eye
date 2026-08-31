@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -29,6 +30,13 @@ MINIMUM_VRAM_MIB = 8 * 1024
 MODEL_RESERVE_BYTES = 2 * 1024**3
 INDEX_RESERVE_BYTES = 2 * 1024**3
 SAFETY_RESERVE_BYTES = 2 * 1024**3
+PREPARED_STAGES = {
+    "dataset_acquisition": "verified",
+    "model": "verified",
+    "gallery_manifest": "verified",
+    "index": "active",
+    "smoke_test": "verified",
+}
 
 
 @dataclass(frozen=True)
@@ -93,6 +101,188 @@ class LauncherArgumentParser(argparse.ArgumentParser):
 
 def _run(*command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False)
+
+
+def _compose_command(layout: RuntimeLayout, *, offline: bool = False) -> list[str]:
+    files = os.getenv("COMPOSE_FILE", os.getenv("GODS_EYE_COMPOSE_FILE", "/workspace/compose.yaml"))
+    compose_files = [item for item in files.split(os.pathsep) if item]
+    if offline and "/workspace/compose.offline.yaml" not in compose_files:
+        compose_files.append("/workspace/compose.offline.yaml")
+    command = ["docker", "compose", "--project-directory", str(layout.root)]
+    for compose_file in compose_files:
+        command.extend(("-f", compose_file))
+    return command
+
+
+def _prepared_missing(layout: RuntimeLayout) -> list[str]:
+    preparation = layout.read_state().get("preparation", {})
+    return [
+        stage
+        for stage, expected in PREPARED_STAGES.items()
+        if preparation.get(stage, {}).get("status") != expected
+    ]
+
+
+def _available_port(preferred: int, *, exclude: set[int] | None = None) -> int:
+    excluded = exclude or set()
+    while preferred in excluded:
+        preferred += 1
+    if os.getenv("GODS_EYE_RUNTIME_PORTS_AVAILABLE") == "1":
+        return preferred
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("127.0.0.1", preferred))
+        return preferred
+    except OSError:
+        probe.close()
+        fallback = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            fallback.bind(("127.0.0.1", 0))
+            selected = int(fallback.getsockname()[1])
+            if selected in excluded:
+                return _available_port(preferred + 1, exclude=excluded)
+            return selected
+        finally:
+            fallback.close()
+    finally:
+        probe.close()
+
+
+def _runtime_env(web_port: int, api_port: int, offline: bool) -> dict[str, str]:
+    return {
+        **os.environ,
+        "GODS_EYE_WEB_PORT": str(web_port),
+        "GODS_EYE_BIND_PORT": str(api_port),
+        "GODS_EYE_OFFLINE": "true" if offline else "false",
+        "HF_HUB_OFFLINE": "1" if offline else os.getenv("HF_HUB_OFFLINE", "0"),
+        "TRANSFORMERS_OFFLINE": "1" if offline else os.getenv("TRANSFORMERS_OFFLINE", "0"),
+    }
+
+
+def _run_with_env(
+    command: list[str], environment: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
+
+
+def _wait_for_readiness(
+    command: list[str], environment: dict[str, str], timeout_seconds: float
+) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout_seconds
+    detail = "search readiness did not respond"
+    check = [
+        *command,
+        "exec",
+        "-T",
+        "service",
+        "python",
+        "-c",
+        (
+            "import json,urllib.request; "
+            "health=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health')); "
+            "ready=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/readiness')); "
+            "assert health.get('status') == 'ok' and ready.get('ready'); print(json.dumps(ready))"
+        ),
+    ]
+    while True:
+        result = _run_with_env(check, environment)
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        detail = result.stderr.strip() or result.stdout.strip() or detail
+        if time.monotonic() >= deadline:
+            return False, detail
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+
+
+def _can_open_browser(no_open: bool) -> bool:
+    if no_open or os.getenv("SSH_CONNECTION") or os.getenv("SSH_TTY"):
+        return False
+    return bool(os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY"))
+
+
+def start_runtime(
+    layout: RuntimeLayout,
+    *,
+    detach: bool,
+    offline: bool,
+    no_open: bool,
+    web_port: int,
+    api_port: int,
+) -> int:
+    missing = _prepared_missing(layout)
+    if missing:
+        print(
+            "Full Demo is not prepared; missing: " + ", ".join(missing) + ".",
+            file=sys.stderr,
+        )
+        print("Run './gods-eye prepare'. No downloads were started.", file=sys.stderr)
+        return EXIT_PREPARATION_FAILED
+    web_port = _available_port(web_port)
+    api_port = _available_port(api_port, exclude={web_port})
+    compose = _compose_command(layout, offline=offline)
+    environment = _runtime_env(web_port, api_port, offline)
+    with mutation_lock(layout, "start"):
+        started = _run_with_env([*compose, "up", "-d", "service", "web"], environment)
+        if started.returncode != 0:
+            print(started.stderr.strip() or "Could not start the Demo Runtime.", file=sys.stderr)
+            return EXIT_PREPARATION_FAILED
+        timeout = float(os.getenv("GODS_EYE_READINESS_TIMEOUT_SECONDS", "120"))
+        ready, detail = _wait_for_readiness(compose, environment, timeout)
+        if not ready:
+            _run_with_env([*compose, "down"], environment)
+            print(
+                f"Health/search readiness failed: {detail}. Run './gods-eye logs' for diagnostics.",
+                file=sys.stderr,
+            )
+            return EXIT_PREPARATION_FAILED
+        url = f"http://127.0.0.1:{web_port}"
+        print(f"God's Eye Full Demo is ready: {url}")
+        if _can_open_browser(no_open):
+            opener = shlex.split(os.getenv("GODS_EYE_BROWSER_OPEN_COMMAND", "xdg-open"))
+            try:
+                subprocess.Popen(
+                    [*opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            except OSError as error:
+                print(f"Could not open a browser automatically: {error}. Open {url} manually.")
+        _write_operation_log(layout, "start", {"web_port": web_port, "offline": offline})
+        if detach:
+            return EXIT_OK
+        print("Press Ctrl+C to stop the Demo Runtime.")
+        try:
+            subprocess.run([*compose, "logs", "--follow"], env=environment, check=False)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            _run_with_env([*compose, "down"], environment)
+    return EXIT_OK
+
+
+def offer_preparation(layout: RuntimeLayout) -> int | None:
+    missing = _prepared_missing(layout)
+    if not missing or not sys.stdin.isatty():
+        return None
+    print("Full Demo preparation is incomplete: " + ", ".join(missing) + ".")
+    answer = input("Run './gods-eye prepare' now? [y/N] ").strip().lower()
+    if answer not in {"y", "yes"}:
+        return EXIT_PREPARATION_FAILED
+    result = main(["prepare"])
+    return None if result == EXIT_OK else result
+
+
+def runtime_passthrough(layout: RuntimeLayout, command: str) -> int:
+    compose = _compose_command(layout)
+    if command == "stop":
+        result = _run_with_env([*compose, "down"], os.environ.copy())
+    elif command == "logs":
+        result = _run_with_env([*compose, "logs", "--tail", "200"], os.environ.copy())
+    else:
+        result = _run_with_env([*compose, "ps", "--format", "json"], os.environ.copy())
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.returncode != 0 and result.stderr:
+        print(result.stderr.strip(), file=sys.stderr)
+    return result.returncode
 
 
 def _utc_now() -> str:
@@ -634,6 +824,15 @@ def main(argv: list[str] | None = None) -> int:
     prepare_parser.add_argument("--batch-size", type=int)
     prepare_parser.add_argument("--yes", action="store_true")
     prepare_parser.add_argument("--accept-data-terms", action="store_true")
+    start_parser = subparsers.add_parser("start")
+    start_parser.add_argument("--detach", action="store_true")
+    start_parser.add_argument("--offline", action="store_true")
+    start_parser.add_argument("--no-open", action="store_true")
+    start_parser.add_argument("--web-port", type=int, default=5173)
+    start_parser.add_argument("--api-port", type=int, default=8000)
+    subparsers.add_parser("stop")
+    subparsers.add_parser("status")
+    subparsers.add_parser("logs")
     reset_parser = subparsers.add_parser("reset")
     reset_parser.add_argument("--index", action="store_true")
     reset_parser.add_argument("--model-cache", action="store_true")
@@ -648,6 +847,41 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(os.getenv("GODS_EYE_PROJECT_ROOT", "/workspace"))
     layout = RuntimeLayout(root)
+    if args.command == "start":
+        offered = offer_preparation(layout)
+        if offered is not None:
+            if offered == EXIT_PREPARATION_FAILED:
+                print("Preparation was not started.", file=sys.stderr)
+            return offered
+        try:
+            return start_runtime(
+                layout,
+                detach=args.detach,
+                offline=args.offline,
+                no_open=args.no_open,
+                web_port=args.web_port,
+                api_port=args.api_port,
+            )
+        except LauncherBusyError as error:
+            print(
+                "Launcher is busy: "
+                f"{error.active_operation.get('command', 'unknown')} is already running.",
+                file=sys.stderr,
+            )
+            return EXIT_BUSY
+    if args.command in {"stop", "status", "logs"}:
+        if args.command == "stop":
+            try:
+                with mutation_lock(layout, "stop"):
+                    return runtime_passthrough(layout, args.command)
+            except LauncherBusyError as error:
+                print(
+                    "Launcher is busy: "
+                    f"{error.active_operation.get('command', 'unknown')} is already running.",
+                    file=sys.stderr,
+                )
+                return EXIT_BUSY
+        return runtime_passthrough(layout, args.command)
     if args.command == "prepare":
         from .preparation import PreparationError, prepare_model_index
 

@@ -123,6 +123,14 @@ def _arguments(
             str(paths.model_cache),
             *revision_args,
         ],
+        "smoke": [
+            str(paths.active),
+            "--model-id",
+            model_id,
+            "--cache-dir",
+            str(paths.model_cache),
+            *revision_args,
+        ],
     }
 
 
@@ -203,45 +211,60 @@ def prepare_model_index(
                 *(["--revision", model_revision] if model_revision else []),
             )
             print("  reused (verified)")
-            return
         except PreparationError:
             index_compatible = False
+    if not index_compatible:
+        batch_size = select_batch_size(vram_mib, batch_override)
+        paths.checkpoint.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                version = adapter.run(
+                    "build-index",
+                    *args["index"],
+                    "--batch-size",
+                    str(batch_size),
+                    "--checkpoint-dir",
+                    str(paths.checkpoint),
+                )
+                break
+            except PreparationError as exc:
+                if not exc.out_of_memory or batch_size == 1:
+                    raise
+                batch_size = max(1, batch_size // 2)
+                print(f"  GPU memory exhausted; retrying index stage with batch size {batch_size}")
+        adapter.run(
+            "validate-index",
+            version,
+            "--model-id",
+            model_id,
+            *(["--revision", model_revision] if model_revision else []),
+        )
+        adapter.run(
+            "activate-index",
+            version,
+            "--active-pointer",
+            str(paths.active),
+            "--model-id",
+            model_id,
+        )
+        preparation["index"] = {
+            "status": "active",
+            "model_id": model_id,
+            "model_revision": model_revision,
+            "version_path": version,
+            "batch_size": batch_size,
+            "gallery_manifest_completed_at": preparation["gallery_manifest"]["completed_at"],
+            "completed_at": now(),
+        }
+        _save_state(state_path, state)
 
-    batch_size = select_batch_size(vram_mib, batch_override)
-    paths.checkpoint.mkdir(parents=True, exist_ok=True)
-    while True:
-        try:
-            version = adapter.run(
-                "build-index",
-                *args["index"],
-                "--batch-size",
-                str(batch_size),
-                "--checkpoint-dir",
-                str(paths.checkpoint),
-            )
-            break
-        except PreparationError as exc:
-            if not exc.out_of_memory or batch_size == 1:
-                raise
-            batch_size = max(1, batch_size // 2)
-            print(f"  GPU memory exhausted; retrying index stage with batch size {batch_size}")
-    adapter.run(
-        "validate-index",
-        version,
-        "--model-id",
-        model_id,
-        *(["--revision", model_revision] if model_revision else []),
-    )
-    adapter.run(
-        "activate-index", version, "--active-pointer", str(paths.active), "--model-id", model_id
-    )
-    preparation["index"] = {
-        "status": "active",
+    print("Step 7/7 - Model load, active index, and real-search smoke test")
+    adapter.run("smoke-search", *args["smoke"])
+    preparation["smoke_test"] = {
+        "status": "verified",
         "model_id": model_id,
         "model_revision": model_revision,
-        "version_path": version,
-        "batch_size": batch_size,
-        "gallery_manifest_completed_at": preparation["gallery_manifest"]["completed_at"],
+        "index_completed_at": preparation["index"]["completed_at"],
         "completed_at": now(),
     }
     _save_state(state_path, state)

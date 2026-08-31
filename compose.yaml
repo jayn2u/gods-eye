@@ -65,4 +65,4 @@ services:
       context: .
       dockerfile: Dockerfile.web
     depends_on: [service]
-    ports: ["127.0.0.1:5173:80"]
+    ports: ["127.0.0.1:${GODS_EYE_WEB_PORT:-5173}:80"]
