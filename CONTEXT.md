@@ -31,3 +31,23 @@ _Avoid_: Done marker, install state
 **Gallery Manifest**:
 The normalized collection of image records and provenance derived from one or more Dataset Installations for retrieval indexing.
 _Avoid_: Dataset index, image list
+
+**Full Demo**:
+The runnable research experience that searches the supported real-world galleries with the selected retrieval model.
+_Avoid_: Production deployment, fixture mode
+
+**Demo Preparation**:
+The resumable lifecycle that establishes and verifies every local asset required by a Full Demo.
+_Avoid_: Setup, installation, startup
+
+**Prepared Demo**:
+A Full Demo state whose Dataset Installations, model assets, active retrieval index, and search capability have all been verified.
+_Avoid_: Installed app, ready files
+
+**Demo Runtime**:
+The active local web experience backed by the assets of a Prepared Demo.
+_Avoid_: Production service, deployment
+
+**Launcher**:
+The single operator-facing entry point that manages Demo Preparation and the Demo Runtime.
+_Avoid_: Python CLI, web app
