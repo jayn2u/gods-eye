@@ -12,9 +12,10 @@ def _fake_docker(tmp_path: Path) -> tuple[Path, Path]:
     docker = bin_dir / "docker"
     docker.write_text(
         "#!/bin/sh\n"
-        'printf "mode=%s service=%s web=%s args=%s\\n" '
+        'printf "mode=%s service=%s web=%s compose_file=%s args=%s\\n" '
         '"${GODS_EYE_IMAGE_MODE:-}" "${GODS_EYE_SERVICE_IMAGE:-}" '
-        '"${GODS_EYE_WEB_IMAGE:-}" "$*" >> "$GODS_EYE_FAKE_DOCKER_LOG"\n'
+        '"${GODS_EYE_WEB_IMAGE:-}" "${GODS_EYE_COMPOSE_FILE:-}" '
+        '"$*" >> "$GODS_EYE_FAKE_DOCKER_LOG"\n'
         'if [ "$1 $2 $3" = "compose version --short" ]; then printf "2.32.4\\n"; fi\n'
     )
     docker.chmod(0o755)
@@ -50,6 +51,7 @@ def test_development_checkout_clearly_selects_local_builds(tmp_path: Path) -> No
     assert result.returncode == 0
     assert "Building service and web images from local source" in result.stderr
     assert "mode=local" in result.docker_log  # type: ignore[attr-defined]
+    assert "compose_file=/workspace/compose.yaml" in result.docker_log  # type: ignore[attr-defined]
     assert "compose.release.yaml" not in result.docker_log  # type: ignore[attr-defined]
 
 
@@ -66,6 +68,9 @@ def test_release_manifest_selects_only_digest_pinned_images(tmp_path: Path) -> N
     assert result.returncode == 0
     assert "Using immutable release images for v1.2.3" in result.stderr
     assert "mode=release" in result.docker_log  # type: ignore[attr-defined]
+    assert (
+        "compose_file=/workspace/compose.yaml:/workspace/compose.release.yaml" in result.docker_log  # type: ignore[attr-defined]
+    )
     assert f"service=ghcr.io/jayn2u/gods-eye-service@sha256:{service_digest}" in result.docker_log  # type: ignore[attr-defined]
     assert f"web=ghcr.io/jayn2u/gods-eye-web@sha256:{web_digest}" in result.docker_log  # type: ignore[attr-defined]
     assert "compose.release.yaml" in result.docker_log  # type: ignore[attr-defined]
