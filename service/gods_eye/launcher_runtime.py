@@ -1,5 +1,6 @@
 """Demo Runtime start/readiness/browser/container behavior."""
 
+import hashlib
 import json
 import os
 import shlex
@@ -14,11 +15,27 @@ from .launcher_lifecycle import mutation_lock, write_operation_log
 
 
 def _compose_command(layout: RuntimeLayout, *, offline: bool = False) -> list[str]:
-    files = os.getenv("COMPOSE_FILE", os.getenv("GODS_EYE_COMPOSE_FILE", "/workspace/compose.yaml"))
+    files = (
+        os.getenv("COMPOSE_FILE")
+        or os.getenv("GODS_EYE_COMPOSE_FILE")
+        or "/workspace/compose.yaml"
+    )
     compose_files = [item for item in files.split(os.pathsep) if item]
-    if offline and "/workspace/compose.offline.yaml" not in compose_files:
-        compose_files.append("/workspace/compose.offline.yaml")
-    command = ["docker", "compose", "--project-directory", str(layout.root)]
+    compose_root = next(
+        (Path(item).parent for item in compose_files if Path(item).name == "compose.yaml"),
+        layout.root,
+    )
+    offline_file = str(compose_root / "compose.offline.yaml")
+    if offline and offline_file not in compose_files:
+        compose_files.append(offline_file)
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(layout.root),
+        "--project-name",
+        _compose_project_name(_host_project_root(layout)),
+    ]
     for compose_file in compose_files:
         command.extend(("-f", compose_file))
     return command
@@ -105,6 +122,24 @@ def _host_project_root(layout: RuntimeLayout) -> Path:
     return Path(configured or layout.root).expanduser().resolve()
 
 
+def _compose_project_name(host_root: Path) -> str:
+    """Return a stable Compose project identity for this host checkout.
+
+    Compose derives a default project name from its project-directory.  The
+    nested Compose process runs from ``/workspace``, however, so that default
+    would make every checkout share one project.  A path-derived name keeps
+    multiple checkouts isolated and remains valid when the checkout path
+    contains spaces.  Explicit project names remain supported for advanced
+    Compose workflows and fixture tests.
+    """
+
+    configured = os.getenv("GODS_EYE_COMPOSE_PROJECT_NAME") or os.getenv("COMPOSE_PROJECT_NAME")
+    if configured:
+        return configured
+    digest = hashlib.sha256(str(host_root).encode("utf-8")).hexdigest()[:16]
+    return f"gods-eye-{digest}"
+
+
 def _prepared_asset_env(host_root: Path) -> dict[str, str]:
     """Make every persistent Prepared Demo bind source explicit and absolute."""
 
@@ -114,6 +149,29 @@ def _prepared_asset_env(host_root: Path) -> dict[str, str]:
         "GODS_EYE_INDEX_ROOT": str(host_root / "indexes"),
         "GODS_EYE_HF_CACHE": str(host_root / ".cache" / "huggingface"),
     }
+
+
+def _runtime_compose_env(layout: RuntimeLayout, *, offline: bool | None = None) -> dict[str, str]:
+    """Apply the common host-path and Compose identity contract to an environment."""
+
+    host_root = _host_project_root(layout)
+    project_name = _compose_project_name(host_root)
+    environment = {
+        **_prepared_asset_env(host_root),
+        "COMPOSE_PROJECT_NAME": project_name,
+        "GODS_EYE_COMPOSE_PROJECT_NAME": project_name,
+    }
+    if offline is not None:
+        environment.update(
+            {
+                "GODS_EYE_OFFLINE": "true" if offline else "false",
+                "HF_HUB_OFFLINE": "1" if offline else os.getenv("HF_HUB_OFFLINE", "0"),
+                "TRANSFORMERS_OFFLINE": "1"
+                if offline
+                else os.getenv("TRANSFORMERS_OFFLINE", "0"),
+            }
+        )
+    return environment
 
 
 def _run(command: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -174,7 +232,7 @@ def start_runtime(
     api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     environment = _runtime_env(web_port, api_port, offline)
-    environment.update(_prepared_asset_env(_host_project_root(layout)))
+    environment.update(_runtime_compose_env(layout, offline=offline))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
     if compose_check.returncode != 0:
         print(
@@ -231,7 +289,7 @@ def runtime_passthrough(layout: RuntimeLayout, command: str) -> int:
         if command == "logs"
         else [*compose, "ps", "--format", "json"]
     )
-    result = _run(action, os.environ.copy())
+    result = _run(action, {**os.environ, **_runtime_compose_env(layout)})
     if result.stdout:
         print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     if result.returncode != 0 and result.stderr:
