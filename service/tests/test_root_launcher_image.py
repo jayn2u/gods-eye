@@ -11,14 +11,18 @@ import pytest
 ROOT = Path(__file__).parents[2]
 
 
-def _fake_docker(tmp_path: Path) -> tuple[Path, Path]:
+def _fake_docker(tmp_path: Path, *, mode: str = "basic") -> tuple[Path, Path]:
+    """Create one configurable fake Docker CLI for root-launcher tests."""
+
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    log = tmp_path / "docker.log"
+    log = tmp_path / f"docker-{mode}.log"
     docker = bin_dir / "docker"
     docker.write_text(
         f"#!{sys.executable}\n"
+        f"MODE = {mode!r}\n"
         + """
+import json
 import os
 import subprocess
 import sys
@@ -27,7 +31,18 @@ from pathlib import Path
 args = sys.argv[1:]
 log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
 with log.open("a") as stream:
-    stream.write(" ".join(args) + "\\n")
+    if MODE == "basic":
+        stream.write(" ".join(args) + "\\n")
+    else:
+        stream.write(json.dumps({
+            "args": args,
+            "project_name": os.getenv("COMPOSE_PROJECT_NAME"),
+            "compose_project_name": os.getenv("GODS_EYE_COMPOSE_PROJECT_NAME"),
+            "data_home": os.getenv("GODS_EYE_DATA_HOME"),
+            "dataset_root": os.getenv("GODS_EYE_DATASET_ROOT"),
+            "index_root": os.getenv("GODS_EYE_INDEX_ROOT"),
+            "hf_cache": os.getenv("GODS_EYE_HF_CACHE"),
+        }) + "\\n")
 if args[:3] == ["compose", "version", "--short"]:
     if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
         print("2.32.4")
@@ -43,73 +58,42 @@ elif "build" in args and args[-1] == "launcher":
     raise SystemExit(int(os.getenv("GODS_EYE_FAKE_BUILD_EXIT", "0")))
 elif "run" in args and "launcher" in args:
     command = args[args.index("launcher") + 1:]
-    raise SystemExit(subprocess.call(
-        [sys.executable, "-m", "gods_eye.launcher", *command], env=os.environ
-    ))
-else:
-    raise SystemExit(97)
-"""
-    )
-    docker.chmod(0o755)
-    return bin_dir, log
-
-
-def _fake_docker_with_runtime_bind_check(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake the outer and nested Docker CLIs while keeping host/workspace roots distinct."""
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "docker-runtime.jsonl"
-    docker = bin_dir / "docker"
-    docker.write_text(
-        f"#!{sys.executable}\n"
-        + """
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-args = sys.argv[1:]
-log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
-with log.open("a") as stream:
-    stream.write(json.dumps({
-        "args": args,
-        "dataset_root": os.getenv("GODS_EYE_DATASET_ROOT"),
-        "index_root": os.getenv("GODS_EYE_INDEX_ROOT"),
-        "hf_cache": os.getenv("GODS_EYE_HF_CACHE"),
-    }) + "\\n")
-if args[:3] == ["compose", "version", "--short"]:
-    print("2.32.4")
-elif args[:2] == ["info", "--format"]:
-    print("/plugins/docker-compose")
-elif "build" in args and args[-1] == "launcher":
-    raise SystemExit(0)
-elif "run" in args and "launcher" in args:
-    host_root = Path(args[args.index("--project-directory") + 1]).resolve()
-    child_env = {
-        **os.environ,
-        # The real outer Compose service mounts host_root at /workspace. A
-        # distinct temp path gives the fake daemon a separate internal root.
-        "GODS_EYE_PROJECT_ROOT": str(Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"])),
-        "GODS_EYE_HOST_PROJECT_ROOT": str(host_root),
-        "GODS_EYE_COMPOSE_FILE": str(
-            Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"]) / "compose.yaml"
-        ),
-    }
-    command = args[args.index("launcher") + 1:]
+    if MODE == "basic":
+        child_env = os.environ
+    else:
+        host_root = Path(args[args.index("--project-directory") + 1]).resolve()
+        workspace_root = Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"])
+        compose_file = workspace_root / "compose.yaml"
+        if os.getenv("GODS_EYE_IMAGE_MODE") == "release":
+            compose_file = f"{compose_file}:{workspace_root / 'compose.release.yaml'}"
+        child_env = {
+            **os.environ,
+            "GODS_EYE_PROJECT_ROOT": str(workspace_root),
+            "GODS_EYE_HOST_PROJECT_ROOT": str(host_root),
+            "GODS_EYE_COMPOSE_FILE": str(compose_file),
+        }
     raise SystemExit(subprocess.call(
         [sys.executable, "-m", "gods_eye.launcher", *command], env=child_env
     ))
-elif "compose" in args and "exec" in args:
+elif MODE != "basic" and "compose" in args and "exec" in args:
     workspace = Path(os.environ["GODS_EYE_PROJECT_ROOT"])
     index_root = Path(os.getenv("GODS_EYE_INDEX_ROOT", str(workspace / "indexes")))
     if (index_root / "active").exists():
         print(json.dumps({"ready": True, "gallery_count": 3}))
     else:
-        print("No active index. Build and activate an index first.", file=sys.stderr)
+        print(
+            "No active retrieval index. Build and activate the active retrieval index first.",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
-elif "compose" in args and ("up" in args or "down" in args):
+elif MODE != "basic" and "compose" in args and "ps" in args:
+    print(json.dumps([
+        {"Service": "service", "State": "running"},
+        {"Service": "web", "State": "running"},
+    ]))
+elif MODE != "basic" and "compose" in args and "logs" in args:
+    print("service | ready")
+elif MODE != "basic" and "compose" in args and ("up" in args or "down" in args):
     pass
 else:
     raise SystemExit(97)
@@ -119,82 +103,54 @@ else:
     return bin_dir, log
 
 
-def _fake_docker_with_runtime_lifecycle_check(tmp_path: Path) -> tuple[Path, Path]:
-    """Fake Docker while recording the complete runtime lifecycle contract."""
-
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "docker-runtime-lifecycle.jsonl"
-    docker = bin_dir / "docker"
-    docker.write_text(
-        f"#!{sys.executable}\n"
-        + """
-import json
-import os
-import subprocess
-import sys
-from pathlib import Path
-
-args = sys.argv[1:]
-log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
-with log.open("a") as stream:
-    stream.write(json.dumps({
-        "args": args,
-        "project_name": os.getenv("COMPOSE_PROJECT_NAME"),
-        "compose_project_name": os.getenv("GODS_EYE_COMPOSE_PROJECT_NAME"),
-        "data_home": os.getenv("GODS_EYE_DATA_HOME"),
-        "dataset_root": os.getenv("GODS_EYE_DATASET_ROOT"),
-        "index_root": os.getenv("GODS_EYE_INDEX_ROOT"),
-        "hf_cache": os.getenv("GODS_EYE_HF_CACHE"),
-    }) + "\\n")
-if args[:3] == ["compose", "version", "--short"]:
-    print("2.32.4")
-elif args[:2] == ["info", "--format"]:
-    print("/plugins/docker-compose")
-elif "build" in args and args[-1] == "launcher":
-    raise SystemExit(0)
-elif "run" in args and "launcher" in args:
-    host_root = Path(args[args.index("--project-directory") + 1]).resolve()
-    workspace_root = Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"])
-    compose_file = workspace_root / "compose.yaml"
-    if os.getenv("GODS_EYE_IMAGE_MODE") == "release":
-        compose_file = f"{compose_file}:{workspace_root / 'compose.release.yaml'}"
-    child_env = {
-        **os.environ,
-        "GODS_EYE_PROJECT_ROOT": str(workspace_root),
-        "GODS_EYE_HOST_PROJECT_ROOT": str(host_root),
-        "GODS_EYE_COMPOSE_FILE": str(compose_file),
-    }
-    command = args[args.index("launcher") + 1:]
-    raise SystemExit(subprocess.call(
-        [sys.executable, "-m", "gods_eye.launcher", *command], env=child_env
-    ))
-elif "compose" in args and "exec" in args:
-    index_root = Path(os.environ["GODS_EYE_INDEX_ROOT"])
-    if (index_root / "active").exists():
-        print(json.dumps({"ready": True, "gallery_count": 3}))
-    else:
-        print("No active index. Build and activate an index first.", file=sys.stderr)
-        raise SystemExit(1)
-elif "compose" in args and "ps" in args:
-    print(
+def _prepared_state(root: Path) -> None:
+    prepared = root / ".gods-eye"
+    prepared.mkdir(parents=True, exist_ok=True)
+    (prepared / "state.json").write_text(
         json.dumps(
-            [
-                {"Service": "service", "State": "running"},
-                {"Service": "web", "State": "running"},
-            ]
+            {
+                "schema_version": 1,
+                "terms_acceptance": {},
+                "compatibility": {},
+                "preparation": {
+                    "dataset_acquisition": {"status": "verified"},
+                    "model": {"status": "verified"},
+                    "gallery_manifest": {"status": "verified"},
+                    "index": {"status": "active"},
+                    "smoke_test": {"status": "verified"},
+                },
+            }
         )
     )
-elif "compose" in args and "logs" in args:
-    print("service | ready")
-elif "compose" in args and ("up" in args or "down" in args):
-    pass
-else:
-    raise SystemExit(97)
-"""
-    )
-    docker.chmod(0o755)
-    return bin_dir, log
+
+
+def _prepared_assets(
+    root: Path, *, active_reference: str = "versions/prepared", active_is_directory: bool = False
+) -> None:
+    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        (root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
+        receipt = root / "data" / "install-state" / f"{name}.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}")
+
+    model_cache = root / ".cache" / "huggingface"
+    model_cache.mkdir(parents=True, exist_ok=True)
+    (model_cache / "model.ready").write_text("ready")
+
+    indexes = root / "indexes"
+    indexes.mkdir(parents=True, exist_ok=True)
+    (indexes / "gallery-manifest.json").write_text("{}")
+    active = indexes / "active"
+    if active_is_directory:
+        active.mkdir(parents=True, exist_ok=True)
+    else:
+        (indexes / "versions" / "prepared").mkdir(parents=True, exist_ok=True)
+        active.write_text(active_reference + "\n")
+
+
+def _prepared(root: Path, **asset_options: object) -> None:
+    _prepared_state(root)
+    _prepared_assets(root, **asset_options)
 
 
 def _run(
@@ -281,34 +237,10 @@ def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path
     workspace_root = tmp_path / "launcher-workspace"
     workspace_root.mkdir()
 
-    prepared = workspace_root / ".gods-eye"
-    prepared.mkdir()
-    (prepared / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "terms_acceptance": {},
-                "compatibility": {},
-                "preparation": {
-                    "dataset_acquisition": {"status": "verified"},
-                    "model": {"status": "verified"},
-                    "gallery_manifest": {"status": "verified"},
-                    "index": {"status": "active"},
-                    "smoke_test": {"status": "verified"},
-                },
-            }
-        )
-    )
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
-        (host_root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
-    (host_root / "indexes" / "versions" / "prepared").mkdir(parents=True)
-    (host_root / "indexes" / "active").write_text("versions/prepared\n")
-    (host_root / "indexes" / "gallery-manifest.json").write_text("{}")
-    model_cache = host_root / ".cache" / "huggingface"
-    model_cache.mkdir(parents=True)
-    (model_cache / "model.ready").write_text("ready")
+    _prepared_state(workspace_root)
+    _prepared_assets(host_root)
 
-    bin_dir, log = _fake_docker_with_runtime_bind_check(tmp_path)
+    bin_dir, log = _fake_docker(tmp_path, mode="runtime")
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -338,8 +270,7 @@ def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path
     assert runtime_up["index_root"] == str(host_root / "indexes")
     assert runtime_up["hf_cache"] == str(host_root / ".cache" / "huggingface")
     assert all(
-        "/workspace" not in runtime_up[key]
-        for key in ("dataset_root", "index_root", "hf_cache")
+        "/workspace" not in runtime_up[key] for key in ("dataset_root", "index_root", "hf_cache")
     )
 
 
@@ -353,55 +284,17 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
     workspace_root = tmp_path / "launcher-workspace"
     workspace_root.mkdir()
 
-    prepared = workspace_root / ".gods-eye"
-    prepared.mkdir()
-    (prepared / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "terms_acceptance": {},
-                "compatibility": {},
-                "preparation": {
-                    "dataset_acquisition": {"status": "verified"},
-                    "model": {"status": "verified"},
-                    "gallery_manifest": {"status": "verified"},
-                    "index": {"status": "active"},
-                    "smoke_test": {"status": "verified"},
-                },
-            }
-        )
-    )
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
-        (workspace_root / "data" / "datasets" / name).mkdir(parents=True)
-        receipt = workspace_root / "data" / "install-state" / f"{name}.json"
-        receipt.parent.mkdir(parents=True, exist_ok=True)
-        receipt.write_text("{}")
-    model_cache = workspace_root / ".cache" / "huggingface" / "model.ready"
-    model_cache.parent.mkdir(parents=True)
-    model_cache.write_text("ok")
-    (workspace_root / "indexes" / "gallery-manifest.json").parent.mkdir(parents=True)
-    (workspace_root / "indexes" / "gallery-manifest.json").write_text("{}")
-    (workspace_root / "indexes" / "active").mkdir()
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
-        (host_root / "data" / "datasets" / name).mkdir(parents=True)
-    model_cache = host_root / ".cache" / "huggingface" / "model.ready"
-    model_cache.parent.mkdir(parents=True)
-    model_cache.write_text("ok")
-    (host_root / "indexes" / "versions" / "prepared").mkdir(parents=True)
-    (host_root / "indexes" / "gallery-manifest.json").write_text("{}")
-    (host_root / "indexes" / "active").write_text("versions/prepared\n")
+    _prepared_state(workspace_root)
+    _prepared_assets(workspace_root, active_is_directory=True)
+    _prepared_assets(host_root)
     if image_mode == "release":
         (host_root / "release-images.env").write_text(
             "GODS_EYE_RELEASE_VERSION=v1.2.3\n"
-            "GODS_EYE_SERVICE_IMAGE=ghcr.io/jayn2u/gods-eye-service@sha256:"
-            + "a" * 64
-            + "\n"
-            "GODS_EYE_WEB_IMAGE=ghcr.io/jayn2u/gods-eye-web@sha256:"
-            + "b" * 64
-            + "\n"
+            "GODS_EYE_SERVICE_IMAGE=ghcr.io/jayn2u/gods-eye-service@sha256:" + "a" * 64 + "\n"
+            "GODS_EYE_WEB_IMAGE=ghcr.io/jayn2u/gods-eye-web@sha256:" + "b" * 64 + "\n"
         )
 
-    bin_dir, log = _fake_docker_with_runtime_lifecycle_check(tmp_path)
+    bin_dir, log = _fake_docker(tmp_path, mode="runtime")
     env = {
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -469,8 +362,7 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
         "hf_cache": str(host_root / ".cache" / "huggingface"),
     }
     assert all(
-        {key: call[key] for key in expected_assets} == expected_assets
-        for call in runtime_calls
+        {key: call[key] for key in expected_assets} == expected_assets for call in runtime_calls
     )
     start_call = next(call for call in runtime_calls if "up" in call["args"])
     assert str(workspace_root / "compose.offline.yaml") in start_call["args"]
@@ -481,8 +373,7 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
     )
     if image_mode == "release":
         assert all(
-            str(workspace_root / "compose.release.yaml") in call["args"]
-            for call in runtime_calls
+            str(workspace_root / "compose.release.yaml") in call["args"] for call in runtime_calls
         )
     else:
         assert all(

@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .launcher_common import EXIT_OK, EXIT_PREPARATION_FAILED, PREPARED_STAGES, RuntimeLayout
@@ -16,9 +17,7 @@ from .launcher_lifecycle import mutation_lock, write_operation_log
 
 def _compose_command(layout: RuntimeLayout, *, offline: bool = False) -> list[str]:
     files = (
-        os.getenv("COMPOSE_FILE")
-        or os.getenv("GODS_EYE_COMPOSE_FILE")
-        or "/workspace/compose.yaml"
+        os.getenv("COMPOSE_FILE") or os.getenv("GODS_EYE_COMPOSE_FILE") or "/workspace/compose.yaml"
     )
     compose_files = [item for item in files.split(os.pathsep) if item]
     compose_root = next(
@@ -54,20 +53,90 @@ def _registry() -> dict:
     return json.loads(Path(__file__).with_name("dataset_registry.json").read_text())
 
 
-def _offline_assets_missing(layout: RuntimeLayout) -> list[str]:
+@dataclass(frozen=True)
+class _RuntimeRoots:
+    """Resolved host paths used as bind sources by the nested Compose project."""
+
+    data_home: Path
+    dataset_root: Path
+    index_root: Path
+    hf_cache: Path
+
+
+def _resolve_host_path(host_root: Path, variable: str, default: str) -> Path:
+    """Resolve a configured root in the host path namespace.
+
+    Relative values are intentionally resolved against the checkout root.  The
+    Launcher itself normally runs in ``/workspace`` inside a container, so
+    resolving them against its current working directory would point Compose
+    at a path that only exists inside the Launcher container.
+    """
+
+    configured = os.getenv(variable)
+    candidate = Path(configured).expanduser() if configured else Path(default)
+    if not candidate.is_absolute():
+        candidate = host_root / candidate
+    return candidate.resolve()
+
+
+def _runtime_roots(host_root: Path) -> _RuntimeRoots:
+    return _RuntimeRoots(
+        data_home=_resolve_host_path(host_root, "GODS_EYE_DATA_HOME", "data"),
+        dataset_root=_resolve_host_path(host_root, "GODS_EYE_DATASET_ROOT", "data/datasets"),
+        index_root=_resolve_host_path(host_root, "GODS_EYE_INDEX_ROOT", "indexes"),
+        hf_cache=_resolve_host_path(host_root, "GODS_EYE_HF_CACHE", ".cache/huggingface"),
+    )
+
+
+def _visible_asset_path(path: Path, host_root: Path, visible_root: Path) -> Path:
+    """Map a host bind source into the path visible to this Launcher process."""
+
+    try:
+        relative = path.resolve(strict=False).relative_to(host_root.resolve(strict=False))
+    except ValueError:
+        return path
+    return visible_root / relative
+
+
+def _asset_location(path: Path, visible_path: Path) -> str:
+    """Describe a resolved host path without exposing the process environment."""
+
+    location = f"resolved host path: {path}"
+    if visible_path != path:
+        location += f"; Launcher-visible path: {visible_path}"
+    return location
+
+
+def _offline_assets_missing(layout: RuntimeLayout, host_root: Path | None = None) -> list[str]:
+    host_root = host_root or _host_project_root(layout)
+    roots = _runtime_roots(host_root)
+    visible_root = _asset_visibility_root(layout, host_root)
+    data_home = _visible_asset_path(roots.data_home, host_root, visible_root)
+    dataset_root = _visible_asset_path(roots.dataset_root, host_root, visible_root)
+    index_root = _visible_asset_path(roots.index_root, host_root, visible_root)
+    model_cache = _visible_asset_path(roots.hf_cache, host_root, visible_root)
     missing = []
     for source in _registry()["sources"]:
-        receipt = layout.root / "data/install-state" / f"{source['name']}.json"
-        installation = layout.root / "data/datasets" / source["name"]
+        receipt = data_home / "install-state" / f"{source['name']}.json"
+        installation = dataset_root / source["name"]
         if not receipt.is_file() or not installation.is_dir():
-            missing.append(f"Dataset Installation: {source['name']}")
-    model_cache = layout.root / ".cache/huggingface"
+            missing.append(
+                f"Dataset Installation: {source['name']} ({_asset_location(roots.dataset_root, dataset_root)})"
+            )
     if not model_cache.is_dir() or not any(model_cache.iterdir()):
-        missing.append("CLIP ViT-B/16 model cache")
-    if not (layout.root / "indexes/gallery-manifest.json").is_file():
-        missing.append("Gallery Manifest: indexes/gallery-manifest.json")
-    if not (layout.root / "indexes/active").exists():
-        missing.append("active retrieval index: indexes/active")
+        missing.append(
+            f"CLIP ViT-B/16 model cache ({_asset_location(roots.hf_cache, model_cache)})"
+        )
+    if not (index_root / "gallery-manifest.json").is_file():
+        missing.append(
+            "Gallery Manifest: indexes/gallery-manifest.json "
+            f"({_asset_location(roots.index_root / 'gallery-manifest.json', index_root / 'gallery-manifest.json')})"
+        )
+    if not (index_root / "active").exists():
+        missing.append(
+            "active retrieval index: indexes/active "
+            f"({_asset_location(roots.index_root / 'active', index_root / 'active')})"
+        )
     return missing
 
 
@@ -98,14 +167,13 @@ def _available_port(preferred: int, *, exclude: set[int] | None = None) -> int:
 
 
 def _runtime_env(web_port: int, api_port: int, offline: bool) -> dict[str, str]:
-    return {
+    environment = {
         **os.environ,
         "GODS_EYE_WEB_PORT": str(web_port),
         "GODS_EYE_BIND_PORT": str(api_port),
-        "GODS_EYE_OFFLINE": "true" if offline else "false",
-        "HF_HUB_OFFLINE": "1" if offline else os.getenv("HF_HUB_OFFLINE", "0"),
-        "TRANSFORMERS_OFFLINE": "1" if offline else os.getenv("TRANSFORMERS_OFFLINE", "0"),
     }
+    environment.update(_offline_environment(offline))
+    return environment
 
 
 def _host_project_root(layout: RuntimeLayout) -> Path:
@@ -143,11 +211,22 @@ def _compose_project_name(host_root: Path) -> str:
 def _prepared_asset_env(host_root: Path) -> dict[str, str]:
     """Make every persistent Prepared Demo bind source explicit and absolute."""
 
+    roots = _runtime_roots(host_root)
     return {
-        "GODS_EYE_DATA_HOME": str(host_root / "data"),
-        "GODS_EYE_DATASET_ROOT": str(host_root / "data" / "datasets"),
-        "GODS_EYE_INDEX_ROOT": str(host_root / "indexes"),
-        "GODS_EYE_HF_CACHE": str(host_root / ".cache" / "huggingface"),
+        "GODS_EYE_DATA_HOME": str(roots.data_home),
+        "GODS_EYE_DATASET_ROOT": str(roots.dataset_root),
+        "GODS_EYE_INDEX_ROOT": str(roots.index_root),
+        "GODS_EYE_HF_CACHE": str(roots.hf_cache),
+    }
+
+
+def _offline_environment(offline: bool) -> dict[str, str]:
+    """Return the one shared mapping for online/offline runtime variables."""
+
+    return {
+        "GODS_EYE_OFFLINE": "true" if offline else "false",
+        "HF_HUB_OFFLINE": "1" if offline else os.getenv("HF_HUB_OFFLINE", "0"),
+        "TRANSFORMERS_OFFLINE": "1" if offline else os.getenv("TRANSFORMERS_OFFLINE", "0"),
     }
 
 
@@ -162,15 +241,7 @@ def _runtime_compose_env(layout: RuntimeLayout, *, offline: bool | None = None) 
         "GODS_EYE_COMPOSE_PROJECT_NAME": project_name,
     }
     if offline is not None:
-        environment.update(
-            {
-                "GODS_EYE_OFFLINE": "true" if offline else "false",
-                "HF_HUB_OFFLINE": "1" if offline else os.getenv("HF_HUB_OFFLINE", "0"),
-                "TRANSFORMERS_OFFLINE": "1"
-                if offline
-                else os.getenv("TRANSFORMERS_OFFLINE", "0"),
-            }
-        )
+        environment.update(_offline_environment(offline))
     return environment
 
 
@@ -238,7 +309,7 @@ def _active_index_target(
             "active retrieval index version is not reachable beneath the configured index root",
         )
     if not resolved_target.is_relative_to(resolved_index_root):
-        return None, "Active index reference escapes the configured index root"
+        return None, "active retrieval index reference escapes the configured index root"
     if resolved_target == resolved_index_root or not resolved_target.is_dir():
         return (
             None,
@@ -255,104 +326,96 @@ def _prepared_asset_errors(layout: RuntimeLayout, host_root: Path) -> list[str]:
     corrupt or incompatible artifacts after containers start.
     """
 
+    roots = _runtime_roots(host_root)
     visible_root = _asset_visibility_root(layout, host_root)
-    dataset_root = visible_root / "data" / "datasets"
-    index_root = visible_root / "indexes"
-    model_cache = visible_root / ".cache" / "huggingface"
+    dataset_root = _visible_asset_path(roots.dataset_root, host_root, visible_root)
+    index_root = _visible_asset_path(roots.index_root, host_root, visible_root)
+    model_cache = _visible_asset_path(roots.hf_cache, host_root, visible_root)
     errors: list[str] = []
 
-    configured_host_root = os.getenv("GODS_EYE_HOST_PROJECT_ROOT")
-    if (
-        configured_host_root
-        and not host_root.is_dir()
-        and visible_root != Path("/workspace")
-    ):
+    if not dataset_root.is_dir():
         errors.append(
-            "Configured host project root is not visible to the Launcher; "
-            "Prepared Demo assets cannot be validated"
-        )
-        return errors
-
-    if not _contained(dataset_root, visible_root):
-        errors.append("Dataset Installation root escapes the configured host project root")
-    elif not dataset_root.is_dir():
-        errors.append(
-            "Dataset Installation root is not visible under the configured host project root "
-            "(expected data/datasets)"
+            "Dataset Installation root "
+            f"({_asset_location(roots.dataset_root, dataset_root)}) is not visible"
         )
     else:
         for source in _registry().get("sources", []):
             name = str(source["name"])
             installation = dataset_root / name
-            if not _contained(installation, dataset_root):
-                errors.append(f"Dataset Installation: {name} escapes the configured root")
-            elif not installation.is_dir():
+            effective_installation = roots.dataset_root / name
+            if not installation.is_dir():
                 errors.append(
-                    f"Dataset Installation: {name} is not visible under the configured host "
-                    "project root (expected data/datasets/" + name + ")"
+                    f"Dataset Installation: {name} "
+                    f"({_asset_location(effective_installation, installation)}) is not visible"
                 )
 
-    if not _contained(index_root, visible_root):
-        errors.append("Retrieval index root escapes the configured host project root")
-    elif not index_root.is_dir():
+    if not index_root.is_dir():
         errors.append(
-            "Retrieval index root is not visible under the configured host project root "
-            "(expected indexes)"
+            "active retrieval index root "
+            f"({_asset_location(roots.index_root, index_root)}) is not visible"
         )
     else:
         manifest = index_root / "gallery-manifest.json"
-        if not _contained(manifest, index_root) or not manifest.is_file():
+        effective_manifest = roots.index_root / "gallery-manifest.json"
+        if not manifest.is_file():
             errors.append(
-                "Gallery Manifest: indexes/gallery-manifest.json is not visible under the "
-                "configured host project root"
+                "Gallery Manifest: indexes/gallery-manifest.json "
+                f"({_asset_location(effective_manifest, manifest)}) is not visible"
             )
 
         pointer = index_root / "active"
-        if not _contained(pointer, index_root) or not pointer.exists():
+        effective_pointer = roots.index_root / "active"
+        if not pointer.exists():
             errors.append(
-                "active retrieval index pointer: indexes/active is not visible under the "
-                "configured host project root"
+                "active retrieval index pointer: indexes/active "
+                f"({_asset_location(effective_pointer, pointer)}) is not visible"
             )
         elif pointer.is_dir():
             if os.getenv("GODS_EYE_USE_FIXTURES") != "true":
-                errors.append("active retrieval index pointer: indexes/active must be a file")
+                errors.append(
+                    "active retrieval index pointer: indexes/active "
+                    f"({_asset_location(effective_pointer, pointer)}) must be a file"
+                )
         else:
             target, error = _active_index_target(
                 pointer,
                 index_root,
-                host_root.resolve() / "indexes",
+                roots.index_root,
             )
             if error:
-                errors.append(error)
+                errors.append(
+                    "active retrieval index: "
+                    f"{_asset_location(effective_pointer, pointer)}: {error}"
+                )
             elif target is None:
                 errors.append(
-                    "active retrieval index version is not reachable beneath the configured "
-                    "index root"
+                    "active retrieval index: "
+                    f"{_asset_location(effective_pointer, pointer)}: active retrieval index "
+                    "version is not reachable beneath the configured index root"
                 )
 
-    if not _contained(model_cache, visible_root):
-        errors.append("CLIP ViT-B/16 model cache escapes the configured host project root")
-    elif not model_cache.is_dir():
+    if not model_cache.is_dir():
         errors.append(
-            "CLIP ViT-B/16 model cache is not visible under the configured host project root "
-            "(expected .cache/huggingface)"
+            "CLIP ViT-B/16 model cache "
+            f"({_asset_location(roots.hf_cache, model_cache)}) is not visible"
         )
     else:
         try:
             next(model_cache.iterdir())
         except (OSError, StopIteration):
             errors.append(
-                "CLIP ViT-B/16 model cache is empty or not readable under the configured host "
-                "project root"
+                "CLIP ViT-B/16 model cache "
+                f"({_asset_location(roots.hf_cache, model_cache)}) is empty or not readable"
             )
     return errors
 
 
-def _print_preflight_failure(errors: list[str]) -> None:
+def _print_preflight_failure(errors: list[str], host_root: Path) -> None:
     print(
         "Prepared Demo asset preflight failed; no Demo Runtime containers were started.",
         file=sys.stderr,
     )
+    print(f"Configured host project root (resolved): {host_root}", file=sys.stderr)
     for error in errors:
         print(f"- {error}.", file=sys.stderr)
     print(
@@ -410,21 +473,12 @@ def start_runtime(
         print("Full Demo is not prepared; missing: " + ", ".join(missing) + ".", file=sys.stderr)
         print("Run './gods-eye prepare'. No downloads were started.", file=sys.stderr)
         return EXIT_PREPARATION_FAILED
-    if offline and (missing_assets := _offline_assets_missing(layout)):
-        print("Offline start requires these local assets:", file=sys.stderr)
-        for asset in missing_assets:
-            print(f"- {asset}", file=sys.stderr)
-        print("No network access or downloads were attempted.", file=sys.stderr)
-        return EXIT_PREPARATION_FAILED
     web_port = _available_port(web_port)
     api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     host_root = _host_project_root(layout)
     environment = _runtime_env(web_port, api_port, offline)
     environment.update(_runtime_compose_env(layout, offline=offline))
-    if asset_errors := _prepared_asset_errors(layout, host_root):
-        _print_preflight_failure(asset_errors)
-        return EXIT_PREPARATION_FAILED
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
     if compose_check.returncode != 0:
         print(
@@ -434,6 +488,15 @@ def start_runtime(
         )
         return EXIT_PREPARATION_FAILED
     with mutation_lock(layout, "start"):
+        if offline and (missing_assets := _offline_assets_missing(layout, host_root)):
+            print("Offline start requires these local assets:", file=sys.stderr)
+            for asset in missing_assets:
+                print(f"- {asset}", file=sys.stderr)
+            print("No network access or downloads were attempted.", file=sys.stderr)
+            return EXIT_PREPARATION_FAILED
+        if asset_errors := _prepared_asset_errors(layout, host_root):
+            _print_preflight_failure(asset_errors, host_root)
+            return EXIT_PREPARATION_FAILED
         started = _run([*compose, "up", "-d", "service", "web"], environment)
         if started.returncode != 0:
             print(started.stderr.strip() or "Could not start the Demo Runtime.", file=sys.stderr)
