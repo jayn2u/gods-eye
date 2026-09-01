@@ -34,7 +34,7 @@ elif 'compose' in args and 'exec' in args:
     if os.environ.get('FAKE_READY') == '1':
         print(json.dumps({'ready': True, 'gallery_count': 3}))
     else:
-        print('search readiness failed', file=sys.stderr)
+        print(os.environ.get('FAKE_READINESS_DETAIL', 'search readiness failed'), file=sys.stderr)
         raise SystemExit(1)
 elif 'compose' in args and 'ps' in args:
     print(json.dumps([{'Service': 'service', 'State': 'running'}, {'Service': 'web', 'State': 'running'}]))
@@ -188,11 +188,16 @@ def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
         "start",
         "--detach",
         "--no-open",
-        extra_env={"FAKE_READY": "0", "GODS_EYE_READINESS_TIMEOUT_SECONDS": "0"},
+        extra_env={
+            "FAKE_READY": "0",
+            "FAKE_READINESS_DETAIL": "active index reference escapes the configured index root",
+            "GODS_EYE_READINESS_TIMEOUT_SECONDS": "0",
+        },
     )
 
     assert result.returncode == 4
     assert "readiness" in result.stderr.lower()
+    assert "active index reference escapes the configured index root" in result.stderr
     assert "logs" in result.stderr.lower()
     assert any("compose" in call and "down" in call for call in calls)
 

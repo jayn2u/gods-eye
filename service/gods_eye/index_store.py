@@ -26,6 +26,26 @@ def manifest_digest(manifest: GalleryManifest) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _portable_manifest(manifest: GalleryManifest, dataset_root: Path) -> GalleryManifest:
+    serialized_roots: dict = {}
+    configured_root = dataset_root.resolve()
+    for dataset, root in manifest.roots.items():
+        resolved = root.resolve()
+        try:
+            relative = resolved.relative_to(configured_root)
+        except ValueError as exc:
+            raise IndexValidationError(
+                f"Dataset Installation root is outside the configured root: {dataset}"
+            ) from exc
+        serialized_roots[dataset] = relative.as_posix()
+    return GalleryManifest(
+        roots=manifest.roots,
+        records=manifest.records,
+        report=manifest.report,
+        serialized_roots=serialized_roots,
+    )
+
+
 def deterministic_embedding(value: str, dimension: int) -> np.ndarray:
     """Stable, normalized fixture feature used until the CLIP adapter is selected."""
     chunks = bytearray()
@@ -239,6 +259,7 @@ def publish_index(
     backend: str,
     created: datetime,
     model_revision: str | None,
+    dataset_root: Path | None = None,
 ) -> Path:
     digest = manifest_digest(source_manifest)
     seed = f"{created.isoformat()}:{model_id}:{digest}"
@@ -252,10 +273,15 @@ def publish_index(
     staging = Path(tempfile.mkdtemp(prefix=f".{version_id}-", dir=versions_dir))
     try:
         vectors = np.ascontiguousarray(result.vectors, dtype=np.float32)
-        result.manifest.write(staging / "manifest.json")
+        indexed_manifest = (
+            _portable_manifest(result.manifest, dataset_root)
+            if dataset_root is not None
+            else result.manifest
+        )
+        indexed_manifest.write(staging / "manifest.json")
         np.save(staging / "embeddings.npy", vectors, allow_pickle=False)
         _write_index(vectors, staging / "index.faiss", backend)
-        indexed_digest = manifest_digest(result.manifest)
+        indexed_digest = manifest_digest(indexed_manifest)
         coverage = {
             "successful": len(result.manifest.records),
             "skipped": len(result.failures),
@@ -282,7 +308,7 @@ def publish_index(
             processor_id=model_id if model_id != "fixture/deterministic-v1" else None,
         )
         (staging / "metadata.json").write_text(json.dumps(asdict(metadata), indent=2) + "\n")
-        validate_version(staging, expected_model_id=model_id)
+        validate_version(staging, expected_model_id=model_id, dataset_root=dataset_root)
         os.replace(staging, final)
         return final
     except Exception:
@@ -302,6 +328,7 @@ def build_index(
     batch_size: int = 32,
     checkpoint_dir: Path | None = None,
     model_revision: str | None = None,
+    dataset_root: Path | None = None,
 ) -> Path:
     manifest = GalleryManifest.read(manifest_path)
     checkpoint = checkpoint_dir or (
@@ -329,6 +356,7 @@ def build_index(
         backend=backend,
         created=now or datetime.now(UTC),
         model_revision=model_revision,
+        dataset_root=dataset_root,
     )
 
 
@@ -336,6 +364,7 @@ def validate_version(
     version_dir: Path,
     expected_model_id: str | None = None,
     expected_model_revision: str | None = None,
+    dataset_root: Path | None = None,
 ) -> LoadedIndex:
     try:
         raw = json.loads((version_dir / "metadata.json").read_text())
@@ -359,7 +388,9 @@ def validate_version(
     ):
         raise IndexValidationError("Index processor identity does not match its model")
     try:
-        manifest = GalleryManifest.read(version_dir / metadata.manifest_file)
+        manifest = GalleryManifest.read(
+            version_dir / metadata.manifest_file, dataset_root=dataset_root
+        )
     except (GalleryBuildError, OSError) as exc:
         raise IndexValidationError(f"Unreadable linked manifest: {exc}") from exc
     if manifest_digest(manifest) != metadata.manifest_sha256:
@@ -387,12 +418,23 @@ def validate_version(
 
 
 def activate_version(
-    version_dir: Path, active_pointer: Path, expected_model_id: str
+    version_dir: Path,
+    active_pointer: Path,
+    expected_model_id: str,
+    dataset_root: Path | None = None,
 ) -> LoadedIndex:
-    loaded = validate_version(version_dir, expected_model_id)
+    loaded = validate_version(version_dir, expected_model_id, dataset_root=dataset_root)
     active_pointer.parent.mkdir(parents=True, exist_ok=True)
     temporary = active_pointer.with_name(f".{active_pointer.name}.{os.getpid()}.tmp")
-    temporary.write_text(version_dir.resolve().as_posix() + "\n")
+    index_root = active_pointer.parent.resolve()
+    version = version_dir.resolve()
+    try:
+        portable_reference = version.relative_to(index_root)
+    except ValueError as exc:
+        raise IndexValidationError(
+            "Active index version must be inside the configured index root"
+        ) from exc
+    temporary.write_text(portable_reference.as_posix() + "\n")
     os.replace(temporary, active_pointer)
     return loaded
 
@@ -401,12 +443,22 @@ def load_active(
     active_pointer: Path,
     expected_model_id: str,
     expected_model_revision: str | None = None,
+    dataset_root: Path | None = None,
 ) -> LoadedIndex:
     try:
-        target = Path(active_pointer.read_text().strip())
+        stored = Path(active_pointer.read_text().strip())
     except OSError as exc:
         raise IndexValidationError("No active index. Build and activate an index first.") from exc
-    return validate_version(target, expected_model_id, expected_model_revision)
+    index_root = active_pointer.parent.resolve()
+    if stored.is_absolute() and not stored.exists():
+        try:
+            stored = index_root / stored.relative_to("/workspace/indexes")
+        except ValueError:
+            pass
+    target = stored.resolve() if stored.is_absolute() else (index_root / stored).resolve()
+    if not target.is_relative_to(index_root):
+        raise IndexValidationError("Active index reference escapes the configured index root")
+    return validate_version(target, expected_model_id, expected_model_revision, dataset_root)
 
 
 def main() -> None:
@@ -460,11 +512,17 @@ def main() -> None:
                 batch_size=args.batch_size,
                 checkpoint_dir=args.checkpoint_dir,
                 model_revision=args.revision,
+                dataset_root=settings.dataset_root,
             )
         )
     else:
         print(
-            activate_version(args.version, args.active_pointer, args.model_id).metadata.version_id
+            activate_version(
+                args.version,
+                args.active_pointer,
+                args.model_id,
+                dataset_root=settings.dataset_root,
+            ).metadata.version_id
         )
 
 

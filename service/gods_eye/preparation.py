@@ -150,6 +150,8 @@ def _arguments(
             model_id,
             "--cache-dir",
             str(paths.model_cache),
+            "--dataset-root",
+            str(paths.root / "data/datasets"),
             *revision_args,
         ],
         "smoke": [
@@ -158,6 +160,8 @@ def _arguments(
             model_id,
             "--cache-dir",
             str(paths.model_cache),
+            "--dataset-root",
+            str(paths.root / "data/datasets"),
             *revision_args,
         ],
     }
@@ -246,6 +250,8 @@ def prepare_model_index(
                 str(paths.active),
                 "--model-id",
                 model_id,
+                "--dataset-root",
+                str(paths.root / "data/datasets"),
                 *(["--revision", model_revision] if model_revision else []),
             )
             print("  reused (verified)")
@@ -275,6 +281,8 @@ def prepare_model_index(
             version,
             "--model-id",
             model_id,
+            "--dataset-root",
+            str(paths.root / "data/datasets"),
             *(["--revision", model_revision] if model_revision else []),
         )
         adapter.run(
@@ -284,6 +292,8 @@ def prepare_model_index(
             str(paths.active),
             "--model-id",
             model_id,
+            "--dataset-root",
+            str(paths.root / "data/datasets"),
         )
         preparation["index"] = {
             "status": "active",
