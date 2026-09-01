@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from runtime_http_server import loopback_http_server
 
 ROOT = Path(__file__).parents[2]
 
@@ -253,18 +254,26 @@ def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path
     for variable in ("GODS_EYE_DATASET_ROOT", "GODS_EYE_INDEX_ROOT", "GODS_EYE_HF_CACHE"):
         env.pop(variable, None)
 
-    result = subprocess.run(
-        [str(host_root / "gods-eye"), "start", "--detach", "--no-open"],
-        cwd=host_root,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    with loopback_http_server() as web_port:
+        result = subprocess.run(
+            [
+                str(host_root / "gods-eye"),
+                "start",
+                "--detach",
+                "--no-open",
+                "--web-port",
+                str(web_port),
+            ],
+            cwd=host_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
 
     assert result.returncode == 0, result.stderr
-    assert "http://127.0.0.1:5173" in result.stdout
+    assert f"http://127.0.0.1:{web_port}" in result.stdout
     runtime_up = next(call for call in calls if "up" in call["args"])
     assert runtime_up["dataset_root"] == str(host_root / "data" / "datasets")
     assert runtime_up["index_root"] == str(host_root / "indexes")
@@ -314,24 +323,25 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
     ):
         env.pop(variable, None)
 
-    commands = (
-        ("start", "--detach", "--offline", "--no-open"),
-        ("status",),
-        ("logs",),
-        ("stop",),
-    )
     results = []
-    for command in commands:
-        results.append(
-            subprocess.run(
-                [str(host_root / "gods-eye"), *command],
-                cwd=host_root,
-                env=env,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+    with loopback_http_server() as web_port:
+        commands = (
+            ("start", "--detach", "--offline", "--no-open", "--web-port", str(web_port)),
+            ("status",),
+            ("logs",),
+            ("stop",),
         )
+        for command in commands:
+            results.append(
+                subprocess.run(
+                    [str(host_root / "gods-eye"), *command],
+                    cwd=host_root,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+            )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     runtime_calls = [
         call
@@ -372,10 +382,12 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
         if call is not start_call
     )
     if image_mode == "release":
+        assert "--build" not in start_call["args"]
         assert all(
             str(workspace_root / "compose.release.yaml") in call["args"] for call in runtime_calls
         )
     else:
+        assert "--build" in start_call["args"]
         assert all(
             str(workspace_root / "compose.release.yaml") not in call["args"]
             for call in runtime_calls

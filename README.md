@@ -46,6 +46,27 @@ For unattended preparation, confirmation and data acceptance remain separate:
 ./gods-eye prepare --yes --accept-data-terms
 ```
 
+## Open the web app
+
+After `./gods-eye start` reports that the Full Demo is ready, open the URL printed in the terminal
+on the same computer. The Launcher normally opens it automatically. If it does not—for example,
+with `--no-open` or in a headless session—copy the printed URL into a desktop browser:
+
+```text
+God's Eye Full Demo is ready: http://127.0.0.1:5173
+```
+
+Treat that output as authoritative. `5173` is the default web port, but the Launcher chooses a
+different loopback port when the default is occupied and prints the actual URL to use. The interface
+requires a desktop viewport at least 1200 pixels wide.
+
+The default foreground session keeps running in the terminal; press `Ctrl+C` to stop it. If you
+started with `./gods-eye start --detach`, stop the Demo Runtime with `./gods-eye stop`.
+
+The Demo Runtime uses plain HTTP and has no account, password, or TLS. It listens only on
+`127.0.0.1` and is intended for access from the same computer. Public or network exposure is not
+supported.
+
 ## What preparation does
 
 `./gods-eye prepare` verifies and resumes seven stages: preflight, terms acknowledgement, Dataset

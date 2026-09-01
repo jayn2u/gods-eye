@@ -1,17 +1,61 @@
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import urllib.request
 import uuid
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import pytest
 
 ROOT = Path(__file__).parents[2]
 README = ROOT / "README.md"
+
+
+class _ApplicationShellParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.has_root = False
+        self.script_sources: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "div" and attributes.get("id") == "root":
+            self.has_root = True
+        if tag == "script" and (source := attributes.get("src")):
+            self.script_sources.append(source)
+
+
+def _advertised_runtime_url(output: str) -> str:
+    match = re.search(r"God's Eye Full Demo is ready: (http://127\.0\.0\.1:\d+)", output)
+    assert match is not None, output
+    return match.group(1)
+
+
+def _seed_stale_web_image(context: Path, image: str) -> None:
+    """Create the cached broken image that a development start must replace."""
+
+    context.mkdir()
+    context.joinpath("Dockerfile").write_text(
+        "FROM nginx:1.27-alpine\n"
+        "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"
+        "RUN printf '%s\\n' '<div id=\"stale-root\"></div>' > /usr/share/nginx/html/index.html\n"
+    )
+    context.joinpath("nginx.conf").write_text(
+        "server {\n  listen 80;\n  location / { try_files $uri $uri/ /index.html; }\n}\n"
+    )
+    seeded = subprocess.run(
+        ["docker", "build", "--tag", image, str(context)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert seeded.returncode == 0, seeded.stderr
 
 
 def test_readme_leads_with_the_executable_three_command_quickstart() -> None:
@@ -62,6 +106,8 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
             "-f",
             str(ROOT / "compose.smoke.yaml"),
             "config",
+            "--format",
+            "json",
         ],
         cwd=ROOT,
         text=True,
@@ -71,8 +117,16 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert 'GODS_EYE_USE_FIXTURES: "true"' in result.stdout
-    assert "127.0.0.1" in result.stdout
+    configuration = json.loads(result.stdout)
+    assert configuration["services"]["service"]["environment"]["GODS_EYE_USE_FIXTURES"] == "true"
+    for service_name in ("service", "web"):
+        published_ports = [
+            port
+            for port in configuration["services"][service_name]["ports"]
+            if port.get("published") is not None
+        ]
+        assert published_ports, f"{service_name} must publish a loopback port"
+        assert {port.get("host_ip") for port in published_ports} == {"127.0.0.1"}
 
 
 def test_fixture_preparation_command_produces_runtime_state_and_local_assets(
@@ -108,16 +162,20 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
     if shutil.which("docker") is None:
         pytest.skip("Docker CLI is not installed")
 
+    image_identity = uuid.uuid4().hex
+    web_image = f"gods-eye-web:smoke-{image_identity}"
     environment = {
         **os.environ,
         "PYTHONPATH": str(ROOT / "service"),
         "GODS_EYE_PROJECT_ROOT": str(tmp_path),
         "GODS_EYE_SOURCE_ROOT": str(ROOT),
         "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "1",
+        "GODS_EYE_WEB_IMAGE": web_image,
         "COMPOSE_FILE": f"{ROOT / 'compose.yaml'}:{ROOT / 'compose.smoke.yaml'}",
         "COMPOSE_PROJECT_NAME": f"gods-eye-smoke-{tmp_path.name}",
         "GODS_EYE_USE_FIXTURES": "true",
     }
+    _seed_stale_web_image(tmp_path / "stale-web-image", web_image)
     prepare = subprocess.run(
         [sys.executable, "-m", "gods_eye.launcher", "prepare", "--yes"],
         text=True,
@@ -148,9 +206,28 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
     )
     try:
         assert start.returncode == 0, start.stderr
-        assert "http://127.0.0.1:15173" in start.stdout
-        assert urllib.request.urlopen("http://127.0.0.1:15173", timeout=5).status == 200
-        ready = json.load(urllib.request.urlopen("http://127.0.0.1:18000/api/readiness", timeout=5))
+        runtime_url = _advertised_runtime_url(start.stdout)
+        assert runtime_url == "http://127.0.0.1:15173"
+
+        with urllib.request.urlopen(runtime_url, timeout=5) as response:
+            assert response.status == 200
+            assert response.headers.get_content_type() == "text/html"
+            application_shell = response.read().decode()
+
+        parser = _ApplicationShellParser()
+        parser.feed(application_shell)
+        assert parser.has_root, "the advertised URL must return the God's Eye application shell"
+        assert parser.script_sources, "the application shell must reference its built script asset"
+
+        script_url = urljoin(f"{runtime_url}/", parser.script_sources[0])
+        assert urlsplit(script_url).netloc == urlsplit(runtime_url).netloc
+        with urllib.request.urlopen(script_url, timeout=5) as response:
+            assert response.status == 200
+            assert response.read(), "the built script asset must not be empty"
+
+        health = json.load(urllib.request.urlopen(f"{runtime_url}/api/health", timeout=5))
+        ready = json.load(urllib.request.urlopen(f"{runtime_url}/api/readiness", timeout=5))
+        assert health == {"status": "ok"}
         assert ready["ready"] is True
         assert ready["gallery_count"] == 3
     finally:
@@ -158,6 +235,11 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
             [sys.executable, "-m", "gods_eye.launcher", "stop"],
             check=False,
             env=environment,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["docker", "image", "rm", "--force", web_image],
+            check=False,
             capture_output=True,
         )
 

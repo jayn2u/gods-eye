@@ -8,11 +8,17 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .launcher_common import EXIT_OK, EXIT_PREPARATION_FAILED, PREPARED_STAGES, RuntimeLayout
 from .launcher_lifecycle import mutation_lock, write_operation_log
+
+_APP_SHELL_MARKER = '<div id="root"'
+_WEB_PROBE_RESPONSE_LIMIT = 1024 * 1024
 
 
 def _compose_command(layout: RuntimeLayout, *, offline: bool = False) -> list[str]:
@@ -429,11 +435,29 @@ def _run(command: list[str], environment: dict[str, str]) -> subprocess.Complete
     return subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
 
 
+def _poll_until_available(
+    probe: Callable[[float], tuple[bool, str]],
+    timeout_seconds: float,
+    unavailable_detail: str,
+) -> tuple[bool, str]:
+    """Retry one availability probe until it succeeds or its deadline expires."""
+
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    detail = unavailable_detail
+    while True:
+        available, probe_detail = probe(max(0, deadline - time.monotonic()))
+        detail = probe_detail or detail
+        if available:
+            return True, detail
+        remaining = max(0, deadline - time.monotonic())
+        if remaining == 0:
+            return False, detail
+        time.sleep(min(1, remaining))
+
+
 def _wait_for_readiness(
     command: list[str], environment: dict[str, str], timeout_seconds: float
 ) -> tuple[bool, str]:
-    deadline = time.monotonic() + timeout_seconds
-    detail = "search readiness did not respond"
     check = [
         *command,
         "exec",
@@ -443,14 +467,49 @@ def _wait_for_readiness(
         "-c",
         "import json,sys,urllib.request; health=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health')); ready=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/readiness')); failure=None if health.get('status') == 'ok' and ready.get('ready') else ready.get('guidance') or 'search readiness is unavailable'; print(failure, file=sys.stderr) if failure else print(json.dumps(ready)); raise SystemExit(1 if failure else 0)",
     ]
-    while True:
+
+    def probe(_remaining_seconds: float) -> tuple[bool, str]:
         result = _run(check, environment)
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        detail = result.stderr.strip() or result.stdout.strip() or detail
-        if time.monotonic() >= deadline:
-            return False, detail
-        time.sleep(min(1, max(0, deadline - time.monotonic())))
+        detail = result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
+        return result.returncode == 0, detail or result.stdout.strip()
+
+    return _poll_until_available(probe, timeout_seconds, "search readiness did not respond")
+
+
+def _probe_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
+    """Verify that the advertised loopback URL serves the built application shell."""
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=max(0.1, min(2.0, timeout_seconds))) as response:
+            status = response.status
+            content_type = response.headers.get_content_type()
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = response.read(_WEB_PROBE_RESPONSE_LIMIT).decode(charset, errors="replace")
+    except urllib.error.HTTPError as error:
+        return False, f"Demo Runtime web entry point {url} returned HTTP {error.code}"
+    except (OSError, urllib.error.URLError) as error:
+        reason = getattr(error, "reason", error)
+        return False, f"Demo Runtime web entry point {url} could not be reached: {reason}"
+
+    if status != 200:
+        return False, f"Demo Runtime web entry point {url} returned HTTP {status}"
+    if content_type != "text/html":
+        return (
+            False,
+            f"Demo Runtime web entry point {url} returned {content_type or 'unknown content'}",
+        )
+    if _APP_SHELL_MARKER not in body:
+        return False, f"Demo Runtime web entry point {url} did not return the application shell"
+    return True, "application shell is available"
+
+
+def _wait_for_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
+    return _poll_until_available(
+        lambda remaining: _probe_web_entrypoint(url, remaining),
+        timeout_seconds,
+        f"Demo Runtime web entry point {url} did not respond",
+    )
 
 
 def _can_open_browser(no_open: bool) -> bool:
@@ -497,12 +556,21 @@ def start_runtime(
         if asset_errors := _prepared_asset_errors(layout, host_root):
             _print_preflight_failure(asset_errors, host_root)
             return EXIT_PREPARATION_FAILED
-        started = _run([*compose, "up", "-d", "service", "web"], environment)
+        runtime_up = [*compose, "up", "-d"]
+        if environment.get("GODS_EYE_IMAGE_MODE", "local") != "release":
+            runtime_up.append("--build")
+        runtime_up.extend(("service", "web"))
+        started = _run(runtime_up, environment)
         if started.returncode != 0:
+            _run([*compose, "down"], environment)
             print(started.stderr.strip() or "Could not start the Demo Runtime.", file=sys.stderr)
             return EXIT_PREPARATION_FAILED
+        timeout_seconds = float(os.getenv("GODS_EYE_READINESS_TIMEOUT_SECONDS", "120"))
+        readiness_deadline = time.monotonic() + timeout_seconds
         ready, detail = _wait_for_readiness(
-            compose, environment, float(os.getenv("GODS_EYE_READINESS_TIMEOUT_SECONDS", "120"))
+            compose,
+            environment,
+            max(0, readiness_deadline - time.monotonic()),
         )
         if not ready:
             _run([*compose, "down"], environment)
@@ -512,6 +580,14 @@ def start_runtime(
             )
             return EXIT_PREPARATION_FAILED
         url = f"http://127.0.0.1:{web_port}"
+        web_ready, detail = _wait_for_web_entrypoint(
+            url,
+            max(0, readiness_deadline - time.monotonic()),
+        )
+        if not web_ready:
+            _run([*compose, "down"], environment)
+            print(f"{detail}. Run './gods-eye logs' for diagnostics.", file=sys.stderr)
+            return EXIT_PREPARATION_FAILED
         print(f"God's Eye Full Demo is ready: {url}")
         if _can_open_browser(no_open):
             try:
