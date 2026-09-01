@@ -382,12 +382,14 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
     (workspace_root / "indexes" / "gallery-manifest.json").parent.mkdir(parents=True)
     (workspace_root / "indexes" / "gallery-manifest.json").write_text("{}")
     (workspace_root / "indexes" / "active").mkdir()
-    for asset in (
-        host_root / "data" / "datasets",
-        host_root / ".cache" / "huggingface",
-        host_root / "indexes" / "active",
-    ):
-        asset.mkdir(parents=True)
+    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        (host_root / "data" / "datasets" / name).mkdir(parents=True)
+    model_cache = host_root / ".cache" / "huggingface" / "model.ready"
+    model_cache.parent.mkdir(parents=True)
+    model_cache.write_text("ok")
+    (host_root / "indexes" / "versions" / "prepared").mkdir(parents=True)
+    (host_root / "indexes" / "gallery-manifest.json").write_text("{}")
+    (host_root / "indexes" / "active").write_text("versions/prepared\n")
     if image_mode == "release":
         (host_root / "release-images.env").write_text(
             "GODS_EYE_RELEASE_VERSION=v1.2.3\n"
