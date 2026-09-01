@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from gods_eye import launcher_runtime
 from gods_eye.launcher_common import RuntimeLayout
+from runtime_http_server import connection_refused_loopback_port, loopback_http_server
 
 ROOT = Path(__file__).parents[2]
 
@@ -141,14 +142,49 @@ def _run(root: Path, *arguments: str, prepared: bool = True, extra_env=None, inp
     return result, calls
 
 
-def test_detached_start_waits_for_search_readiness_and_reports_actual_loopback_url(tmp_path):
-    result, calls = _run(tmp_path, "start", "--detach", "--no-open", "--web-port", "6123")
+def test_detached_start_waits_for_search_and_web_readiness_then_reports_actual_url(tmp_path):
+    with loopback_http_server() as web_port:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+        )
 
     assert result.returncode == 0, result.stderr
-    assert "http://127.0.0.1:6123" in result.stdout
+    assert f"http://127.0.0.1:{web_port}" in result.stdout
     assert any("compose" in call and "up" in call and "-d" in call for call in calls)
     assert any("compose" in call and "exec" in call for call in calls)
     assert all("0.0.0.0" not in " ".join(call) for call in calls)
+
+
+@pytest.mark.parametrize("failure", ["http-500", "wrong-shell", "connection-refused"])
+def test_start_rejects_unavailable_web_entrypoint_and_stops_runtime(tmp_path, failure):
+    if failure == "http-500":
+        endpoint = loopback_http_server(status=500)
+    elif failure == "wrong-shell":
+        endpoint = loopback_http_server(body=b"<html>Welcome to nginx!</html>")
+    else:
+        endpoint = connection_refused_loopback_port()
+    with endpoint as web_port:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={"GODS_EYE_READINESS_TIMEOUT_SECONDS": "0"},
+        )
+
+    assert result.returncode == 4
+    assert "Full Demo is ready" not in result.stdout
+    assert "web" in result.stderr.lower()
+    assert "./gods-eye logs" in result.stderr
+    assert any("compose" in call and "up" in call for call in calls)
+    assert any("compose" in call and "down" in call for call in calls)
 
 
 def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
@@ -175,14 +211,17 @@ def test_start_rejects_unusable_launcher_compose_before_runtime_mutation(tmp_pat
 
 
 def test_offline_start_inherits_release_compose_files_and_adds_network_isolation(tmp_path):
-    result, calls = _run(
-        tmp_path,
-        "start",
-        "--detach",
-        "--offline",
-        "--no-open",
-        extra_env={"COMPOSE_FILE": "/workspace/compose.yaml:/workspace/compose.release.yaml"},
-    )
+    with loopback_http_server() as web_port:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--offline",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={"COMPOSE_FILE": "/workspace/compose.yaml:/workspace/compose.release.yaml"},
+        )
 
     assert result.returncode == 0, result.stderr
     up = next(call for call in calls if "compose" in call and "up" in call)
