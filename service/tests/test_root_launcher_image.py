@@ -299,9 +299,14 @@ def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path
             }
         )
     )
-    (host_root / "indexes" / "active").mkdir(parents=True)
-    (host_root / "data" / "datasets").mkdir(parents=True)
-    (host_root / ".cache" / "huggingface").mkdir(parents=True)
+    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        (host_root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
+    (host_root / "indexes" / "versions" / "prepared").mkdir(parents=True)
+    (host_root / "indexes" / "active").write_text("versions/prepared\n")
+    (host_root / "indexes" / "gallery-manifest.json").write_text("{}")
+    model_cache = host_root / ".cache" / "huggingface"
+    model_cache.mkdir(parents=True)
+    (model_cache / "model.ready").write_text("ready")
 
     bin_dir, log = _fake_docker_with_runtime_bind_check(tmp_path)
     env = {

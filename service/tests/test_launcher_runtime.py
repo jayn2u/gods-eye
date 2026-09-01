@@ -1,8 +1,11 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[2]
 
@@ -70,6 +73,22 @@ def _prepared(root: Path) -> None:
             }
         )
     )
+    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        (root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
+        receipt = root / "data" / "install-state" / f"{name}.json"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text("{}")
+    (root / ".cache" / "huggingface" / "model.ready").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    (root / ".cache" / "huggingface" / "model.ready").write_text("ready")
+    indexes = root / "indexes"
+    (indexes / "versions" / "prepared").mkdir(parents=True, exist_ok=True)
+    (indexes / "gallery-manifest.json").write_text("{}")
+    active = indexes / "active"
+    if active.is_dir():
+        shutil.rmtree(active)
+    active.write_text("versions/prepared\n")
 
 
 def _offline_assets(root: Path) -> None:
@@ -88,8 +107,12 @@ def _offline_assets(root: Path) -> None:
 
 
 def _run(root: Path, *arguments: str, prepared: bool = True, extra_env=None, input_text=None):
+    root.mkdir(parents=True, exist_ok=True)
     if prepared:
         _prepared(root)
+    launcher = root / "gods-eye"
+    shutil.copy2(ROOT / "gods-eye", launcher)
+    launcher.chmod(0o755)
     bin_dir = root / "bin"
     bin_dir.mkdir()
     log = _fake_docker(bin_dir)
@@ -106,8 +129,8 @@ def _run(root: Path, *arguments: str, prepared: bool = True, extra_env=None, inp
     }
     env.update(extra_env or {})
     result = subprocess.run(
-        [str(ROOT / "gods-eye"), *arguments],
-        cwd=ROOT,
+        [str(launcher), *arguments],
+        cwd=root,
         env=env,
         input=input_text,
         text=True,
@@ -171,7 +194,13 @@ def test_offline_start_inherits_release_compose_files_and_adds_network_isolation
 
 
 def test_offline_start_reports_each_missing_local_asset_without_starting_compose(tmp_path):
-    result, calls = _run(tmp_path, "start", "--detach", "--offline", "--no-open")
+    _prepared(tmp_path)
+    shutil.rmtree(tmp_path / "data")
+    shutil.rmtree(tmp_path / ".cache")
+    shutil.rmtree(tmp_path / "indexes")
+    result, calls = _run(
+        tmp_path, "start", "--detach", "--offline", "--no-open", prepared=False
+    )
 
     assert result.returncode == 4
     assert "Dataset Installation: CUHK-PEDES" in result.stderr
@@ -180,6 +209,69 @@ def test_offline_start_reports_each_missing_local_asset_without_starting_compose
     assert "active retrieval index: indexes/active" in result.stderr
     assert "No network access or downloads were attempted" in result.stderr
     assert not any("compose" in call and "up" in call for call in calls)
+
+
+def test_start_rejects_missing_active_index_before_runtime_mutation(tmp_path):
+    _prepared(tmp_path)
+    (tmp_path / "indexes" / "active").unlink()
+
+    result, calls = _run(tmp_path, "start", "--detach", "--no-open", prepared=False)
+
+    assert result.returncode == 4
+    assert "Prepared Demo asset preflight failed" in result.stderr
+    assert "active retrieval index pointer" in result.stderr
+    assert "gods-eye-index build" not in result.stderr
+    assert not any("up" in call for call in calls)
+
+
+def test_start_rejects_missing_active_index_version_before_runtime_mutation(tmp_path):
+    _prepared(tmp_path)
+    (tmp_path / "indexes" / "active").write_text("versions/missing\n")
+
+    result, calls = _run(tmp_path, "start", "--detach", "--no-open", prepared=False)
+
+    assert result.returncode == 4
+    assert "active retrieval index version" in result.stderr
+    assert "not reachable" in result.stderr
+    assert not any("up" in call for call in calls)
+
+
+def test_start_rejects_active_index_escape_before_runtime_mutation(tmp_path):
+    _prepared(tmp_path)
+    (tmp_path / "indexes" / "active").write_text("../outside\n")
+
+    result, calls = _run(tmp_path, "start", "--detach", "--no-open", prepared=False)
+
+    assert result.returncode == 4
+    assert "escapes the configured index root" in result.stderr
+    assert not any("up" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("relative", "diagnostic"),
+    [
+        ("data/datasets/CUHK-PEDES", "Dataset Installation: CUHK-PEDES"),
+        ("indexes", "active retrieval index"),
+        (".cache/huggingface", "CLIP ViT-B/16 model cache"),
+    ],
+)
+def test_start_reports_invisible_prepared_asset_without_runtime_mutation(
+    tmp_path, relative, diagnostic
+):
+    _prepared(tmp_path)
+    asset = tmp_path / relative
+    if asset.is_dir():
+        shutil.rmtree(asset)
+    else:
+        asset.unlink()
+
+    result, calls = _run(tmp_path, "start", "--detach", "--no-open", prepared=False)
+
+    assert result.returncode == 4
+    assert "Prepared Demo asset preflight failed" in result.stderr
+    assert diagnostic in result.stderr
+    assert "No network access or downloads were attempted" not in result.stderr
+    assert not any("up" in call for call in calls)
 
 
 def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
