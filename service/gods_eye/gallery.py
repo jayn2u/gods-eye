@@ -136,8 +136,10 @@ def _resolve_dataset_root(dataset: Dataset, value: str, dataset_root: Path | Non
         legacy_root = Path("/workspace/data/datasets")
         try:
             suffix = stored.relative_to(legacy_root)
-        except ValueError:
-            return stored
+        except ValueError as exc:
+            raise GalleryBuildError(
+                f"Dataset Installation root is outside the configured root: {dataset}"
+            ) from exc
         candidate = (dataset_root / suffix).resolve()
     configured = dataset_root.resolve()
     if not candidate.is_relative_to(configured) or dataset not in candidate.parts:

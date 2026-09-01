@@ -4,7 +4,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -164,7 +163,9 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("reference_format", ["portable", "legacy", "unsafe"])
+@pytest.mark.parametrize(
+    "reference_format", ["portable", "legacy", "missing", "unsafe", "unsafe-gallery"]
+)
 def test_prepared_index_is_portable_across_launcher_and_runtime_mounts(
     tmp_path: Path, reference_format: str
 ) -> None:
@@ -226,6 +227,18 @@ if reference_format == 'legacy':
     metadata_path.write_text(json.dumps(metadata, indent=2) + '\n')
 elif reference_format == 'unsafe':
     (root / 'indexes/active').write_text('/etc\n')
+elif reference_format == 'missing':
+    (root / 'indexes/active').write_text('versions/missing\n')
+elif reference_format == 'unsafe-gallery':
+    linked = version / 'manifest.json'
+    raw = json.loads(linked.read_text())
+    raw['roots']['CUHK-PEDES'] = '/etc'
+    linked.write_text(json.dumps(raw, indent=2) + '\n')
+    canonical = json.dumps(raw, sort_keys=True, separators=(',', ':')).encode()
+    metadata_path = version / 'metadata.json'
+    metadata = json.loads(metadata_path.read_text())
+    metadata['manifest_sha256'] = hashlib.sha256(canonical).hexdigest()
+    metadata_path.write_text(json.dumps(metadata, indent=2) + '\n')
 """
     build = subprocess.run(
         [
@@ -253,71 +266,99 @@ elif reference_format == 'unsafe':
     )
     assert build.returncode == 0, build.stderr
 
-    probe = socket.socket()
-    probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    container = f"gods-eye-portable-{uuid.uuid4().hex}"
+    version_id = next((project / "indexes/versions").iterdir()).name
+    runtime = project / ".gods-eye"
+    runtime.mkdir()
+    runtime.joinpath("state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "terms_acceptance": {},
+                "preparation": {
+                    "dataset_acquisition": {"status": "verified"},
+                    "model": {"status": "verified"},
+                    "gallery_manifest": {"status": "verified"},
+                    "index": {"status": "active"},
+                    "smoke_test": {"status": "verified"},
+                },
+            }
+        )
+    )
+    override = project / "compose.portable.yaml"
+    override.write_text(
+        """services:
+  service:
+    environment:
+      GODS_EYE_MODEL_ID: fixture/deterministic-v1
+      GODS_EYE_USE_FIXTURES: "false"
+      PYTHONPATH: /source/service
+    volumes:
+      - ${GODS_EYE_SOURCE_ROOT}:/source:ro
+    command: ["python", "-m", "uvicorn", "gods_eye.app:app", "--host", "0.0.0.0", "--port", "8000"]
+"""
+    )
+    ports = []
+    for _ in range(2):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        ports.append(probe.getsockname()[1])
+        probe.close()
+    web_port, api_port = ports
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_PROJECT_ROOT": str(project),
+        "GODS_EYE_SOURCE_ROOT": str(ROOT),
+        "GODS_EYE_INDEX_ROOT": str(project / "indexes"),
+        "GODS_EYE_DATASET_ROOT": str(project / "data/datasets"),
+        "GODS_EYE_MODEL_ID": "fixture/deterministic-v1",
+        "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "1",
+        "GODS_EYE_READINESS_TIMEOUT_SECONDS": "5",
+        "COMPOSE_FILE": f"{ROOT / 'compose.yaml'}:{override}",
+        "COMPOSE_PROJECT_NAME": f"gods-eye-portable-{uuid.uuid4().hex}",
+    }
     started = subprocess.run(
         [
-            "docker",
-            "run",
-            "--detach",
-            "--name",
-            container,
-            "-p",
-            f"127.0.0.1:{port}:8000",
-            "-v",
-            f"{project / 'indexes'}:/indexes",
-            "-v",
-            f"{project / 'data/datasets'}:/datasets:ro",
-            "-v",
-            f"{ROOT}:/source:ro",
-            "-e",
-            "PYTHONPATH=/source/service",
-            "-e",
-            "GODS_EYE_ACTIVE_INDEX=/indexes/active",
-            "-e",
-            "GODS_EYE_INDEX_ROOT=/indexes",
-            "-e",
-            "GODS_EYE_DATASET_ROOT=/datasets",
-            "-e",
-            "GODS_EYE_MODEL_ID=fixture/deterministic-v1",
-            image,
-            "python",
+            sys.executable,
             "-m",
-            "uvicorn",
-            "gods_eye.app:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "8000",
+            "gods_eye.launcher",
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            "--api-port",
+            str(api_port),
         ],
         text=True,
         capture_output=True,
         check=False,
+        env=environment,
     )
-    assert started.returncode == 0, started.stderr
     try:
-        readiness = None
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            try:
-                readiness = json.load(
-                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/readiness", timeout=1)
-                )
-                break
-            except OSError:
-                time.sleep(0.2)
-        assert readiness is not None
-        if reference_format == "unsafe":
-            assert readiness["ready"] is False
-            assert "escapes the configured index root" in readiness["guidance"]
+        if reference_format in {"missing", "unsafe", "unsafe-gallery"}:
+            assert started.returncode == 4
+            if reference_format == "unsafe":
+                assert "escapes the configured index root" in started.stderr
+            elif reference_format == "unsafe-gallery":
+                assert "outside the configured root" in started.stderr
+            else:
+                assert "metadata.json" in started.stderr
             return
+        assert started.returncode == 0, started.stderr
+        health = json.load(
+            urllib.request.urlopen(f"http://127.0.0.1:{api_port}/api/health", timeout=5)
+        )
+        readiness = json.load(
+            urllib.request.urlopen(f"http://127.0.0.1:{api_port}/api/readiness", timeout=5)
+        )
+        assert health == {"status": "ok"}
         assert readiness["ready"] is True, readiness.get("guidance")
+        assert readiness["model_id"] == "fixture/deterministic-v1"
+        assert readiness["active_index_version"] == version_id
         assert readiness["gallery_count"] == 1
         request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/api/search",
+            f"http://127.0.0.1:{api_port}/api/search",
             data=json.dumps(
                 {"query": "a person in blue", "top_k": 1, "datasets": ["CUHK-PEDES"]}
             ).encode(),
@@ -327,9 +368,14 @@ elif reference_format == 'unsafe':
         assert len(response["results"]) == 1
         assert (
             urllib.request.urlopen(
-                f"http://127.0.0.1:{port}{response['results'][0]['image_url']}", timeout=5
+                f"http://127.0.0.1:{api_port}{response['results'][0]['image_url']}", timeout=5
             ).status
             == 200
         )
     finally:
-        subprocess.run(["docker", "rm", "--force", container], capture_output=True, check=False)
+        subprocess.run(
+            [sys.executable, "-m", "gods_eye.launcher", "stop"],
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
