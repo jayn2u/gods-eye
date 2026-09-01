@@ -91,6 +91,31 @@ def _runtime_env(web_port: int, api_port: int, offline: bool) -> dict[str, str]:
     }
 
 
+def _host_project_root(layout: RuntimeLayout) -> Path:
+    """Return the host path namespace used by the Docker daemon.
+
+    The Launcher runs from ``/workspace`` inside its container while the
+    nested Compose process talks to the host Docker daemon.  Relative volume
+    sources would therefore resolve against the container-only path.  The
+    shell wrapper supplies the actual checkout root; direct Launcher use
+    falls back to its project root.
+    """
+
+    configured = os.getenv("GODS_EYE_HOST_PROJECT_ROOT")
+    return Path(configured or layout.root).expanduser().resolve()
+
+
+def _prepared_asset_env(host_root: Path) -> dict[str, str]:
+    """Make every persistent Prepared Demo bind source explicit and absolute."""
+
+    return {
+        "GODS_EYE_DATA_HOME": str(host_root / "data"),
+        "GODS_EYE_DATASET_ROOT": str(host_root / "data" / "datasets"),
+        "GODS_EYE_INDEX_ROOT": str(host_root / "indexes"),
+        "GODS_EYE_HF_CACHE": str(host_root / ".cache" / "huggingface"),
+    }
+
+
 def _run(command: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
 
@@ -149,6 +174,7 @@ def start_runtime(
     api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     environment = _runtime_env(web_port, api_port, offline)
+    environment.update(_prepared_asset_env(_host_project_root(layout)))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
     if compose_check.returncode != 0:
         print(

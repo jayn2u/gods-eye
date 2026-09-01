@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -45,6 +46,71 @@ elif "run" in args and "launcher" in args:
     raise SystemExit(subprocess.call(
         [sys.executable, "-m", "gods_eye.launcher", *command], env=os.environ
     ))
+else:
+    raise SystemExit(97)
+"""
+    )
+    docker.chmod(0o755)
+    return bin_dir, log
+
+
+def _fake_docker_with_runtime_bind_check(tmp_path: Path) -> tuple[Path, Path]:
+    """Fake the outer and nested Docker CLIs while keeping host/workspace roots distinct."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "docker-runtime.jsonl"
+    docker = bin_dir / "docker"
+    docker.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
+with log.open("a") as stream:
+    stream.write(json.dumps({
+        "args": args,
+        "dataset_root": os.getenv("GODS_EYE_DATASET_ROOT"),
+        "index_root": os.getenv("GODS_EYE_INDEX_ROOT"),
+        "hf_cache": os.getenv("GODS_EYE_HF_CACHE"),
+    }) + "\\n")
+if args[:3] == ["compose", "version", "--short"]:
+    print("2.32.4")
+elif args[:2] == ["info", "--format"]:
+    print("/plugins/docker-compose")
+elif "build" in args and args[-1] == "launcher":
+    raise SystemExit(0)
+elif "run" in args and "launcher" in args:
+    host_root = Path(args[args.index("--project-directory") + 1]).resolve()
+    child_env = {
+        **os.environ,
+        # The real outer Compose service mounts host_root at /workspace. A
+        # distinct temp path gives the fake daemon a separate internal root.
+        "GODS_EYE_PROJECT_ROOT": str(Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"])),
+        "GODS_EYE_HOST_PROJECT_ROOT": str(host_root),
+        "GODS_EYE_COMPOSE_FILE": str(
+            Path(os.environ["GODS_EYE_FAKE_WORKSPACE_ROOT"]) / "compose.yaml"
+        ),
+    }
+    command = args[args.index("launcher") + 1:]
+    raise SystemExit(subprocess.call(
+        [sys.executable, "-m", "gods_eye.launcher", *command], env=child_env
+    ))
+elif "compose" in args and "exec" in args:
+    workspace = Path(os.environ["GODS_EYE_PROJECT_ROOT"])
+    index_root = Path(os.getenv("GODS_EYE_INDEX_ROOT", str(workspace / "indexes")))
+    if (index_root / "active").exists():
+        print(json.dumps({"ready": True, "gallery_count": 3}))
+    else:
+        print("No active index. Build and activate an index first.", file=sys.stderr)
+        raise SystemExit(1)
+elif "compose" in args and ("up" in args or "down" in args):
+    pass
 else:
     raise SystemExit(97)
 """
@@ -128,6 +194,70 @@ def test_root_launcher_stops_when_compose_plugin_cannot_be_mounted(tmp_path: Pat
     assert result.returncode == 2
     assert "Compose plugin" in result.stderr
     assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
+
+
+def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path: Path) -> None:
+    host_root = tmp_path / "checkout with spaces"
+    host_root.mkdir()
+    shutil.copy2(ROOT / "gods-eye", host_root / "gods-eye")
+    workspace_root = tmp_path / "launcher-workspace"
+    workspace_root.mkdir()
+
+    prepared = workspace_root / ".gods-eye"
+    prepared.mkdir()
+    (prepared / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "terms_acceptance": {},
+                "compatibility": {},
+                "preparation": {
+                    "dataset_acquisition": {"status": "verified"},
+                    "model": {"status": "verified"},
+                    "gallery_manifest": {"status": "verified"},
+                    "index": {"status": "active"},
+                    "smoke_test": {"status": "verified"},
+                },
+            }
+        )
+    )
+    (host_root / "indexes" / "active").mkdir(parents=True)
+    (host_root / "data" / "datasets").mkdir(parents=True)
+    (host_root / ".cache" / "huggingface").mkdir(parents=True)
+
+    bin_dir, log = _fake_docker_with_runtime_bind_check(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_FAKE_DOCKER_LOG": str(log),
+        "GODS_EYE_FAKE_WORKSPACE_ROOT": str(workspace_root),
+        "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "1",
+        "GODS_EYE_READINESS_TIMEOUT_SECONDS": "0",
+    }
+    for variable in ("GODS_EYE_DATASET_ROOT", "GODS_EYE_INDEX_ROOT", "GODS_EYE_HF_CACHE"):
+        env.pop(variable, None)
+
+    result = subprocess.run(
+        [str(host_root / "gods-eye"), "start", "--detach", "--no-open"],
+        cwd=host_root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+
+    assert result.returncode == 0, result.stderr
+    assert "http://127.0.0.1:5173" in result.stdout
+    runtime_up = next(call for call in calls if "up" in call["args"])
+    assert runtime_up["dataset_root"] == str(host_root / "data" / "datasets")
+    assert runtime_up["index_root"] == str(host_root / "indexes")
+    assert runtime_up["hf_cache"] == str(host_root / ".cache" / "huggingface")
+    assert all(
+        "/workspace" not in runtime_up[key]
+        for key in ("dataset_root", "index_root", "hf_cache")
+    )
 
 
 def test_root_launcher_reports_daemon_failure_without_claiming_compose_is_missing(
