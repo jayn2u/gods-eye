@@ -1,9 +1,12 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 import urllib.request
+import uuid
 from pathlib import Path
 
 import pytest
@@ -158,3 +161,175 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
             env=environment,
             capture_output=True,
         )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("reference_format", ["portable", "legacy", "unsafe"])
+def test_prepared_index_is_portable_across_launcher_and_runtime_mounts(
+    tmp_path: Path, reference_format: str
+) -> None:
+    if os.getenv("RUN_PORTABLE_INDEX_SMOKE") != "1":
+        pytest.skip("set RUN_PORTABLE_INDEX_SMOKE=1 to exercise portable Prepared Demo assets")
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+
+    image = os.getenv("GODS_EYE_SERVICE_IMAGE", "gods-eye-service:local")
+    project = tmp_path / "project"
+    project.mkdir()
+    builder = r"""
+import hashlib
+import json
+import os
+from pathlib import Path
+from PIL import Image
+from gods_eye.gallery import GalleryManifest, GalleryRecord, stable_id
+from gods_eye.index_store import activate_version, build_index
+
+root = Path('/workspace')
+images = root / 'data/datasets/CUHK-PEDES/imgs'
+images.mkdir(parents=True)
+relative = 'fixture/person.png'
+path = images / relative
+path.parent.mkdir(parents=True)
+Image.new('RGB', (8, 16), 'blue').save(path)
+record = GalleryRecord(
+    id=stable_id('CUHK-PEDES', 'test', relative),
+    dataset='CUHK-PEDES', split='test', relative_path=relative,
+    source_person_id='fixture-person', content_sha256='fixture-content',
+)
+manifest = GalleryManifest(
+    roots={'CUHK-PEDES': images}, records=[record],
+    report={'source_rows': 1, 'records': 1, 'errors': 0},
+)
+manifest_path = root / 'indexes/gallery-manifest.json'
+manifest.write(manifest_path)
+version = build_index(
+    manifest_path, root / 'indexes/versions',
+    model_id='fixture/deterministic-v1', dimension=8, backend='numpy',
+    dataset_root=root / 'data/datasets',
+)
+activate_version(
+    version, root / 'indexes/active', 'fixture/deterministic-v1',
+    dataset_root=root / 'data/datasets',
+)
+reference_format = os.environ['REFERENCE_FORMAT']
+if reference_format == 'legacy':
+    (root / 'indexes/active').write_text(str(version) + '\n')
+    linked = version / 'manifest.json'
+    raw = json.loads(linked.read_text())
+    raw['roots']['CUHK-PEDES'] = '/workspace/data/datasets/CUHK-PEDES/imgs'
+    linked.write_text(json.dumps(raw, indent=2) + '\n')
+    canonical = json.dumps(raw, sort_keys=True, separators=(',', ':')).encode()
+    metadata_path = version / 'metadata.json'
+    metadata = json.loads(metadata_path.read_text())
+    metadata['manifest_sha256'] = hashlib.sha256(canonical).hexdigest()
+    metadata_path.write_text(json.dumps(metadata, indent=2) + '\n')
+elif reference_format == 'unsafe':
+    (root / 'indexes/active').write_text('/etc\n')
+"""
+    build = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
+            "-v",
+            f"{project}:/workspace",
+            "-v",
+            f"{ROOT}:/source:ro",
+            "-e",
+            "PYTHONPATH=/source/service",
+            "-e",
+            f"REFERENCE_FORMAT={reference_format}",
+            image,
+            "python",
+            "-c",
+            builder,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    container = f"gods-eye-portable-{uuid.uuid4().hex}"
+    started = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            container,
+            "-p",
+            f"127.0.0.1:{port}:8000",
+            "-v",
+            f"{project / 'indexes'}:/indexes",
+            "-v",
+            f"{project / 'data/datasets'}:/datasets:ro",
+            "-v",
+            f"{ROOT}:/source:ro",
+            "-e",
+            "PYTHONPATH=/source/service",
+            "-e",
+            "GODS_EYE_ACTIVE_INDEX=/indexes/active",
+            "-e",
+            "GODS_EYE_INDEX_ROOT=/indexes",
+            "-e",
+            "GODS_EYE_DATASET_ROOT=/datasets",
+            "-e",
+            "GODS_EYE_MODEL_ID=fixture/deterministic-v1",
+            image,
+            "python",
+            "-m",
+            "uvicorn",
+            "gods_eye.app:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8000",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert started.returncode == 0, started.stderr
+    try:
+        readiness = None
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                readiness = json.load(
+                    urllib.request.urlopen(f"http://127.0.0.1:{port}/api/readiness", timeout=1)
+                )
+                break
+            except OSError:
+                time.sleep(0.2)
+        assert readiness is not None
+        if reference_format == "unsafe":
+            assert readiness["ready"] is False
+            assert "escapes the configured index root" in readiness["guidance"]
+            return
+        assert readiness["ready"] is True, readiness.get("guidance")
+        assert readiness["gallery_count"] == 1
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/search",
+            data=json.dumps(
+                {"query": "a person in blue", "top_k": 1, "datasets": ["CUHK-PEDES"]}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        response = json.load(urllib.request.urlopen(request, timeout=5))
+        assert len(response["results"]) == 1
+        assert (
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}{response['results'][0]['image_url']}", timeout=5
+            ).status
+            == 200
+        )
+    finally:
+        subprocess.run(["docker", "rm", "--force", container], capture_output=True, check=False)

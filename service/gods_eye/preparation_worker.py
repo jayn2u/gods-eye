@@ -42,23 +42,28 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--cache-dir", type=Path, required=True)
     build.add_argument("--batch-size", type=int, required=True)
     build.add_argument("--checkpoint-dir", type=Path, required=True)
+    build.add_argument("--dataset-root", type=Path, required=True)
     validate = commands.add_parser("validate-index")
     validate.add_argument("version", type=Path)
     validate.add_argument("--model-id", required=True)
     validate.add_argument("--revision")
+    validate.add_argument("--dataset-root", type=Path, required=True)
     activate = commands.add_parser("activate-index")
     activate.add_argument("version", type=Path)
     activate.add_argument("--active-pointer", type=Path, required=True)
     activate.add_argument("--model-id", required=True)
+    activate.add_argument("--dataset-root", type=Path, required=True)
     verify_index = commands.add_parser("verify-index")
     verify_index.add_argument("active", type=Path)
     verify_index.add_argument("--model-id", required=True)
     verify_index.add_argument("--revision")
+    verify_index.add_argument("--dataset-root", type=Path, required=True)
     smoke = commands.add_parser("smoke-search")
     smoke.add_argument("active", type=Path)
     smoke.add_argument("--model-id", required=True)
     smoke.add_argument("--revision")
     smoke.add_argument("--cache-dir", type=Path, required=True)
+    smoke.add_argument("--dataset-root", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.operation == "prepare-model":
@@ -87,20 +92,29 @@ def main(argv: list[str] | None = None) -> int:
                     batch_size=args.batch_size,
                     checkpoint_dir=args.checkpoint_dir / f"batch-{args.batch_size}",
                     model_revision=args.revision,
+                    dataset_root=args.dataset_root,
                 )
             )
         elif args.operation == "validate-index":
-            print(validate_version(args.version, args.model_id, args.revision).metadata.version_id)
+            print(
+                validate_version(
+                    args.version, args.model_id, args.revision, args.dataset_root
+                ).metadata.version_id
+            )
         elif args.operation == "activate-index":
             print(
                 activate_version(
-                    args.version, args.active_pointer, args.model_id
+                    args.version, args.active_pointer, args.model_id, args.dataset_root
                 ).metadata.version_id
             )
         elif args.operation == "verify-index":
-            print(load_active(args.active, args.model_id, args.revision).metadata.version_id)
+            print(
+                load_active(
+                    args.active, args.model_id, args.revision, args.dataset_root
+                ).metadata.version_id
+            )
         else:
-            loaded = load_active(args.active, args.model_id, args.revision)
+            loaded = load_active(args.active, args.model_id, args.revision, args.dataset_root)
             embedder = HuggingFaceClipEmbedder.from_config(
                 ClipRuntimeConfig(args.model_id, args.revision, "cuda", True, args.cache_dir)
             )

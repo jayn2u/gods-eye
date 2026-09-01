@@ -38,7 +38,7 @@ def _configured_engine() -> RetrievalEngine:
     if pointer:
         try:
             revision = settings.model_revision
-            loaded = load_active(Path(pointer), model_id, revision)
+            loaded = load_active(Path(pointer), model_id, revision, settings.dataset_root)
             if model_id == "fixture/deterministic-v1":
                 return IndexedRetrievalEngine(loaded)
             from .clip import HuggingFaceClipEmbedder

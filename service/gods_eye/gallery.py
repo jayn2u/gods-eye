@@ -50,6 +50,7 @@ class GalleryManifest:
     roots: dict[Dataset, Path]
     records: list[GalleryRecord]
     report: dict[str, Any]
+    serialized_roots: dict[Dataset, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._by_id = {record.id: record for record in self.records}
@@ -67,9 +68,12 @@ class GalleryManifest:
         return candidate
 
     def to_dict(self) -> dict[str, Any]:
+        roots = self.serialized_roots or {
+            dataset: str(root) for dataset, root in self.roots.items()
+        }
         return {
             "version": 1,
-            "roots": {dataset: str(root) for dataset, root in self.roots.items()},
+            "roots": roots,
             "records": [
                 {
                     "id": record.id,
@@ -90,12 +94,16 @@ class GalleryManifest:
         path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n")
 
     @classmethod
-    def read(cls, path: Path) -> GalleryManifest:
+    def read(cls, path: Path, *, dataset_root: Path | None = None) -> GalleryManifest:
         try:
             raw = json.loads(path.read_text())
             if raw.get("version") != 1:
                 raise GalleryBuildError(f"Unsupported manifest version in {path}")
-            roots = {dataset: Path(value) for dataset, value in raw["roots"].items()}
+            serialized_roots = {dataset: str(value) for dataset, value in raw["roots"].items()}
+            roots = {
+                dataset: _resolve_dataset_root(dataset, value, dataset_root)
+                for dataset, value in serialized_roots.items()
+            }
             records = [
                 GalleryRecord(
                     id=item["id"],
@@ -108,9 +116,33 @@ class GalleryManifest:
                 )
                 for item in raw["records"]
             ]
-            return cls(roots=roots, records=records, report=raw.get("report", {}))
+            return cls(
+                roots=roots,
+                records=records,
+                report=raw.get("report", {}),
+                serialized_roots=serialized_roots,
+            )
         except (KeyError, TypeError, json.JSONDecodeError) as exc:
             raise GalleryBuildError(f"Unreadable gallery manifest {path}: {exc}") from exc
+
+
+def _resolve_dataset_root(dataset: Dataset, value: str, dataset_root: Path | None) -> Path:
+    stored = Path(value)
+    if dataset_root is None:
+        return stored
+    if not stored.is_absolute():
+        candidate = (dataset_root / stored).resolve()
+    else:
+        legacy_root = Path("/workspace/data/datasets")
+        try:
+            suffix = stored.relative_to(legacy_root)
+        except ValueError:
+            return stored
+        candidate = (dataset_root / suffix).resolve()
+    configured = dataset_root.resolve()
+    if not candidate.is_relative_to(configured) or dataset not in candidate.parts:
+        raise GalleryBuildError(f"Unsafe Dataset Installation root for {dataset}")
+    return candidate
 
 
 def _relative_path(value: Any, dataset: Dataset, row_number: int) -> str:
