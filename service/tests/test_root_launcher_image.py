@@ -382,10 +382,12 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
         if call is not start_call
     )
     if image_mode == "release":
+        assert "--build" not in start_call["args"]
         assert all(
             str(workspace_root / "compose.release.yaml") in call["args"] for call in runtime_calls
         )
     else:
+        assert "--build" in start_call["args"]
         assert all(
             str(workspace_root / "compose.release.yaml") not in call["args"]
             for call in runtime_calls

@@ -37,6 +37,27 @@ def _advertised_runtime_url(output: str) -> str:
     return match.group(1)
 
 
+def _seed_stale_web_image(context: Path, image: str) -> None:
+    """Create the cached broken image that a development start must replace."""
+
+    context.mkdir()
+    context.joinpath("Dockerfile").write_text(
+        "FROM nginx:1.27-alpine\n"
+        "COPY nginx.conf /etc/nginx/conf.d/default.conf\n"
+        "RUN printf '%s\\n' '<div id=\"stale-root\"></div>' > /usr/share/nginx/html/index.html\n"
+    )
+    context.joinpath("nginx.conf").write_text(
+        "server {\n  listen 80;\n  location / { try_files $uri $uri/ /index.html; }\n}\n"
+    )
+    seeded = subprocess.run(
+        ["docker", "build", "--tag", image, str(context)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+
 def test_readme_leads_with_the_executable_three_command_quickstart() -> None:
     text = README.read_text()
     quickstart = text[text.index("## Quickstart") : text.index("## What preparation does")]
@@ -154,6 +175,7 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
         "COMPOSE_PROJECT_NAME": f"gods-eye-smoke-{tmp_path.name}",
         "GODS_EYE_USE_FIXTURES": "true",
     }
+    _seed_stale_web_image(tmp_path / "stale-web-image", web_image)
     prepare = subprocess.run(
         [sys.executable, "-m", "gods_eye.launcher", "prepare", "--yes"],
         text=True,

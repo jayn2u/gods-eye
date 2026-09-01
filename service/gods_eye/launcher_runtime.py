@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -434,11 +435,29 @@ def _run(command: list[str], environment: dict[str, str]) -> subprocess.Complete
     return subprocess.run(command, text=True, capture_output=True, check=False, env=environment)
 
 
+def _poll_until_available(
+    probe: Callable[[float], tuple[bool, str]],
+    timeout_seconds: float,
+    unavailable_detail: str,
+) -> tuple[bool, str]:
+    """Retry one availability probe until it succeeds or its deadline expires."""
+
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    detail = unavailable_detail
+    while True:
+        available, probe_detail = probe(max(0, deadline - time.monotonic()))
+        detail = probe_detail or detail
+        if available:
+            return True, detail
+        remaining = max(0, deadline - time.monotonic())
+        if remaining == 0:
+            return False, detail
+        time.sleep(min(1, remaining))
+
+
 def _wait_for_readiness(
     command: list[str], environment: dict[str, str], timeout_seconds: float
 ) -> tuple[bool, str]:
-    deadline = time.monotonic() + timeout_seconds
-    detail = "search readiness did not respond"
     check = [
         *command,
         "exec",
@@ -448,14 +467,13 @@ def _wait_for_readiness(
         "-c",
         "import json,sys,urllib.request; health=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health')); ready=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/readiness')); failure=None if health.get('status') == 'ok' and ready.get('ready') else ready.get('guidance') or 'search readiness is unavailable'; print(failure, file=sys.stderr) if failure else print(json.dumps(ready)); raise SystemExit(1 if failure else 0)",
     ]
-    while True:
+
+    def probe(_remaining_seconds: float) -> tuple[bool, str]:
         result = _run(check, environment)
-        if result.returncode == 0:
-            return True, result.stdout.strip()
-        detail = result.stderr.strip() or result.stdout.strip() or detail
-        if time.monotonic() >= deadline:
-            return False, detail
-        time.sleep(min(1, max(0, deadline - time.monotonic())))
+        detail = result.stdout.strip() if result.returncode == 0 else result.stderr.strip()
+        return result.returncode == 0, detail or result.stdout.strip()
+
+    return _poll_until_available(probe, timeout_seconds, "search readiness did not respond")
 
 
 def _probe_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
@@ -487,18 +505,11 @@ def _probe_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
 
 
 def _wait_for_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
-    deadline = time.monotonic() + timeout_seconds
-    detail = f"Demo Runtime web entry point {url} did not respond"
-    while True:
-        available, detail = _probe_web_entrypoint(
-            url,
-            max(0, deadline - time.monotonic()),
-        )
-        if available:
-            return True, detail
-        if time.monotonic() >= deadline:
-            return False, detail
-        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    return _poll_until_available(
+        lambda remaining: _probe_web_entrypoint(url, remaining),
+        timeout_seconds,
+        f"Demo Runtime web entry point {url} did not respond",
+    )
 
 
 def _can_open_browser(no_open: bool) -> bool:
@@ -545,8 +556,13 @@ def start_runtime(
         if asset_errors := _prepared_asset_errors(layout, host_root):
             _print_preflight_failure(asset_errors, host_root)
             return EXIT_PREPARATION_FAILED
-        started = _run([*compose, "up", "-d", "service", "web"], environment)
+        runtime_up = [*compose, "up", "-d"]
+        if environment.get("GODS_EYE_IMAGE_MODE", "local") != "release":
+            runtime_up.append("--build")
+        runtime_up.extend(("service", "web"))
+        started = _run(runtime_up, environment)
         if started.returncode != 0:
+            _run([*compose, "down"], environment)
             print(started.stderr.strip() or "Could not start the Demo Runtime.", file=sys.stderr)
             return EXIT_PREPARATION_FAILED
         timeout_seconds = float(os.getenv("GODS_EYE_READINESS_TIMEOUT_SECONDS", "120"))

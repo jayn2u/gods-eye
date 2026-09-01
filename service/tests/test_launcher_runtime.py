@@ -47,7 +47,12 @@ elif 'compose' in args and 'ps' in args:
     print(json.dumps([{'Service': 'service', 'State': 'running'}, {'Service': 'web', 'State': 'running'}]))
 elif 'compose' in args and 'logs' in args:
     print('service | ready')
-elif 'compose' in args and ('up' in args or 'down' in args):
+elif 'compose' in args and 'up' in args:
+    exit_code = int(os.environ.get('FAKE_RUNTIME_UP_EXIT', '0'))
+    if exit_code:
+        print(os.environ.get('FAKE_RUNTIME_UP_DETAIL', 'runtime start failed'), file=sys.stderr)
+    raise SystemExit(exit_code)
+elif 'compose' in args and 'down' in args:
     pass
 else:
     raise SystemExit(97)
@@ -391,6 +396,29 @@ def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
     assert "active retrieval index reference escapes the configured index root" in result.stderr
     assert "logs" in result.stderr.lower()
     assert any("compose" in call and "down" in call for call in calls)
+
+
+def test_start_failure_immediately_stops_partially_started_runtime(tmp_path):
+    result, calls = _run(
+        tmp_path,
+        "start",
+        "--detach",
+        "--no-open",
+        extra_env={
+            "FAKE_RUNTIME_UP_EXIT": "17",
+            "FAKE_RUNTIME_UP_DETAIL": "web container could not start",
+        },
+    )
+
+    assert result.returncode == 4
+    assert "web container could not start" in result.stderr
+    runtime_actions = [
+        "up" if "up" in call else "down"
+        for call in calls
+        if "compose" in call and ("up" in call or "down" in call)
+    ]
+    assert runtime_actions == ["up", "down"]
+    assert not any("compose" in call and "exec" in call for call in calls)
 
 
 def test_status_logs_and_stop_are_launcher_commands(tmp_path):
