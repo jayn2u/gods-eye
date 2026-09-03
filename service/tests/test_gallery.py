@@ -20,14 +20,8 @@ def metadata(path: Path, rows: list[dict]) -> None:
 
 def tiny_sources(tmp_path: Path):
     cuhk = tmp_path / "cuhk"
-    icfg = tmp_path / "icfg"
-    rstp = tmp_path / "rstp"
     image(cuhk / "train/p1/a.jpg", (0, 0, 255))
     image(cuhk / "val/p2/b.png", (255, 0, 0))
-    image(icfg / "test/p3/c.jpg", (0, 255, 0))
-    (icfg / "test/p3/copy.jpg").parent.mkdir(parents=True, exist_ok=True)
-    (icfg / "test/p3/copy.jpg").write_bytes((icfg / "test/p3/c.jpg").read_bytes())
-    image(rstp / "test/p4/d.jpg", (255, 255, 0))
     metadata(
         tmp_path / "cuhk.json",
         [
@@ -35,62 +29,40 @@ def tiny_sources(tmp_path: Path):
             {"split": "val", "file_path": "val/p2/b.png", "id": 2, "captions": ["secret"]},
         ],
     )
-    metadata(
-        tmp_path / "icfg.json",
-        [
-            {"split": "test", "file_path": "test/p3/c.jpg", "id": 3},
-            {"split": "test", "file_path": "test/p3/c.jpg", "id": 33},
-            {"split": "test", "file_path": "test/p3/copy.jpg", "id": 4},
-        ],
-    )
-    metadata(tmp_path / "rstp.json", [{"split": "test", "img_path": "test/p4/d.jpg", "id": 5}])
-    return {
-        "CUHK-PEDES": (cuhk, tmp_path / "cuhk.json"),
-        "ICFG-PEDES": (icfg, tmp_path / "icfg.json"),
-        "RSTPReid": (rstp, tmp_path / "rstp.json"),
-    }
+    return {"CUHK-PEDES": (cuhk, tmp_path / "cuhk.json")}
 
 
-def test_all_metadata_shapes_stable_ids_and_exact_dedup(tmp_path: Path) -> None:
+def test_cuhk_metadata_shapes_and_stable_ids(tmp_path: Path) -> None:
     sources = tiny_sources(tmp_path)
     manifest = build_manifest(sources)
 
     assert manifest.report == {
-        "source_rows": 6,
-        "unique_paths": 5,
-        "exact_content_duplicates": 1,
-        "records": 4,
+        "source_rows": 2,
+        "unique_paths": 2,
+        "exact_content_duplicates": 0,
+        "records": 2,
         "errors": 0,
     }
-    assert {record.dataset for record in manifest.records} == {
-        "CUHK-PEDES",
-        "ICFG-PEDES",
-        "RSTPReid",
-    }
+    assert {record.dataset for record in manifest.records} == {"CUHK-PEDES"}
     validation = next(
         record for record in manifest.records if record.relative_path == "val/p2/b.png"
     )
     assert validation.split == "validation"
     assert validation.id == stable_id("CUHK-PEDES", "validation", "val/p2/b.png")
-    assert any(record.aliases for record in manifest.records)
-    icfg_record = next(record for record in manifest.records if record.dataset == "ICFG-PEDES")
-    assert {item.source_person_id for item in icfg_record.aliases} == {"33", "4"}
+    assert not any(record.aliases for record in manifest.records)
 
     output = tmp_path / "manifest.json"
     manifest.write(output)
     assert GalleryManifest.read(output).to_dict() == manifest.to_dict()
 
 
-def test_empty_icfg_validation_is_not_invented(tmp_path: Path) -> None:
-    sources = tiny_sources(tmp_path)
-    manifest = build_manifest(sources)
-    icfg_splits = {
-        provenance.split
-        for record in manifest.records
-        for provenance in [record.provenance_for(["ICFG-PEDES"])]
-        if provenance is not None
-    }
-    assert icfg_splits == {"test"}
+def test_retired_dataset_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "images"
+    root.mkdir()
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text("[]")
+    with pytest.raises(GalleryBuildError, match="Unsupported dataset"):
+        build_manifest({"ICFG-PEDES": (root, metadata_path)})
 
 
 def test_invalid_metadata_and_images_have_actionable_errors(tmp_path: Path) -> None:
@@ -113,12 +85,12 @@ def test_filtered_search_and_safe_manifest_image_access(tmp_path: Path) -> None:
     client = TestClient(app)
     with use_retrieval_engine(engine):
         response = client.post(
-            "/api/search", json={"query": "yellow coat", "top_k": 10, "datasets": ["RSTPReid"]}
+            "/api/search", json={"query": "blue coat", "top_k": 10, "datasets": ["CUHK-PEDES"]}
         )
         assert response.status_code == 200
         results = response.json()["results"]
-        assert len(results) == 1
-        assert results[0]["dataset"] == "RSTPReid"
+        assert len(results) == 2
+        assert {result["dataset"] for result in results} == {"CUHK-PEDES"}
         assert set(results[0]) == {"rank", "similarity", "dataset", "id", "split", "image_url"}
         assert "caption" not in response.text
         assert str(tmp_path) not in response.text
@@ -127,15 +99,11 @@ def test_filtered_search_and_safe_manifest_image_access(tmp_path: Path) -> None:
         assert client.get("/api/images/..%2F..%2Fetc%2Fpasswd").status_code in (404, 422)
 
 
-def test_default_search_includes_every_dataset(tmp_path: Path) -> None:
+def test_default_search_uses_cuhk_gallery(tmp_path: Path) -> None:
     engine = ManifestRetrievalEngine(build_manifest(tiny_sources(tmp_path)))
     client = TestClient(app)
     with use_retrieval_engine(engine):
         results = client.post("/api/search", json={"query": "person", "top_k": 10}).json()[
             "results"
         ]
-    assert {result["dataset"] for result in results} == {
-        "CUHK-PEDES",
-        "ICFG-PEDES",
-        "RSTPReid",
-    }
+    assert {result["dataset"] for result in results} == {"CUHK-PEDES"}

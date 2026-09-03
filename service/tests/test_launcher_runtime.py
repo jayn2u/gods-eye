@@ -39,7 +39,7 @@ elif 'run' in args and 'launcher' in args:
     raise SystemExit(subprocess.call([sys.executable, '-m', 'gods_eye.launcher', *command], env=child_env))
 elif 'compose' in args and 'exec' in args:
     if os.environ.get('FAKE_READY') == '1':
-        print(json.dumps({'ready': True, 'gallery_count': 3}))
+        print(json.dumps({'ready': True, 'gallery_count': 1}))
     else:
         print(os.environ.get('FAKE_READINESS_DETAIL', 'search readiness failed'), file=sys.stderr)
         raise SystemExit(1)
@@ -87,7 +87,7 @@ def _prepared_state(root: Path) -> None:
 def _prepared_assets(
     root: Path, *, active_reference: str = "versions/prepared", active_is_directory: bool = False
 ) -> None:
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+    for name in ("CUHK-PEDES",):
         (root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
         receipt = root / "data" / "install-state" / f"{name}.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)

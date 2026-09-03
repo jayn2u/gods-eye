@@ -229,7 +229,7 @@ def test_launcher_starts_fixture_compose_from_a_prepared_state(tmp_path: Path) -
         ready = json.load(urllib.request.urlopen(f"{runtime_url}/api/readiness", timeout=5))
         assert health == {"status": "ok"}
         assert ready["ready"] is True
-        assert ready["gallery_count"] == 3
+        assert ready["gallery_count"] == 1
     finally:
         subprocess.run(
             [sys.executable, "-m", "gods_eye.launcher", "stop"],

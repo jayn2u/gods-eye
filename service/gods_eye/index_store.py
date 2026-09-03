@@ -15,6 +15,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from .gallery import GalleryBuildError, GalleryManifest
+from .models import SUPPORTED_DATASETS
 
 
 class IndexValidationError(ValueError):
@@ -381,6 +382,10 @@ def validate_version(
         raise IndexValidationError(
             "Model revision mismatch: index uses "
             f"{metadata.model_revision!r}, service expects {expected_model_revision!r}"
+        )
+    if metadata.dataset_configuration != list(SUPPORTED_DATASETS):
+        raise IndexValidationError(
+            "Index dataset configuration does not match the supported datasets"
         )
     if (
         metadata.model_id != "fixture/deterministic-v1"

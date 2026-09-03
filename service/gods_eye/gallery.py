@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from PIL import Image, UnidentifiedImageError
 
-from .models import Dataset
+from .models import SUPPORTED_DATASETS, Dataset
 
 Split = Literal["train", "validation", "test"]
 
@@ -100,10 +100,25 @@ class GalleryManifest:
             if raw.get("version") != 1:
                 raise GalleryBuildError(f"Unsupported manifest version in {path}")
             serialized_roots = {dataset: str(value) for dataset, value in raw["roots"].items()}
+            unsupported = sorted(set(serialized_roots) - set(SUPPORTED_DATASETS))
+            if unsupported:
+                raise GalleryBuildError(
+                    f"Manifest contains unsupported dataset(s): {', '.join(unsupported)}"
+                )
             roots = {
                 dataset: _resolve_dataset_root(dataset, value, dataset_root)
                 for dataset, value in serialized_roots.items()
             }
+            for item in raw["records"]:
+                if item["dataset"] not in SUPPORTED_DATASETS:
+                    raise GalleryBuildError(
+                        f"Manifest contains unsupported dataset: {item['dataset']}"
+                    )
+                for alias in item.get("aliases", []):
+                    if alias["dataset"] not in SUPPORTED_DATASETS:
+                        raise GalleryBuildError(
+                            f"Manifest contains unsupported dataset: {alias['dataset']}"
+                        )
             records = [
                 GalleryRecord(
                     id=item["id"],
@@ -184,6 +199,9 @@ def _load_rows(metadata: Path, dataset: Dataset) -> list[dict[str, Any]]:
 
 
 def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest:
+    unsupported = sorted(set(sources) - set(SUPPORTED_DATASETS))
+    if unsupported:
+        raise GalleryBuildError(f"Unsupported dataset(s): {', '.join(unsupported)}")
     errors: list[str] = []
     candidates: dict[tuple[Dataset, Split, str], tuple[str, list[Provenance]]] = {}
     source_rows = 0
@@ -262,7 +280,7 @@ def _parse_source(values: Iterable[str]) -> dict[Dataset, tuple[Path, Path]]:
             dataset_value, root, metadata = value.split("=", 2)
         except ValueError as exc:
             raise GalleryBuildError("Sources must use DATASET=IMAGE_ROOT=METADATA_JSON") from exc
-        if dataset_value not in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+        if dataset_value not in SUPPORTED_DATASETS:
             raise GalleryBuildError(f"Unsupported dataset {dataset_value!r}")
         sources[dataset_value] = (Path(root), Path(metadata))  # type: ignore[index]
     return sources

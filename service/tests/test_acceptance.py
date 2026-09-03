@@ -6,7 +6,7 @@ from gods_eye.gallery import GalleryManifest, GalleryRecord, Provenance
 
 def test_coverage_reports_source_active_and_duplicate_counts() -> None:
     manifest = GalleryManifest(
-        roots={"CUHK-PEDES": Path("/gallery"), "ICFG-PEDES": Path("/gallery")},
+        roots={"CUHK-PEDES": Path("/gallery")},
         records=[
             GalleryRecord(
                 id="one",
@@ -15,7 +15,7 @@ def test_coverage_reports_source_active_and_duplicate_counts() -> None:
                 relative_path="one.jpg",
                 source_person_id="1",
                 content_sha256="a",
-                aliases=[Provenance("ICFG-PEDES", "test", "same.jpg", "2")],
+                aliases=[Provenance("CUHK-PEDES", "test", "same.jpg", "2")],
             )
         ],
         report={"source_rows": 2, "records": 1},
@@ -24,10 +24,10 @@ def test_coverage_reports_source_active_and_duplicate_counts() -> None:
     result = coverage(manifest)
 
     assert result["source_by_dataset_split"]["CUHK-PEDES"]["train"] == 1
-    assert result["source_by_dataset_split"]["ICFG-PEDES"]["test"] == 1
-    assert result["active_by_canonical_dataset_split"]["ICFG-PEDES"]["test"] == 0
-    assert result["duplicate_aliases_by_dataset_split"]["ICFG-PEDES"]["test"] == 1
-    row = result["by_dataset_split"]["ICFG-PEDES"]["test"]
+    assert result["source_by_dataset_split"]["CUHK-PEDES"]["test"] == 1
+    assert result["active_by_canonical_dataset_split"]["CUHK-PEDES"]["test"] == 0
+    assert result["duplicate_aliases_by_dataset_split"]["CUHK-PEDES"]["test"] == 1
+    row = result["by_dataset_split"]["CUHK-PEDES"]["test"]
     assert row == {
         "source": 1,
         "accepted": 1,
