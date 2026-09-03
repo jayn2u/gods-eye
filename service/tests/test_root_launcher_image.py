@@ -56,6 +56,10 @@ elif args[:2] == ["info", "--format"]:
     if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
         print("/plugins/docker-compose")
 elif "build" in args and args[-1] == "launcher":
+    # Real Buildx writes its progress to stdout; the wrapper must keep that
+    # noise away from a command's machine-readable output.
+    print("#1 [internal] load local bake definitions")
+    print("#1 DONE 0.0s")
     raise SystemExit(int(os.getenv("GODS_EYE_FAKE_BUILD_EXIT", "0")))
 elif "run" in args and "launcher" in args:
     command = args[args.index("launcher") + 1:]
@@ -407,6 +411,17 @@ def test_root_launcher_reports_daemon_failure_without_claiming_compose_is_missin
     assert "Docker daemon" in result.stderr
     assert "Compose plugin could not be located" not in result.stderr
     assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
+
+
+def test_local_image_preparation_keeps_machine_readable_output_clean(tmp_path: Path) -> None:
+    """Launcher image build progress is diagnostics, not command output."""
+
+    result, _ = _run(tmp_path, "doctor", "--json")
+
+    checks = json.loads(result.stdout)["checks"]
+    assert {check["name"] for check in checks}
+    assert "Preparing the local Launcher image" in result.stderr
+    assert "load local bake definitions" in result.stderr
 
 
 @pytest.mark.integration

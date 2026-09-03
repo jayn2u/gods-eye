@@ -54,7 +54,7 @@ export GODS_EYE_COMPOSE_FILE=/workspace/compose.yaml
 export GODS_EYE_SERVICE_IMAGE=gods-eye-service:local
 export GODS_EYE_WEB_IMAGE=gods-eye-web:local
 printf '%s\n' "Preparing the local Launcher image from the current checkout." >&2
-if docker compose --project-directory "$SCRIPT_DIR" --profile tools build launcher; then
+if docker compose --project-directory "$SCRIPT_DIR" --profile tools build launcher >&2; then
     :
 else
     build_status=$?
