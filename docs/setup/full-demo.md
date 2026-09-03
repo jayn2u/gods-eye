@@ -43,6 +43,30 @@ The service container sees datasets at `/datasets` read-only, indexes at `/index
 the model cache at `/models`. Images and research assets are excluded from build contexts and image
 layers. `docker compose down` preserves the host assets.
 
+## When a start fails
+
+`./gods-eye start` verifies the Demo Runtime in stages: Prepared Demo asset preflight, container
+start, health and search readiness, and finally the web entry point. A preflight failure starts no
+containers. Any later failure names the stage that failed and **leaves the containers running**, so
+that the evidence survives:
+
+```bash
+./gods-eye logs
+```
+
+Once you are done inspecting, remove them explicitly:
+
+```bash
+./gods-eye stop
+```
+
+A web entry point failure reports the response that was actually served. A non-200 status or a
+document that is not the built application shell points at the web image or its nginx configuration;
+a connection failure points at the web container not starting or not publishing its port.
+
+Demo Preparation state lives in `.gods-eye/` inside the checkout you run from. It is not shared with
+other checkouts or worktrees, so a fresh worktree needs its own `./gods-eye prepare`.
+
 `update` is explicit and previews which compatibility stages would be invalidated. `reset` requires
 one or more named targets, displays the plan and size, and asks for confirmation. Use `--yes` only
 after reviewing that plan; use `--json` where supported for automation.

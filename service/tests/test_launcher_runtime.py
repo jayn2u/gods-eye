@@ -165,8 +165,17 @@ def test_detached_start_waits_for_search_and_web_readiness_then_reports_actual_u
     assert all("0.0.0.0" not in " ".join(call) for call in calls)
 
 
-@pytest.mark.parametrize("failure", ["http-500", "wrong-shell", "connection-refused"])
-def test_start_rejects_unavailable_web_entrypoint_and_stops_runtime(tmp_path, failure):
+@pytest.mark.parametrize(
+    ("failure", "expected_cause"),
+    [
+        ("http-500", "web image or its nginx configuration"),
+        ("wrong-shell", "web image or its nginx configuration"),
+        ("connection-refused", "container did not start"),
+    ],
+)
+def test_start_preserves_the_runtime_when_the_web_entrypoint_fails(
+    tmp_path, failure, expected_cause
+):
     if failure == "http-500":
         endpoint = loopback_http_server(status=500)
     elif failure == "wrong-shell":
@@ -186,10 +195,29 @@ def test_start_rejects_unavailable_web_entrypoint_and_stops_runtime(tmp_path, fa
 
     assert result.returncode == 4
     assert "Full Demo is ready" not in result.stdout
-    assert "web" in result.stderr.lower()
+    assert "web entry point" in result.stderr.lower()
+    assert expected_cause in result.stderr
     assert "./gods-eye logs" in result.stderr
+    assert "./gods-eye stop" in result.stderr
     assert any("compose" in call and "up" in call for call in calls)
-    assert any("compose" in call and "down" in call for call in calls)
+    # The containers stay up so their logs remain readable.
+    assert not any("compose" in call and "down" in call for call in calls)
+
+
+def test_web_entrypoint_failure_reports_the_observed_response(tmp_path):
+    with loopback_http_server(status=500) as web_port:
+        result, _ = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={"GODS_EYE_READINESS_TIMEOUT_SECONDS": "0"},
+        )
+
+    assert "HTTP 500" in result.stderr
+    assert "text/html" in result.stderr
 
 
 def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
@@ -197,6 +225,8 @@ def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
 
     assert result.returncode == 4
     assert "./gods-eye prepare" in result.stderr
+    assert "checkout" in result.stderr
+    assert ".gods-eye" in result.stderr
     assert not any("compose" in call and "up" in call for call in calls)
 
 
@@ -378,7 +408,7 @@ def test_start_reports_invisible_prepared_asset_without_runtime_mutation(
     assert not any("up" in call for call in calls)
 
 
-def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
+def test_readiness_failure_preserves_runtime_and_prints_recovery_guidance(tmp_path):
     result, calls = _run(
         tmp_path,
         "start",
@@ -394,11 +424,12 @@ def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
     assert result.returncode == 4
     assert "readiness" in result.stderr.lower()
     assert "active retrieval index reference escapes the configured index root" in result.stderr
-    assert "logs" in result.stderr.lower()
-    assert any("compose" in call and "down" in call for call in calls)
+    assert "./gods-eye logs" in result.stderr
+    assert "./gods-eye stop" in result.stderr
+    assert not any("compose" in call and "down" in call for call in calls)
 
 
-def test_start_failure_immediately_stops_partially_started_runtime(tmp_path):
+def test_container_start_failure_preserves_the_partially_started_runtime(tmp_path):
     result, calls = _run(
         tmp_path,
         "start",
@@ -412,12 +443,13 @@ def test_start_failure_immediately_stops_partially_started_runtime(tmp_path):
 
     assert result.returncode == 4
     assert "web container could not start" in result.stderr
+    assert "./gods-eye stop" in result.stderr
     runtime_actions = [
         "up" if "up" in call else "down"
         for call in calls
         if "compose" in call and ("up" in call or "down" in call)
     ]
-    assert runtime_actions == ["up", "down"]
+    assert runtime_actions == ["up"]
     assert not any("compose" in call and "exec" in call for call in calls)
 
 
