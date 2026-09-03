@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sources": [
     {
       "name": "CUHK-PEDES",
@@ -11,30 +11,6 @@
       "metadata": "reid_raw.json",
       "official_source": "https://github.com/ShuangLI59/Person-Search-with-Natural-Language-Description",
       "terms_url": "https://github.com/ShuangLI59/Person-Search-with-Natural-Language-Description",
-      "usage_restrictions": "Research use; review the official source terms before use."
-    },
-    {
-      "name": "ICFG-PEDES",
-      "drive_id": "1r8-nRBpV9c1zFfSWOOLMfQb_frLwKxWa",
-      "filename": "ICFG-PEDES.zip",
-      "size": 1140985834,
-      "sha256": "0e842b04371ddd85b3c5b17c605d502d2855d7ffa0e9770dc06336b9f8f11f8f",
-      "wrapper": "ICFG-PEDES",
-      "metadata": "ICFG-PEDES.json",
-      "official_source": "https://github.com/zifyloo/SSAN",
-      "terms_url": "https://github.com/zifyloo/SSAN",
-      "usage_restrictions": "Research use; review the official source terms before use."
-    },
-    {
-      "name": "RSTPReid",
-      "drive_id": "1nTiSFALnwfBA1KXAX1nVgxb61PBgFBOt",
-      "filename": "RSTPReid.zip",
-      "size": 502352170,
-      "sha256": "711c31696d2fc2cf19e660a8d8a631c68b6240be0a1a694360c37f385dc57fa2",
-      "wrapper": null,
-      "metadata": "data_captions.json",
-      "official_source": "https://github.com/NjtechCVLab/RSTPReid-Dataset",
-      "terms_url": "https://github.com/NjtechCVLab/RSTPReid-Dataset",
       "usage_restrictions": "Research use; review the official source terms before use."
     }
   ]

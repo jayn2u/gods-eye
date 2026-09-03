@@ -11,13 +11,14 @@ from typing import Any
 
 from .gallery import GalleryManifest, Provenance
 from .index_store import validate_version
+from .models import SUPPORTED_DATASETS
 
 DEFAULT_QUERIES = (
     "a person wearing a red shirt and dark trousers",
     "a person carrying a backpack and wearing a light jacket",
     "a person in a black coat with white shoes",
 )
-ALL_DATASETS = ["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"]
+ALL_DATASETS = list(SUPPORTED_DATASETS)
 
 
 def _provenance(record) -> list[Provenance]:
@@ -92,6 +93,7 @@ def evaluate(
     offline: bool,
     top_k: int,
     repetitions: int,
+    dataset_root: Path | None = None,
 ) -> dict[str, Any]:
     manifest = GalleryManifest.read(manifest_path)
     report: dict[str, Any] = {
@@ -106,7 +108,7 @@ def evaluate(
     from .clip import HuggingFaceClipEmbedder
     from .retrieval import IndexedRetrievalEngine
 
-    loaded = validate_version(version_dir, model_id, revision)
+    loaded = validate_version(version_dir, model_id, revision, dataset_root)
     from .config import ClipRuntimeConfig
 
     embedder = HuggingFaceClipEmbedder.from_config(
@@ -175,6 +177,7 @@ def main() -> None:
     parser.add_argument("--revision")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--dataset-root", type=Path, default=Path("data/datasets"))
     parser.add_argument("--offline", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--top-k", type=int, default=24)
     parser.add_argument("--repetitions", type=int, default=3)
@@ -190,6 +193,7 @@ def main() -> None:
         offline=args.offline,
         top_k=args.top_k,
         repetitions=args.repetitions,
+        dataset_root=args.dataset_root,
     )
     rendered = json.dumps(report, indent=2) + "\n"
     if args.output:

@@ -40,7 +40,7 @@ Runs the following verified, resumable stages:
 
 1. Preflight and storage calculation.
 2. Dataset terms acknowledgement.
-3. Dataset Acquisition for all three registered sources.
+3. Dataset Acquisition for the registered CUHK-PEDES source.
 4. CLIP ViT-B/16 model preparation.
 5. Gallery Manifest generation.
 6. GPU index build and atomic activation.
@@ -48,7 +48,7 @@ Runs the following verified, resumable stages:
 
 The command shows stage number, progress, elapsed time, and an evidence-based estimate. Detailed output is written to `.gods-eye/logs/<timestamp>.log`. Cancellation preserves verified stages, resumable archive parts, and index checkpoints; a later run validates and resumes them. GPU-memory failure halves the conservatively selected batch size and retries the current index stage.
 
-Before downloading, the operator sees each dataset's official source and terms or license, the distinct mirror location, expected size, usage restrictions, and sensitive-data warning. Interactive acceptance is recorded with timestamp, Dataset Registry version, and selected sources in `.gods-eye/state.json`. A Registry or source change requires renewed acceptance. `--yes` never implies `--accept-data-terms`.
+Before downloading, the operator sees the CUHK-PEDES official source and terms or license, its distinct mirror location, expected size, usage restrictions, and sensitive-data warning. Interactive acceptance is recorded with timestamp, Dataset Registry version, and selected source in `.gods-eye/state.json`. A Registry or source change requires renewed acceptance. `--yes` never implies `--accept-data-terms`.
 
 ### `start`
 

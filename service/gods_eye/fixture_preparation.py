@@ -6,10 +6,12 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .models import SUPPORTED_DATASETS
+
 
 def prepare_fixture(root: Path, state_path: Path) -> None:
     now = datetime.now(UTC).isoformat()
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+    for name in SUPPORTED_DATASETS:
         installation = root / "data" / "datasets" / name
         installation.mkdir(parents=True, exist_ok=True)
         receipt = root / "data" / "install-state" / f"{name}.json"

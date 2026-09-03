@@ -86,7 +86,9 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
     saved = state.get("terms_acceptance") or {}
     compatible = all(saved.get(key) == value for key, value in expected.items())
     if saved and not compatible:
-        state["preparation"].pop("dataset_acquisition", None)
+        preparation = state.setdefault("preparation", {})
+        for stage in ("dataset_acquisition", "gallery_manifest", "index", "smoke_test"):
+            preparation.pop(stage, None)
         layout.write_state(state)
     if compatible:
         accept_data_terms = True

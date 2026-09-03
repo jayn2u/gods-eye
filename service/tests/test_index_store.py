@@ -23,17 +23,14 @@ def fixture_manifest(tmp_path: Path) -> Path:
     root = tmp_path / "images"
     root.mkdir(parents=True)
     rows = []
-    for number, (dataset, color) in enumerate(
-        (("CUHK-PEDES", (255, 0, 0)), ("ICFG-PEDES", (0, 255, 0)), ("RSTPReid", (0, 0, 255)))
-    ):
+    for number, color in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255))):
         name = f"{number}.png"
         Image.new("RGB", (3, 4), color).save(root / name)
         rows.append({"split": "test", "file_path": name, "id": number})
     sources = {}
-    for dataset, row in zip(("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"), rows, strict=True):
-        metadata = tmp_path / f"{dataset}.json"
-        metadata.write_text(json.dumps([row]))
-        sources[dataset] = (root, metadata)
+    metadata = tmp_path / "CUHK-PEDES.json"
+    metadata.write_text(json.dumps(rows))
+    sources["CUHK-PEDES"] = (root, metadata)
     manifest = build_manifest(sources)
     path = tmp_path / "source-manifest.json"
     manifest.write(path)
@@ -62,10 +59,10 @@ def test_builds_complete_immutable_version_and_exact_ranking(tmp_path: Path) -> 
     loaded = validate_version(version, "fixture/deterministic-v1")
     assert loaded.metadata.gallery_count == 3
     assert loaded.metadata.normalized is True
-    assert loaded.metadata.dataset_configuration == ["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"]
+    assert loaded.metadata.dataset_configuration == ["CUHK-PEDES"]
     engine = IndexedRetrievalEngine(loaded)
-    first = engine.search("blue coat", 3, ["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"])
-    second = engine.search("blue coat", 3, ["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"])
+    first = engine.search("blue coat", 3, ["CUHK-PEDES"])
+    second = engine.search("blue coat", 3, ["CUHK-PEDES"])
     assert [(row.id, row.similarity) for row in first] == [
         (row.id, row.similarity) for row in second
     ]
@@ -162,7 +159,7 @@ class RecordingEmbedder:
 def test_real_embedding_path_resumes_batches_and_reports_unreadable_images(tmp_path: Path) -> None:
     manifest_path = fixture_manifest(tmp_path)
     manifest = json.loads(manifest_path.read_text())
-    corrupt = Path(manifest["roots"]["ICFG-PEDES"]) / manifest["records"][1]["relative_path"]
+    corrupt = Path(manifest["roots"]["CUHK-PEDES"]) / manifest["records"][1]["relative_path"]
     corrupt.write_bytes(b"not an image")
     checkpoints = tmp_path / "checkpoints"
 

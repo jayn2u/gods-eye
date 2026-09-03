@@ -20,8 +20,6 @@ from PIL import Image
 def test_registry_pins_verified_public_archives() -> None:
     assert {source.name: source.sha256 for source in load_registry()} == {
         "CUHK-PEDES": "40498f0069f10b5332f329e5e39507664faa4b7b176eaaa1e0b4f6c411decbb9",
-        "ICFG-PEDES": "0e842b04371ddd85b3c5b17c605d502d2855d7ffa0e9770dc06336b9f8f11f8f",
-        "RSTPReid": "711c31696d2fc2cf19e660a8d8a631c68b6240be0a1a694360c37f385dc57fa2",
     }
 
 
@@ -50,25 +48,22 @@ def source(name: str, archive: Path, wrapper: str | None, metadata: str) -> Data
 
 def test_install_publishes_receipts_and_gallery_manifest_atomically(tmp_path: Path) -> None:
     cuhk = tmp_path / "cuhk.zip"
-    rstp = tmp_path / "rstp.zip"
     make_archive(cuhk, "CUHK-PEDES", "reid_raw.json")
-    make_archive(rstp, None, "data_captions.json")
     sources = [
         source("CUHK-PEDES", cuhk, "CUHK-PEDES", "reid_raw.json"),
-        source("RSTPReid", rstp, None, "data_captions.json"),
     ]
 
     def download(dataset_source: DatasetSource, destination: Path) -> None:
-        original = cuhk if dataset_source.name == "CUHK-PEDES" else rstp
-        destination.write_bytes(original.read_bytes())
+        assert dataset_source.name == "CUHK-PEDES"
+        destination.write_bytes(cuhk.read_bytes())
 
     acquirer = DatasetAcquirer(tmp_path / "data", tmp_path / "indexes", sources, download)
     result = acquirer.install([item.name for item in sources], accept_terms=True)
 
-    assert result.installed == ["CUHK-PEDES", "RSTPReid"]
+    assert result.installed == ["CUHK-PEDES"]
     assert (tmp_path / "data/install-state/CUHK-PEDES.receipt.json").is_file()
     assert not (tmp_path / "data/datasets/CUHK-PEDES/.installation-receipt.json").exists()
-    assert (tmp_path / "data/datasets/RSTPReid/imgs/train/person.jpg").is_file()
+    assert (tmp_path / "data/datasets/CUHK-PEDES/imgs/train/person.jpg").is_file()
     manifest = json.loads((tmp_path / "indexes/gallery-manifest.json").read_text())
     assert len(manifest["records"]) == 1  # exact-byte duplicate is collapsed
     assert not list((tmp_path / "data/install-state").glob("*.staging"))
@@ -76,8 +71,8 @@ def test_install_publishes_receipts_and_gallery_manifest_atomically(tmp_path: Pa
 
 def test_install_requires_terms_and_rejects_checksum_mismatch(tmp_path: Path) -> None:
     archive = tmp_path / "source.zip"
-    make_archive(archive, None, "data_captions.json")
-    item = source("RSTPReid", archive, None, "data_captions.json")
+    make_archive(archive, "CUHK-PEDES", "reid_raw.json")
+    item = source("CUHK-PEDES", archive, "CUHK-PEDES", "reid_raw.json")
     item = DatasetSource(**{**item.__dict__, "sha256": "0" * 64})
     acquirer = DatasetAcquirer(
         tmp_path / "data",
@@ -87,17 +82,17 @@ def test_install_requires_terms_and_rejects_checksum_mismatch(tmp_path: Path) ->
     )
 
     with pytest.raises(DatasetAcquisitionError, match="accept-data-terms"):
-        acquirer.install(["RSTPReid"], accept_terms=False)
+        acquirer.install(["CUHK-PEDES"], accept_terms=False)
     with pytest.raises(DatasetAcquisitionError, match="SHA-256"):
-        acquirer.install(["RSTPReid"], accept_terms=True)
-    assert not (tmp_path / "data/datasets/RSTPReid").exists()
+        acquirer.install(["CUHK-PEDES"], accept_terms=True)
+    assert not (tmp_path / "data/datasets/CUHK-PEDES").exists()
 
 
 def test_install_rejects_zip_slip_and_verify_detects_missing_content(tmp_path: Path) -> None:
     archive = tmp_path / "unsafe.zip"
     with zipfile.ZipFile(archive, "w") as payload:
-        payload.writestr("../escape", b"bad")
-    item = source("RSTPReid", archive, None, "data_captions.json")
+        payload.writestr("CUHK-PEDES/../escape", b"bad")
+    item = source("CUHK-PEDES", archive, "CUHK-PEDES", "reid_raw.json")
     acquirer = DatasetAcquirer(
         tmp_path / "data",
         tmp_path / "indexes",
@@ -105,26 +100,26 @@ def test_install_rejects_zip_slip_and_verify_detects_missing_content(tmp_path: P
         lambda _source, destination: destination.write_bytes(archive.read_bytes()),
     )
     with pytest.raises(DatasetAcquisitionError, match="unsafe ZIP"):
-        acquirer.install(["RSTPReid"], accept_terms=True)
+        acquirer.install(["CUHK-PEDES"], accept_terms=True)
 
 
 def test_status_verify_and_clean_archives(tmp_path: Path) -> None:
-    archive = tmp_path / "rstp.zip"
-    make_archive(archive, None, "data_captions.json")
-    item = source("RSTPReid", archive, None, "data_captions.json")
+    archive = tmp_path / "cuhk.zip"
+    make_archive(archive, "CUHK-PEDES", "reid_raw.json")
+    item = source("CUHK-PEDES", archive, "CUHK-PEDES", "reid_raw.json")
     acquirer = DatasetAcquirer(
         tmp_path / "data",
         tmp_path / "indexes",
         [item],
         lambda _source, destination: destination.write_bytes(archive.read_bytes()),
     )
-    acquirer.install(["RSTPReid"], accept_terms=True)
-    assert acquirer.status()["RSTPReid"] == "installed"
-    assert acquirer.verify(["RSTPReid"]) == {"RSTPReid": True}
-    (tmp_path / "data/datasets/RSTPReid/data_captions.json").unlink()
-    assert acquirer.verify(["RSTPReid"]) == {"RSTPReid": False}
+    acquirer.install(["CUHK-PEDES"], accept_terms=True)
+    assert acquirer.status()["CUHK-PEDES"] == "installed"
+    assert acquirer.verify(["CUHK-PEDES"]) == {"CUHK-PEDES": True}
+    (tmp_path / "data/datasets/CUHK-PEDES/reid_raw.json").unlink()
+    assert acquirer.verify(["CUHK-PEDES"]) == {"CUHK-PEDES": False}
     acquirer.clean_archives()
-    assert not (tmp_path / "data/archives/RSTPReid.zip").exists()
+    assert not (tmp_path / "data/archives/CUHK-PEDES.zip").exists()
 
 
 @pytest.mark.integration

@@ -1,7 +1,7 @@
 # God’s Eye
 
 God’s Eye is a desktop-first research demo for finding person images from an English description.
-The Full Demo ranks the CUHK-PEDES, ICFG-PEDES, and RSTPReid galleries with CLIP ViT-B/16.
+The Full Demo ranks the CUHK-PEDES gallery with CLIP ViT-B/16.
 
 > **Research use only.** This is visual-similarity retrieval, not identity verification. Scores are
 > neither probabilities nor evidence of identity. Do not use the app for identification,
@@ -14,8 +14,8 @@ The supported Full Demo environment is:
 - Ubuntu/Linux on `amd64`
 - Docker Engine with Compose v2
 - an NVIDIA GPU with at least 8 GiB VRAM, a compatible driver, and NVIDIA Container Toolkit
-- enough project-disk space for three retained archives, extracted images, the model cache, index,
-  and a safety reserve; `doctor` calculates the current requirement
+- enough project-disk space for the retained CUHK-PEDES archive, extracted images, the model cache,
+  index, and a safety reserve; `doctor` calculates the current requirement
 
 You do **not** need host Python, Node.js, `uv`, or `pnpm`. The Launcher checks every prerequisite
 without changing the host. The API and web app bind only to `127.0.0.1`.
@@ -99,7 +99,7 @@ With no target, `reset` removes nothing. State-changing commands reject concurre
 ## Recovery
 
 - If `doctor` fails, apply every item in its combined **Fix** report, then rerun it.
-- If preparation stops, rerun `./gods-eye prepare`; verified downloads and checkpoints are reused.
+- If preparation stops, rerun `./gods-eye prepare`; the verified download and checkpoints are reused.
 - If `start` says the demo is incomplete, run `./gods-eye prepare`. It never downloads data or
   accepts terms silently.
 - If readiness fails, run `./gods-eye logs`. Model/revision mismatch and missing offline assets need

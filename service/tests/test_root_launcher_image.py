@@ -80,7 +80,7 @@ elif MODE != "basic" and "compose" in args and "exec" in args:
     workspace = Path(os.environ["GODS_EYE_PROJECT_ROOT"])
     index_root = Path(os.getenv("GODS_EYE_INDEX_ROOT", str(workspace / "indexes")))
     if (index_root / "active").exists():
-        print(json.dumps({"ready": True, "gallery_count": 3}))
+        print(json.dumps({"ready": True, "gallery_count": 1}))
     else:
         print(
             "No active retrieval index. Build and activate the active retrieval index first.",
@@ -128,7 +128,7 @@ def _prepared_state(root: Path) -> None:
 def _prepared_assets(
     root: Path, *, active_reference: str = "versions/prepared", active_is_directory: bool = False
 ) -> None:
-    for name in ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid"):
+    for name in ("CUHK-PEDES",):
         (root / "data" / "datasets" / name).mkdir(parents=True, exist_ok=True)
         receipt = root / "data" / "install-state" / f"{name}.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)

@@ -32,7 +32,7 @@ pnpm test:e2e
 docker compose -f compose.yaml -f compose.smoke.yaml config
 ```
 
-The Playwright suite runs the real API/web flow with the deterministic three-image fixture. The
+The Playwright suite runs the real API/web flow with the deterministic CUHK-PEDES fixture. The
 opt-in Launcher/Compose smoke builds the same two containers, starts from a test-only Prepared Demo
 state, and verifies web plus API readiness:
 

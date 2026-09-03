@@ -181,10 +181,15 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
     assert preview.returncode == 0
     preview_report = json.loads(preview.stdout)
     assert preview_report["status"] == "planned"
-    assert preview_report["invalidate"] == ["gallery_manifest", "index", "smoke_test"]
+    assert preview_report["invalidate"] == [
+        "dataset_acquisition",
+        "gallery_manifest",
+        "index",
+        "smoke_test",
+    ]
     assert applied.returncode == 0
     preparation = json.loads((runtime / "state.json").read_text())["preparation"]
-    assert set(preparation) == {"dataset_acquisition", "model"}
+    assert set(preparation) == {"model"}
 
 
 def test_registry_update_requires_renewed_terms_acceptance(tmp_path: Path) -> None:

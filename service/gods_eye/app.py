@@ -106,7 +106,7 @@ def readiness(engine: RetrievalEngine = Depends(get_retrieval_engine)) -> Readin
             ready=True,
             model_id="fixture",
             active_index_version="fixture",
-            gallery_count=3,
+            gallery_count=1,
         )
     return ReadinessResponse(
         ready=False,
@@ -128,7 +128,7 @@ def search(
         "datasets": request.datasets,
         "model_id": getattr(engine, "model_id", "fixture" if fixture else "unavailable"),
         "index_version": getattr(engine, "version_id", "fixture" if fixture else "unavailable"),
-        "gallery_count": getattr(engine, "gallery_count", 3 if fixture else 0),
+        "gallery_count": getattr(engine, "gallery_count", 1 if fixture else 0),
     }
     if isinstance(engine, UnavailableRetrievalEngine):
         _log(

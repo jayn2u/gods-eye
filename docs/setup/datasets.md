@@ -1,9 +1,10 @@
 # Dataset Acquisition and Gallery Manifest
 
-The explicit installer downloads the three pinned Drive archives to `data/archives/`, checks exact
-size and SHA-256, rejects unsafe archive entries, validates required metadata/image directories in
-staging, and atomically publishes `data/datasets/<dataset>`. Installation Receipts distinguish
-complete installations from partial files. Archives remain available for repair until cleaned.
+The explicit installer downloads the pinned CUHK-PEDES Drive archive to `data/archives/`, checks its
+exact size and SHA-256, rejects unsafe archive entries, validates the required metadata/image
+directories in staging, and atomically publishes `data/datasets/CUHK-PEDES`. The Installation
+Receipt distinguishes a complete Dataset Installation from partial files. The archive remains
+available for repair until cleaned.
 
 The Launcher is the normal path. These lower-level commands are for development and repair:
 
@@ -28,8 +29,7 @@ docker compose --profile tools run --rm dataset-installer \
   --data-root /data --index-root /indexes install --accept-data-terms
 ```
 
-Installed layouts are `CUHK-PEDES/{imgs,reid_raw.json}`,
-`ICFG-PEDES/{imgs,ICFG-PEDES.json}`, and `RSTPReid/{imgs,data_captions.json}`. Receipts live under
+The installed layout is `CUHK-PEDES/{imgs,reid_raw.json}`. The receipt lives under
 `data/install-state/`. The Gallery Manifest normalizes split names, creates stable public IDs,
 validates paths and images, and collapses only byte-identical files. API output never exposes
 captions or absolute host paths.
@@ -40,8 +40,6 @@ values are authoritative:
 ```bash
 uv run python -m gods_eye.gallery \
   --source CUHK-PEDES="data/datasets/CUHK-PEDES/imgs=data/datasets/CUHK-PEDES/reid_raw.json" \
-  --source ICFG-PEDES="data/datasets/ICFG-PEDES/imgs=data/datasets/ICFG-PEDES/ICFG-PEDES.json" \
-  --source RSTPReid="data/datasets/RSTPReid/imgs=data/datasets/RSTPReid/data_captions.json" \
   --output indexes/gallery-manifest.json
 ```
 

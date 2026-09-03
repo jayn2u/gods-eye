@@ -2,8 +2,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Dataset = Literal["CUHK-PEDES", "ICFG-PEDES", "RSTPReid"]
-SUPPORTED_DATASETS: tuple[Dataset, ...] = ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid")
+Dataset = Literal["CUHK-PEDES"]
+SUPPORTED_DATASETS: tuple[Dataset, ...] = ("CUHK-PEDES",)
 
 
 class SearchRequest(BaseModel):

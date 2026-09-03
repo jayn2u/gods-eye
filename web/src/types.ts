@@ -1,4 +1,4 @@
-export const GALLERIES = ['CUHK-PEDES', 'ICFG-PEDES', 'RSTPReid'] as const
+export const GALLERIES = ['CUHK-PEDES'] as const
 export const WORKFLOW_STEPS = ['Compose', 'Search progress', 'Results', 'Image detail'] as const
 
 export type SearchResult = { rank: number; similarity: number; dataset: string; id: string; split: string; image_url: string }

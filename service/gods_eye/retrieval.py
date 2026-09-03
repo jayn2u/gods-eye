@@ -23,11 +23,7 @@ class UnavailableRetrievalEngine:
 class FixtureRetrievalEngine:
     """Deterministic development adapter; production engines implement the same seam."""
 
-    _gallery = (
-        ("CUHK-PEDES", "test", "cuhk:fixture:001", 0.923, "sky"),
-        ("ICFG-PEDES", "validation", "icfg:fixture:002", 0.881, "violet"),
-        ("RSTPReid", "train", "rstp:fixture:003", 0.846, "mint"),
-    )
+    _gallery = (("CUHK-PEDES", "test", "cuhk:fixture:001", 0.923, "sky"),)
 
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
         del query
