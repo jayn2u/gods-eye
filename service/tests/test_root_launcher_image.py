@@ -33,7 +33,10 @@ args = sys.argv[1:]
 log = Path(os.environ["GODS_EYE_FAKE_DOCKER_LOG"])
 with log.open("a") as stream:
     if MODE == "basic":
-        stream.write(" ".join(args) + "\\n")
+        line = " ".join(args)
+        if args[:2] == ["image", "inspect"]:
+            line += " fingerprint=" + os.environ.get("GODS_EYE_SOURCE_FINGERPRINT", "")
+        stream.write(line + "\\n")
     else:
         stream.write(json.dumps({
             "args": args,
@@ -55,7 +58,17 @@ elif args[:2] == ["info", "--format"]:
         raise SystemExit(1)
     if os.getenv("GODS_EYE_FAKE_COMPOSE_AVAILABLE", "1") == "1":
         print("/plugins/docker-compose")
+elif args[:2] == ["image", "inspect"]:
+    state = os.getenv("GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE", "absent")
+    if state == "absent":
+        print("No such image", file=sys.stderr)
+        raise SystemExit(1)
+    print(os.environ["GODS_EYE_SOURCE_FINGERPRINT"] if state == "current" else "stale-fingerprint")
 elif "build" in args and args[-1] == "launcher":
+    # Real Buildx writes its progress to stdout; the wrapper must keep that
+    # noise away from a command's machine-readable output.
+    print("#1 [internal] load local bake definitions")
+    print("#1 DONE 0.0s")
     raise SystemExit(int(os.getenv("GODS_EYE_FAKE_BUILD_EXIT", "0")))
 elif "run" in args and "launcher" in args:
     command = args[args.index("launcher") + 1:]
@@ -186,11 +199,13 @@ def test_local_root_command_builds_launcher_before_preserving_help(
     command_calls = [
         call
         for call in calls
-        if call != "compose version --short" and not call.startswith("info --format")
+        if call != "compose version --short"
+        and not call.startswith("info --format")
+        and not call.startswith("image inspect")
     ]
     assert command_calls[0].endswith("--profile tools build launcher")
     assert command_calls[1].endswith(f"--profile tools run --rm launcher {command} --help")
-    assert "Preparing the local Launcher image from the current checkout." in result.stderr
+    assert "Building the local Launcher image" in result.stderr
     assert "Building service and web images" not in result.stderr
 
 
@@ -201,7 +216,9 @@ def test_local_launcher_build_failure_never_runs_cached_image(tmp_path: Path) ->
     command_calls = [
         call
         for call in calls
-        if call != "compose version --short" and not call.startswith("info --format")
+        if call != "compose version --short"
+        and not call.startswith("info --format")
+        and not call.startswith("image inspect")
     ]
     assert len(command_calls) == 1
     assert command_calls[0].endswith("--profile tools build launcher")
@@ -409,6 +426,88 @@ def test_root_launcher_reports_daemon_failure_without_claiming_compose_is_missin
     assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
 
 
+def _build_calls(calls: list[str]) -> list[str]:
+    return [call for call in calls if "build" in call and call.endswith("launcher")]
+
+
+def test_absent_launcher_image_is_built_with_a_cold_build_warning(tmp_path: Path) -> None:
+    result, calls = _run(tmp_path, "doctor", GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE="absent")
+
+    assert _build_calls(calls)
+    assert "no local Launcher image is present" in result.stderr
+    assert "takes many minutes" in result.stderr
+
+
+def test_unchanged_checkout_reuses_the_existing_launcher_image(tmp_path: Path) -> None:
+    """A start attempt must not pay a full image build to fail fast."""
+
+    result, calls = _run(tmp_path, "doctor", GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE="current")
+
+    assert not _build_calls(calls)
+    assert "Building the local Launcher image" not in result.stderr
+    assert any("run --rm launcher" in call for call in calls)
+
+
+def test_changed_checkout_rebuilds_the_launcher_image(tmp_path: Path) -> None:
+    result, calls = _run(tmp_path, "doctor", GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE="stale")
+
+    assert _build_calls(calls)
+    assert "the checkout changed" in result.stderr
+
+
+def test_launcher_image_fingerprint_tracks_the_copied_sources(tmp_path: Path) -> None:
+    """The fingerprint must move when anything the image copies moves."""
+
+    before = _launcher_fingerprint(tmp_path / "before")
+    scratch = ROOT / "service" / "gods_eye" / "_fingerprint_probe.py"
+    scratch.write_text("# temporary probe\n")
+    try:
+        after = _launcher_fingerprint(tmp_path / "after")
+    finally:
+        scratch.unlink()
+    restored = _launcher_fingerprint(tmp_path / "restored")
+
+    assert before != after
+    assert before == restored
+
+
+def test_launcher_image_fingerprint_ignores_uncopied_bytecode(tmp_path: Path) -> None:
+    """.dockerignore keeps bytecode out of the image, so it must not force a rebuild."""
+
+    cache = ROOT / "service" / "gods_eye" / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    probe = cache / "fingerprint_probe.cpython-999.pyc"
+    before = _launcher_fingerprint(tmp_path / "before")
+    probe.write_bytes(b"\x00bytecode that never reaches the build context\n")
+    try:
+        assert _launcher_fingerprint(tmp_path / "after") == before
+    finally:
+        probe.unlink()
+
+
+def _launcher_fingerprint(root: Path) -> str:
+    root.mkdir(parents=True, exist_ok=True)
+    _, calls = _run(root, "doctor", GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE="current")
+    fingerprints = {call.split("fingerprint=", 1)[1] for call in calls if "fingerprint=" in call}
+    assert len(fingerprints) == 1, calls
+    return fingerprints.pop()
+
+
+def test_local_image_preparation_keeps_machine_readable_output_clean(tmp_path: Path) -> None:
+    """Launcher image build progress is diagnostics, not command output."""
+
+    result, _ = _run(tmp_path, "doctor", "--json")
+
+    assert result.stdout.startswith("{"), (
+        f"stdout was not the doctor report.\n"
+        f"returncode={result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
+    checks = json.loads(result.stdout)["checks"]
+    assert {check["name"] for check in checks}
+    assert "Building the local Launcher image" in result.stderr
+    assert "load local bake definitions" in result.stderr
+
+
 @pytest.mark.integration
 def test_real_docker_replaces_isolated_stale_launcher_image(tmp_path: Path) -> None:
     if os.getenv("RUN_STALE_LAUNCHER_SMOKE") != "1":
@@ -512,7 +611,10 @@ def test_real_root_doctor_uses_compose_inside_launcher() -> None:
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    checks = __import__("json").loads(result.stdout)["checks"]
+    # Overall doctor status is not the subject here: the supported platform
+    # needs an NVIDIA GPU, which CI runners do not have, so the GPU checks
+    # fail there and doctor exits non-zero. What must hold is that Compose is
+    # usable from inside the Launcher container.
+    checks = json.loads(result.stdout)["checks"]
     compose = next(check for check in checks if check["name"] == "compose")
-    assert compose["status"] == "pass"
+    assert compose["status"] == "pass", result.stderr

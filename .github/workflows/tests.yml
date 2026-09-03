@@ -1,0 +1,64 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: Unit and integration suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the test environment
+        run: uv sync --frozen --extra indexing
+
+      - name: Run the suite
+        run: uv run --extra indexing pytest -q -rs
+
+  compose-smoke:
+    name: Demo Runtime Compose smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # The service image installs the CUDA and Torch stack, so the default
+      # runner image must give up its unused toolchains first.
+      - name: Reclaim runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h /
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the test environment
+        run: uv sync --frozen
+
+      # Fixture operation: no Dataset Installation, no model download, no GPU.
+      - name: Run the Demo Runtime Compose smoke tests
+        env:
+          RUN_LAUNCHER_COMPOSE_SMOKE: "1"
+          RUN_STALE_LAUNCHER_SMOKE: "1"
+        run: |
+          uv run pytest -q -rs -m integration \
+            service/tests/test_quickstart_contract.py \
+            service/tests/test_root_launcher_image.py
+
+      - name: Report Demo Runtime logs on failure
+        if: failure()
+        run: docker ps -a && docker compose ls --all

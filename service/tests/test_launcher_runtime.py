@@ -1,10 +1,12 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from gods_eye import launcher_runtime
@@ -23,7 +25,15 @@ def _fake_docker(bin_dir: Path) -> Path:
 import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as stream:
-    stream.write(json.dumps(args) + '\\n')
+    record = args
+    if 'compose' in args and 'up' in args:
+        record = args + ['env:' + json.dumps({
+            key: os.environ.get(key, '')
+            for key in ('GODS_EYE_DATASET_ROOT', 'GODS_EYE_INDEX_ROOT',
+                        'GODS_EYE_HF_CACHE', 'GODS_EYE_DATA_HOME',
+                        'COMPOSE_PROJECT_NAME')
+        })]
+    stream.write(json.dumps(record) + '\\n')
 if args[:2] == ['compose', 'version']:
     if os.environ.get('GODS_EYE_INSIDE_LAUNCHER') == '1' and os.environ.get('FAKE_LAUNCHER_COMPOSE') == 'unusable':
         print('compose plugin cannot execute', file=sys.stderr)
@@ -44,7 +54,17 @@ elif 'compose' in args and 'exec' in args:
         print(os.environ.get('FAKE_READINESS_DETAIL', 'search readiness failed'), file=sys.stderr)
         raise SystemExit(1)
 elif 'compose' in args and 'ps' in args:
-    print(json.dumps([{'Service': 'service', 'State': 'running'}, {'Service': 'web', 'State': 'running'}]))
+    published = os.environ.get('FAKE_PS_PUBLISHED_PORT')
+    web = {'Service': 'web', 'State': 'running'}
+    if published:
+        web['Publishers'] = [{'URL': '127.0.0.1', 'PublishedPort': int(published)}]
+    rows = [{'Service': 'service', 'State': 'running'}, web]
+    if os.environ.get('FAKE_PS_SHAPE') == 'array':
+        print(json.dumps(rows))
+    else:
+        # Compose v2 emits newline-delimited objects, one per container.
+        for row in rows:
+            print(json.dumps(row))
 elif 'compose' in args and 'logs' in args:
     print('service | ready')
 elif 'compose' in args and 'up' in args:
@@ -165,8 +185,17 @@ def test_detached_start_waits_for_search_and_web_readiness_then_reports_actual_u
     assert all("0.0.0.0" not in " ".join(call) for call in calls)
 
 
-@pytest.mark.parametrize("failure", ["http-500", "wrong-shell", "connection-refused"])
-def test_start_rejects_unavailable_web_entrypoint_and_stops_runtime(tmp_path, failure):
+@pytest.mark.parametrize(
+    ("failure", "expected_cause"),
+    [
+        ("http-500", "web image or its nginx configuration"),
+        ("wrong-shell", "web image or its nginx configuration"),
+        ("connection-refused", "container did not start"),
+    ],
+)
+def test_start_preserves_the_runtime_when_the_web_entrypoint_fails(
+    tmp_path, failure, expected_cause
+):
     if failure == "http-500":
         endpoint = loopback_http_server(status=500)
     elif failure == "wrong-shell":
@@ -186,10 +215,178 @@ def test_start_rejects_unavailable_web_entrypoint_and_stops_runtime(tmp_path, fa
 
     assert result.returncode == 4
     assert "Full Demo is ready" not in result.stdout
-    assert "web" in result.stderr.lower()
+    assert "web entry point" in result.stderr.lower()
+    assert expected_cause in result.stderr
     assert "./gods-eye logs" in result.stderr
+    assert "./gods-eye stop" in result.stderr
     assert any("compose" in call and "up" in call for call in calls)
-    assert any("compose" in call and "down" in call for call in calls)
+    # The containers stay up so their logs remain readable.
+    assert not any("compose" in call and "down" in call for call in calls)
+
+
+def test_web_entrypoint_failure_reports_the_observed_response(tmp_path):
+    with loopback_http_server(status=500) as web_port:
+        result, _ = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={"GODS_EYE_READINESS_TIMEOUT_SECONDS": "0"},
+        )
+
+    assert "HTTP 500" in result.stderr
+    assert "text/html" in result.stderr
+
+
+def test_start_publishes_the_resolved_host_paths_and_project_identity(tmp_path):
+    """The runtime environment must not be reset to ambient values.
+
+    Compose hands these through to the Launcher container as empty strings,
+    so re-merging os.environ after resolving them would silently restore the
+    container-only paths and the default project name.
+    """
+
+    with loopback_http_server() as web_port:
+        _, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={
+                "GODS_EYE_DATASET_ROOT": "",
+                "GODS_EYE_INDEX_ROOT": "",
+                "GODS_EYE_HF_CACHE": "",
+                "GODS_EYE_DATA_HOME": "",
+                "COMPOSE_PROJECT_NAME": "",
+            },
+        )
+
+    up_call = next(call for call in calls if "compose" in call and "up" in call)
+    published = json.loads(next(item for item in up_call if item.startswith("env:"))[4:])
+
+    assert published["COMPOSE_PROJECT_NAME"].startswith("gods-eye-")
+    for key in (
+        "GODS_EYE_DATASET_ROOT",
+        "GODS_EYE_INDEX_ROOT",
+        "GODS_EYE_HF_CACHE",
+        "GODS_EYE_DATA_HOME",
+    ):
+        assert published[key], f"{key} was reset to the ambient empty value"
+        assert Path(published[key]).is_absolute(), published[key]
+
+
+def test_available_port_probe_tolerates_a_port_left_in_time_wait(tmp_path):
+    """A just-stopped Demo Runtime must not block the next start."""
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    client = socket.create_connection(("127.0.0.1", port))
+    accepted, _ = listener.accept()
+    accepted.close()
+    listener.close()
+    client.close()
+
+    environment = dict(os.environ)
+    environment.pop("GODS_EYE_RUNTIME_PORTS_AVAILABLE", None)
+    with mock.patch.dict(os.environ, environment, clear=True):
+        assert launcher_runtime._port_is_available(port)
+
+
+def test_start_refuses_an_occupied_web_port_instead_of_moving_quietly(tmp_path):
+    """The advertised URL must be the URL the operator asked for."""
+
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(taken),
+            extra_env={"GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0"},
+        )
+
+    assert result.returncode == 4
+    assert str(taken) in result.stderr
+    assert "already in use" in result.stderr
+    assert "--relocate-ports" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+    assert not any("compose" in call and "down" in call for call in calls)
+
+
+def test_start_refuses_an_occupied_api_port_instead_of_moving_quietly(tmp_path):
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--api-port",
+            str(taken),
+            extra_env={"GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0"},
+        )
+
+    assert result.returncode == 4
+    assert str(taken) in result.stderr
+    assert "already in use" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+
+
+def test_start_relocates_only_when_explicitly_allowed_and_announces_the_port(tmp_path):
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--relocate-ports",
+            "--web-port",
+            str(taken),
+            extra_env={
+                "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0",
+                "GODS_EYE_READINESS_TIMEOUT_SECONDS": "0",
+            },
+        )
+
+    announcement = next(
+        line for line in result.stderr.splitlines() if "relocated" in line and str(taken) in line
+    )
+    chosen = int(announcement.rsplit(" ", 1)[-1].rstrip("."))
+    assert chosen != taken
+    # The relocation is announced before any container is created.
+    assert any("compose" in call and "up" in call for call in calls)
+
+
+@pytest.mark.parametrize("ps_shape", ["ndjson", "array"])
+def test_occupied_port_message_names_this_projects_runtime_when_it_is_the_holder(
+    tmp_path, ps_shape
+):
+    """The holder is often the second container Compose lists."""
+
+    with connection_refused_loopback_port() as taken:
+        result, _ = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(taken),
+            extra_env={
+                "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0",
+                "FAKE_PS_PUBLISHED_PORT": str(taken),
+                "FAKE_PS_SHAPE": ps_shape,
+            },
+        )
+
+    assert result.returncode == 4
+    assert "./gods-eye stop" in result.stderr
 
 
 def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
@@ -197,6 +394,8 @@ def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
 
     assert result.returncode == 4
     assert "./gods-eye prepare" in result.stderr
+    assert "checkout" in result.stderr
+    assert ".gods-eye" in result.stderr
     assert not any("compose" in call and "up" in call for call in calls)
 
 
@@ -378,7 +577,7 @@ def test_start_reports_invisible_prepared_asset_without_runtime_mutation(
     assert not any("up" in call for call in calls)
 
 
-def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
+def test_readiness_failure_preserves_runtime_and_prints_recovery_guidance(tmp_path):
     result, calls = _run(
         tmp_path,
         "start",
@@ -394,11 +593,12 @@ def test_readiness_failure_stops_runtime_and_prints_recovery_guidance(tmp_path):
     assert result.returncode == 4
     assert "readiness" in result.stderr.lower()
     assert "active retrieval index reference escapes the configured index root" in result.stderr
-    assert "logs" in result.stderr.lower()
-    assert any("compose" in call and "down" in call for call in calls)
+    assert "./gods-eye logs" in result.stderr
+    assert "./gods-eye stop" in result.stderr
+    assert not any("compose" in call and "down" in call for call in calls)
 
 
-def test_start_failure_immediately_stops_partially_started_runtime(tmp_path):
+def test_container_start_failure_preserves_the_partially_started_runtime(tmp_path):
     result, calls = _run(
         tmp_path,
         "start",
@@ -412,12 +612,13 @@ def test_start_failure_immediately_stops_partially_started_runtime(tmp_path):
 
     assert result.returncode == 4
     assert "web container could not start" in result.stderr
+    assert "./gods-eye stop" in result.stderr
     runtime_actions = [
         "up" if "up" in call else "down"
         for call in calls
         if "compose" in call and ("up" in call or "down" in call)
     ]
-    assert runtime_actions == ["up", "down"]
+    assert runtime_actions == ["up"]
     assert not any("compose" in call and "exec" in call for call in calls)
 
 

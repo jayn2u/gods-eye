@@ -438,6 +438,40 @@ def test_operator_can_verify_a_supported_workstation_as_json(tmp_path: Path) -> 
     assert (project_dir / ".gods-eye/state.json").is_file()
 
 
+def test_doctor_reports_a_missing_project_root_instead_of_crashing(tmp_path: Path) -> None:
+    """Doctor is what an operator runs when things are broken; it must not crash."""
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _fake_docker(bin_dir)
+    # A root the Launcher cannot create, mirroring a container-only path such
+    # as /workspace when the Launcher runs outside its container.
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_PROJECT_ROOT": str(blocker / "root"),
+    }
+    env.pop("GODS_EYE_DOCTOR_FREE_BYTES", None)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "gods_eye.launcher", "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert "Traceback" not in result.stderr, result.stderr
+    report = json.loads(result.stdout)
+    capacity = next(check for check in report["checks"] if check["name"] == "storage-capacity")
+    assert capacity["status"] == "fail"
+    assert capacity["guidance"]
+
+
 def test_doctor_reports_all_prerequisite_failures_with_guidance(tmp_path: Path) -> None:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()

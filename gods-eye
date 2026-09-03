@@ -53,12 +53,51 @@ export GODS_EYE_IMAGE_MODE=local
 export GODS_EYE_COMPOSE_FILE=/workspace/compose.yaml
 export GODS_EYE_SERVICE_IMAGE=gods-eye-service:local
 export GODS_EYE_WEB_IMAGE=gods-eye-web:local
-printf '%s\n' "Preparing the local Launcher image from the current checkout." >&2
-if docker compose --project-directory "$SCRIPT_DIR" --profile tools build launcher; then
-    :
+gods_eye_digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    else
+        shasum -a 256 | cut -d' ' -f1
+    fi
+}
+
+# Everything Dockerfile.launcher copies into the image, in a stable order.
+gods_eye_source_fingerprint() {
+    {
+        cat "$SCRIPT_DIR/Dockerfile.launcher" "$SCRIPT_DIR/pyproject.toml" "$SCRIPT_DIR/README.md"
+        find "$SCRIPT_DIR/service" -type f \
+            ! -name '*.pyc' ! -path '*/__pycache__/*' \
+            | LC_ALL=C sort | while IFS= read -r source_file; do
+            printf '%s\n' "$source_file"
+            cat "$source_file"
+        done
+    } 2>/dev/null | gods_eye_digest
+}
+
+launcher_image=${GODS_EYE_LAUNCHER_IMAGE:-gods-eye-launcher:local}
+GODS_EYE_SOURCE_FINGERPRINT=$(gods_eye_source_fingerprint)
+export GODS_EYE_SOURCE_FINGERPRINT
+built_fingerprint=$(docker image inspect \
+    --format '{{index .Config.Labels "com.gods-eye.source-fingerprint"}}' \
+    "$launcher_image" 2>/dev/null || true)
+
+if [ "$built_fingerprint" = "$GODS_EYE_SOURCE_FINGERPRINT" ]; then
+    build_reason=""
+elif [ -z "$built_fingerprint" ]; then
+    build_reason="no local Launcher image is present"
 else
-    build_status=$?
-    printf '%s\n' "Could not build the local Launcher image; the requested command was not run." >&2
-    exit "$build_status"
+    build_reason="the checkout changed since the local Launcher image was built"
+fi
+
+if [ -n "$build_reason" ]; then
+    printf 'Building the local Launcher image because %s.\n' "$build_reason" >&2
+    printf '%s\n' "A cold build installs the full model stack and takes many minutes; leave it running." >&2
+    if docker compose --project-directory "$SCRIPT_DIR" --profile tools build launcher >&2; then
+        :
+    else
+        build_status=$?
+        printf '%s\n' "Could not build the local Launcher image; the requested command was not run." >&2
+        exit "$build_status"
+    fi
 fi
 exec docker compose --project-directory "$SCRIPT_DIR" --profile tools run --rm launcher "$@"

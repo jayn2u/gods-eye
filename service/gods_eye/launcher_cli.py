@@ -60,6 +60,7 @@ def _parser() -> tuple[LauncherArgumentParser, argparse.ArgumentParser]:
     start.add_argument("--no-open", action="store_true")
     start.add_argument("--web-port", type=int, default=5173)
     start.add_argument("--api-port", type=int, default=8000)
+    start.add_argument("--relocate-ports", action="store_true")
     for command in ("stop", "status", "logs"):
         commands.add_parser(command)
     reset = commands.add_parser("reset")
@@ -127,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 no_open=args.no_open,
                 web_port=args.web_port,
                 api_port=args.api_port,
+                relocate_ports=args.relocate_ports,
             )
         except LauncherBusyError as error:
             return render_busy(error)

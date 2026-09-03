@@ -476,6 +476,15 @@ def _wait_for_readiness(
     return _poll_until_available(probe, timeout_seconds, "search readiness did not respond")
 
 
+def _web_served_wrong_response(url: str, observed: str) -> str:
+    """Describe a served response that is not the built application shell."""
+
+    return (
+        f"Demo Runtime web entry point {url} {observed}. "
+        "That points at the web image or its nginx configuration rather than the service"
+    )
+
+
 def _probe_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
     """Verify that the advertised loopback URL serves the built application shell."""
 
@@ -487,20 +496,26 @@ def _probe_web_entrypoint(url: str, timeout_seconds: float) -> tuple[bool, str]:
             charset = response.headers.get_content_charset() or "utf-8"
             body = response.read(_WEB_PROBE_RESPONSE_LIMIT).decode(charset, errors="replace")
     except urllib.error.HTTPError as error:
-        return False, f"Demo Runtime web entry point {url} returned HTTP {error.code}"
+        return False, _web_served_wrong_response(
+            url, f"returned HTTP {error.code} ({error.headers.get_content_type()})"
+        )
     except (OSError, urllib.error.URLError) as error:
         reason = getattr(error, "reason", error)
-        return False, f"Demo Runtime web entry point {url} could not be reached: {reason}"
+        return False, (
+            f"Demo Runtime web entry point {url} could not be reached: {reason}. "
+            "The web container did not start or is not publishing that port"
+        )
 
     if status != 200:
-        return False, f"Demo Runtime web entry point {url} returned HTTP {status}"
+        return False, _web_served_wrong_response(url, f"returned HTTP {status} ({content_type})")
     if content_type != "text/html":
-        return (
-            False,
-            f"Demo Runtime web entry point {url} returned {content_type or 'unknown content'}",
+        return False, _web_served_wrong_response(
+            url, f"returned {content_type or 'unknown content'}"
         )
     if _APP_SHELL_MARKER not in body:
-        return False, f"Demo Runtime web entry point {url} did not return the application shell"
+        return False, _web_served_wrong_response(
+            url, f"did not return the application shell (HTTP {status}, {content_type})"
+        )
     return True, "application shell is available"
 
 
@@ -518,6 +533,113 @@ def _can_open_browser(no_open: bool) -> bool:
     )
 
 
+def _port_is_available(port: int) -> bool:
+    if os.getenv("GODS_EYE_RUNTIME_PORTS_AVAILABLE") == "1":
+        return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        # Docker's publisher binds with SO_REUSEADDR. Without it a port left in
+        # TIME_WAIT by a previous Demo Runtime reads as occupied, which would
+        # now refuse the start outright rather than merely relocating.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _port_held_by_this_project(command: list[str], environment: dict[str, str], port: int) -> bool:
+    """Report whether this Compose project already publishes the wanted port."""
+
+    listed = _run([*command, "ps", "--format", "json"], environment)
+    if listed.returncode != 0:
+        return False
+    # Compose v2 emits newline-delimited objects; older shapes emit one array.
+    containers: list[dict] = []
+    try:
+        decoded = json.loads(listed.stdout)
+    except json.JSONDecodeError:
+        for line in listed.stdout.splitlines():
+            try:
+                containers.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    else:
+        containers.extend(decoded if isinstance(decoded, list) else [decoded])
+    return any(
+        publisher.get("PublishedPort") == port
+        for container in containers
+        for publisher in container.get("Publishers") or []
+    )
+
+
+def _resolve_runtime_ports(
+    command: list[str],
+    environment: dict[str, str],
+    *,
+    web_port: int,
+    api_port: int,
+    relocate: bool,
+) -> tuple[int, int] | None:
+    """Return the ports to publish, or None when a requested port is taken.
+
+    Quietly moving to an arbitrary free port made the advertised URL differ
+    from the requested one, so an operator watching the port they asked for
+    saw nothing while the Demo Runtime answered somewhere else.
+    """
+
+    resolved: list[int] = []
+    for name, requested in (("web", web_port), ("API", api_port)):
+        excluded = set(resolved)
+        if requested not in excluded and _port_is_available(requested):
+            resolved.append(requested)
+            continue
+        if not relocate:
+            print(
+                f"Demo Runtime {name} port {requested} is already in use; "
+                "no containers were started.",
+                file=sys.stderr,
+            )
+            if _port_held_by_this_project(command, environment, requested):
+                print(
+                    "This checkout's Demo Runtime already publishes that port. "
+                    "Run './gods-eye stop' before starting it again.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Free that port, choose another with "
+                    f"'--{'web' if name == 'web' else 'api'}-port', or allow the Launcher to "
+                    "choose one with '--relocate-ports'.",
+                    file=sys.stderr,
+                )
+            return None
+        selected = _available_port(requested, exclude=excluded)
+        print(
+            f"Demo Runtime {name} port {requested} is already in use; relocated to {selected}.",
+            file=sys.stderr,
+        )
+        resolved.append(selected)
+    return resolved[0], resolved[1]
+
+
+def _report_runtime_failure(stage: str, detail: str) -> int:
+    """Report a failed start stage, leaving the Demo Runtime up for inspection.
+
+    Tearing the containers down here would delete the only evidence of why
+    the start failed, which is what made this class of failure so hard to
+    diagnose. The operator stops them explicitly once they are done looking.
+    """
+
+    print(f"Demo Runtime {stage} failed: {detail}", file=sys.stderr)
+    print(
+        "The Demo Runtime containers were left running so their logs remain readable. "
+        "Run './gods-eye logs' for diagnostics, then './gods-eye stop' to remove them.",
+        file=sys.stderr,
+    )
+    return EXIT_PREPARATION_FAILED
+
+
 def start_runtime(
     layout: RuntimeLayout,
     *,
@@ -526,16 +648,37 @@ def start_runtime(
     no_open: bool,
     web_port: int,
     api_port: int,
+    relocate_ports: bool = False,
 ) -> int:
     missing = prepared_missing(layout)
     if missing:
         print("Full Demo is not prepared; missing: " + ", ".join(missing) + ".", file=sys.stderr)
+        print(
+            "Demo Preparation state lives in '.gods-eye/' inside this checkout and is not "
+            "shared with other checkouts or worktrees.",
+            file=sys.stderr,
+        )
         print("Run './gods-eye prepare'. No downloads were started.", file=sys.stderr)
         return EXIT_PREPARATION_FAILED
-    web_port = _available_port(web_port)
-    api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     host_root = _host_project_root(layout)
+    # Only for the port probe; the published ports are not settled yet.
+    probe_environment = _runtime_env(web_port, api_port, offline)
+    probe_environment.update(_runtime_compose_env(layout, offline=offline))
+    selected = _resolve_runtime_ports(
+        compose,
+        probe_environment,
+        web_port=web_port,
+        api_port=api_port,
+        relocate=relocate_ports,
+    )
+    if selected is None:
+        return EXIT_PREPARATION_FAILED
+    web_port, api_port = selected
+    # Build the runtime environment once the ports are final: _runtime_env
+    # carries the whole ambient os.environ, so applying it after
+    # _runtime_compose_env would reset the resolved host bind sources and the
+    # Compose project identity back to their (often empty) ambient values.
     environment = _runtime_env(web_port, api_port, offline)
     environment.update(_runtime_compose_env(layout, offline=offline))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
@@ -562,9 +705,10 @@ def start_runtime(
         runtime_up.extend(("service", "web"))
         started = _run(runtime_up, environment)
         if started.returncode != 0:
-            _run([*compose, "down"], environment)
-            print(started.stderr.strip() or "Could not start the Demo Runtime.", file=sys.stderr)
-            return EXIT_PREPARATION_FAILED
+            return _report_runtime_failure(
+                "container start",
+                started.stderr.strip() or "Compose could not start the containers.",
+            )
         timeout_seconds = float(os.getenv("GODS_EYE_READINESS_TIMEOUT_SECONDS", "120"))
         readiness_deadline = time.monotonic() + timeout_seconds
         ready, detail = _wait_for_readiness(
@@ -573,21 +717,14 @@ def start_runtime(
             max(0, readiness_deadline - time.monotonic()),
         )
         if not ready:
-            _run([*compose, "down"], environment)
-            print(
-                f"Health/search readiness failed: {detail}. Run './gods-eye logs' for diagnostics.",
-                file=sys.stderr,
-            )
-            return EXIT_PREPARATION_FAILED
+            return _report_runtime_failure("health/search readiness", detail)
         url = f"http://127.0.0.1:{web_port}"
         web_ready, detail = _wait_for_web_entrypoint(
             url,
             max(0, readiness_deadline - time.monotonic()),
         )
         if not web_ready:
-            _run([*compose, "down"], environment)
-            print(f"{detail}. Run './gods-eye logs' for diagnostics.", file=sys.stderr)
-            return EXIT_PREPARATION_FAILED
+            return _report_runtime_failure("web entry point", detail)
         print(f"God's Eye Full Demo is ready: {url}")
         if _can_open_browser(no_open):
             try:

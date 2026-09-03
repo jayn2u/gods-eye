@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+ARG GODS_EYE_SOURCE_FINGERPRINT=unknown
+LABEL com.gods-eye.source-fingerprint=$GODS_EYE_SOURCE_FINGERPRINT
+
 WORKDIR /app
 # See Dockerfile.service: dependencies install from pyproject.toml only, so a
 # source edit under service/ cannot invalidate this layer.
