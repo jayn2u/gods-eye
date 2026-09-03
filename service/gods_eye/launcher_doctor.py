@@ -135,7 +135,22 @@ def _check_storage(layout: RuntimeLayout) -> tuple[Check, Check]:
     )
     required = required_capacity_bytes()
     override = os.getenv("GODS_EYE_DOCTOR_FREE_BYTES")
-    free = int(override) if override is not None else shutil.disk_usage(layout.root).free
+    if override is not None:
+        free: int | None = int(override)
+    else:
+        try:
+            free = shutil.disk_usage(layout.root).free
+        except OSError:
+            # Doctor is what an operator runs when things are broken, so an
+            # unreachable project root has to be a reported check, not a crash.
+            free = None
+    if free is None:
+        return writable_check, Check(
+            "storage-capacity",
+            "fail",
+            f"{layout.root} could not be measured",
+            "Check that the project directory exists and is readable.",
+        )
     enough = free >= required
     return writable_check, Check(
         "storage-capacity",
