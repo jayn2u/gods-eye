@@ -64,6 +64,11 @@ A web entry point failure reports the response that was actually served. A non-2
 document that is not the built application shell points at the web image or its nginx configuration;
 a connection failure points at the web container not starting or not publishing its port.
 
+`start` publishes exactly the ports you ask for. If `--web-port` or `--api-port` is already in
+use, it says so and starts nothing rather than moving to an arbitrary free port behind your back.
+Pass `--relocate-ports` to let the Launcher choose replacements; the ports it picks are reported
+before any container is created.
+
 Demo Preparation state lives in `.gods-eye/` inside the checkout you run from. It is not shared with
 other checkouts or worktrees, so a fresh worktree needs its own `./gods-eye prepare`.
 

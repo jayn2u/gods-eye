@@ -533,6 +533,89 @@ def _can_open_browser(no_open: bool) -> bool:
     )
 
 
+def _port_is_available(port: int) -> bool:
+    if os.getenv("GODS_EYE_RUNTIME_PORTS_AVAILABLE") == "1":
+        return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _port_held_by_this_project(command: list[str], environment: dict[str, str], port: int) -> bool:
+    """Report whether this Compose project already publishes the wanted port."""
+
+    listed = _run([*command, "ps", "--format", "json"], environment)
+    if listed.returncode != 0:
+        return False
+    # Compose emits either one JSON array or newline-delimited objects.
+    containers: list[dict] = []
+    for chunk in (listed.stdout, *listed.stdout.splitlines()):
+        try:
+            decoded = json.loads(chunk)
+        except json.JSONDecodeError:
+            continue
+        containers.extend(decoded if isinstance(decoded, list) else [decoded])
+        break
+    return any(
+        publisher.get("PublishedPort") == port
+        for container in containers
+        for publisher in container.get("Publishers") or []
+    )
+
+
+def _resolve_runtime_ports(
+    command: list[str],
+    environment: dict[str, str],
+    *,
+    web_port: int,
+    api_port: int,
+    relocate: bool,
+) -> tuple[int, int] | None:
+    """Return the ports to publish, or None when a requested port is taken.
+
+    Quietly moving to an arbitrary free port made the advertised URL differ
+    from the requested one, so an operator watching the port they asked for
+    saw nothing while the Demo Runtime answered somewhere else.
+    """
+
+    resolved: list[int] = []
+    for name, requested in (("web", web_port), ("API", api_port)):
+        excluded = set(resolved)
+        if requested not in excluded and _port_is_available(requested):
+            resolved.append(requested)
+            continue
+        if not relocate:
+            print(
+                f"Demo Runtime {name} port {requested} is already in use; "
+                "no containers were started.",
+                file=sys.stderr,
+            )
+            if _port_held_by_this_project(command, environment, requested):
+                print(
+                    "This checkout's Demo Runtime already publishes that port. "
+                    "Run './gods-eye stop' before starting it again.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "Free that port, choose another with "
+                    f"'--{'web' if name == 'web' else 'api'}-port', or allow the Launcher to "
+                    "choose one with '--relocate-ports'.",
+                    file=sys.stderr,
+                )
+            return None
+        selected = _available_port(requested, exclude=excluded)
+        print(
+            f"Demo Runtime {name} port {requested} is already in use; relocated to {selected}.",
+            file=sys.stderr,
+        )
+        resolved.append(selected)
+    return resolved[0], resolved[1]
+
+
 def _report_runtime_failure(stage: str, detail: str) -> int:
     """Report a failed start stage, leaving the Demo Runtime up for inspection.
 
@@ -558,6 +641,7 @@ def start_runtime(
     no_open: bool,
     web_port: int,
     api_port: int,
+    relocate_ports: bool = False,
 ) -> int:
     missing = prepared_missing(layout)
     if missing:
@@ -569,12 +653,21 @@ def start_runtime(
         )
         print("Run './gods-eye prepare'. No downloads were started.", file=sys.stderr)
         return EXIT_PREPARATION_FAILED
-    web_port = _available_port(web_port)
-    api_port = _available_port(api_port, exclude={web_port})
     compose = _compose_command(layout, offline=offline)
     host_root = _host_project_root(layout)
     environment = _runtime_env(web_port, api_port, offline)
     environment.update(_runtime_compose_env(layout, offline=offline))
+    selected = _resolve_runtime_ports(
+        compose,
+        environment,
+        web_port=web_port,
+        api_port=api_port,
+        relocate=relocate_ports,
+    )
+    if selected is None:
+        return EXIT_PREPARATION_FAILED
+    web_port, api_port = selected
+    environment.update(_runtime_env(web_port, api_port, offline))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
     if compose_check.returncode != 0:
         print(

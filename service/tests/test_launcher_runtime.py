@@ -44,7 +44,11 @@ elif 'compose' in args and 'exec' in args:
         print(os.environ.get('FAKE_READINESS_DETAIL', 'search readiness failed'), file=sys.stderr)
         raise SystemExit(1)
 elif 'compose' in args and 'ps' in args:
-    print(json.dumps([{'Service': 'service', 'State': 'running'}, {'Service': 'web', 'State': 'running'}]))
+    published = os.environ.get('FAKE_PS_PUBLISHED_PORT')
+    web = {'Service': 'web', 'State': 'running'}
+    if published:
+        web['Publishers'] = [{'URL': '127.0.0.1', 'PublishedPort': int(published)}]
+    print(json.dumps([{'Service': 'service', 'State': 'running'}, web]))
 elif 'compose' in args and 'logs' in args:
     print('service | ready')
 elif 'compose' in args and 'up' in args:
@@ -218,6 +222,90 @@ def test_web_entrypoint_failure_reports_the_observed_response(tmp_path):
 
     assert "HTTP 500" in result.stderr
     assert "text/html" in result.stderr
+
+
+def test_start_refuses_an_occupied_web_port_instead_of_moving_quietly(tmp_path):
+    """The advertised URL must be the URL the operator asked for."""
+
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(taken),
+            extra_env={"GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0"},
+        )
+
+    assert result.returncode == 4
+    assert str(taken) in result.stderr
+    assert "already in use" in result.stderr
+    assert "--relocate-ports" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+    assert not any("compose" in call and "down" in call for call in calls)
+
+
+def test_start_refuses_an_occupied_api_port_instead_of_moving_quietly(tmp_path):
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--api-port",
+            str(taken),
+            extra_env={"GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0"},
+        )
+
+    assert result.returncode == 4
+    assert str(taken) in result.stderr
+    assert "already in use" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+
+
+def test_start_relocates_only_when_explicitly_allowed_and_announces_the_port(tmp_path):
+    with connection_refused_loopback_port() as taken:
+        result, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--relocate-ports",
+            "--web-port",
+            str(taken),
+            extra_env={
+                "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0",
+                "GODS_EYE_READINESS_TIMEOUT_SECONDS": "0",
+            },
+        )
+
+    announcement = next(
+        line for line in result.stderr.splitlines() if "relocated" in line and str(taken) in line
+    )
+    chosen = int(announcement.rsplit(" ", 1)[-1].rstrip("."))
+    assert chosen != taken
+    # The relocation is announced before any container is created.
+    assert any("compose" in call and "up" in call for call in calls)
+
+
+def test_occupied_port_message_names_this_projects_runtime_when_it_is_the_holder(tmp_path):
+    with connection_refused_loopback_port() as taken:
+        result, _ = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(taken),
+            extra_env={
+                "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0",
+                "FAKE_PS_PUBLISHED_PORT": str(taken),
+            },
+        )
+
+    assert result.returncode == 4
+    assert "./gods-eye stop" in result.stderr
 
 
 def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
