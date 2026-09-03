@@ -162,7 +162,7 @@ def _check_port(name: str, port: int) -> Check:
         name,
         "pass" if available else "warn",
         f"127.0.0.1:{port} is {'available' if available else 'occupied'}",
-        None if available else "The Launcher will select another loopback port at start.",
+        None if available else "Free the port, or pass --relocate-ports when starting.",
     )
 
 

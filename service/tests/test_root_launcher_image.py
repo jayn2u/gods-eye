@@ -498,6 +498,10 @@ def test_local_image_preparation_keeps_machine_readable_output_clean(tmp_path: P
 
     result, _ = _run(tmp_path, "doctor", "--json")
 
+    assert result.stdout.startswith("{"), (
+        f"stdout was not the doctor report.\n"
+        f"returncode={result.returncode}\nstdout={result.stdout!r}\nstderr={result.stderr!r}"
+    )
     checks = json.loads(result.stdout)["checks"]
     assert {check["name"] for check in checks}
     assert "Building the local Launcher image" in result.stderr
@@ -607,7 +611,10 @@ def test_real_root_doctor_uses_compose_inside_launcher() -> None:
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    checks = __import__("json").loads(result.stdout)["checks"]
+    # Overall doctor status is not the subject here: the supported platform
+    # needs an NVIDIA GPU, which CI runners do not have, so the GPU checks
+    # fail there and doctor exits non-zero. What must hold is that Compose is
+    # usable from inside the Launcher container.
+    checks = json.loads(result.stdout)["checks"]
     compose = next(check for check in checks if check["name"] == "compose")
-    assert compose["status"] == "pass"
+    assert compose["status"] == "pass", result.stderr
