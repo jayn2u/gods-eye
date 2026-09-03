@@ -5,6 +5,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.request
 import uuid
 from html.parser import HTMLParser
@@ -35,6 +36,29 @@ def _advertised_runtime_url(output: str) -> str:
     match = re.search(r"God's Eye Full Demo is ready: (http://127\.0\.0\.1:\d+)", output)
     assert match is not None, output
     return match.group(1)
+
+
+def _reserved_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _await_web_entrypoint(url: str, timeout_seconds: float = 60.0) -> str:
+    """Return the served document, retrying while the container comes up."""
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                assert response.status == 200
+                assert response.headers.get_content_type() == "text/html"
+                return response.read().decode()
+        except Exception as error:  # noqa: BLE001 - retried until the deadline
+            last_error = error
+            time.sleep(1)
+    raise AssertionError(f"{url} never served the application shell: {last_error}")
 
 
 def _seed_stale_web_image(context: Path, image: str) -> None:
@@ -129,6 +153,62 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
         assert {port.get("host_ip") for port in published_ports} == {"127.0.0.1"}
 
 
+def _rendered_compose(*overrides: str) -> dict:
+    files: list[str] = ["-f", str(ROOT / "compose.yaml")]
+    for override in overrides:
+        files.extend(("-f", str(ROOT / override)))
+    result = subprocess.run(
+        ["docker", "compose", *files, "config", "--format", "json"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            **os.environ,
+            "GODS_EYE_SOURCE_ROOT": str(ROOT),
+            "GODS_EYE_RELEASE_VERSION": "v9.9.9",
+            "GODS_EYE_SERVICE_IMAGE": "ghcr.io/jayn2u/gods-eye-service@sha256:" + "0" * 64,
+            "GODS_EYE_WEB_IMAGE": "ghcr.io/jayn2u/gods-eye-web@sha256:" + "1" * 64,
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_local_mode_demo_runtime_services_always_build_from_the_checkout() -> None:
+    """A development checkout must never serve a previously tagged local image."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+    configuration = _rendered_compose()
+
+    for name in ("service", "web"):
+        definition = configuration["services"][name]
+        assert definition.get("build"), f"{name} must be buildable in local mode"
+        assert definition.get("pull_policy") == "build", (
+            f"{name} must rebuild from the checkout; without an always-build pull policy "
+            "Compose reuses whatever image already carries the tag, so source fixes never "
+            "reach the Demo Runtime"
+        )
+
+
+def test_release_mode_pins_immutable_digests_and_never_builds() -> None:
+    """Release mode runs published images and must not build anything."""
+
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+    configuration = _rendered_compose("compose.release.yaml")
+
+    for name in ("service", "web"):
+        definition = configuration["services"][name]
+        assert not definition.get("build"), f"{name} must not build in release mode"
+        assert definition.get("pull_policy") != "build"
+        assert re.fullmatch(
+            r"ghcr\.io/jayn2u/gods-eye-(service|web)@sha256:[0-9a-f]{64}",
+            definition["image"],
+        ), definition["image"]
+
+
 def test_fixture_preparation_command_produces_runtime_state_and_local_assets(
     tmp_path: Path,
 ) -> None:
@@ -153,6 +233,66 @@ def test_fixture_preparation_command_produces_runtime_state_and_local_assets(
     assert state["preparation"]["smoke_test"]["fixture"] is True
     assert (tmp_path / "indexes/gallery-manifest.json").is_file()
     assert (tmp_path / "indexes/active").is_dir()
+
+
+@pytest.mark.integration
+def test_bare_compose_up_rebuilds_the_web_image_from_the_checkout(tmp_path: Path) -> None:
+    """`docker compose up -d` must not resurrect a previously tagged local image."""
+
+    if os.getenv("RUN_LAUNCHER_COMPOSE_SMOKE") != "1":
+        pytest.skip("set RUN_LAUNCHER_COMPOSE_SMOKE=1 to build the fixture Compose smoke stack")
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+
+    web_image = f"gods-eye-web:bare-{uuid.uuid4().hex}"
+    project = f"gods-eye-bare-{uuid.uuid4().hex[:12]}"
+    web_port = _reserved_loopback_port()
+    environment = {
+        **os.environ,
+        "GODS_EYE_SOURCE_ROOT": str(ROOT),
+        "GODS_EYE_WEB_IMAGE": web_image,
+        "GODS_EYE_WEB_PORT": str(web_port),
+        "GODS_EYE_SMOKE_DATA_ROOT": str(tmp_path / "datasets"),
+        "GODS_EYE_SMOKE_INDEX_ROOT": str(tmp_path / "indexes"),
+        "GODS_EYE_SMOKE_MODEL_ROOT": str(tmp_path / "models"),
+    }
+    compose = [
+        "docker",
+        "compose",
+        "-f",
+        str(ROOT / "compose.yaml"),
+        "-f",
+        str(ROOT / "compose.smoke.yaml"),
+        "--project-name",
+        project,
+        "--project-directory",
+        str(ROOT),
+    ]
+    _seed_stale_web_image(tmp_path / "stale-web-image", web_image)
+
+    try:
+        # No --build: a bare up must reach the current checkout on its own.
+        started = subprocess.run(
+            [*compose, "up", "-d"], text=True, capture_output=True, check=False, env=environment
+        )
+        assert started.returncode == 0, started.stderr
+
+        shell = _await_web_entrypoint(f"http://127.0.0.1:{web_port}/")
+        assert "stale-root" not in shell, (
+            "bare `docker compose up -d` served the seeded stale image; a source fix would "
+            "never reach the Demo Runtime"
+        )
+        parser = _ApplicationShellParser()
+        parser.feed(shell)
+        assert parser.has_root
+        assert parser.script_sources
+    finally:
+        subprocess.run(
+            [*compose, "down", "--volumes"], check=False, capture_output=True, env=environment
+        )
+        subprocess.run(
+            ["docker", "image", "rm", "--force", web_image], check=False, capture_output=True
+        )
 
 
 @pytest.mark.integration

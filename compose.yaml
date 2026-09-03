@@ -4,6 +4,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.service
+    # A development checkout must serve its own source. Without this Compose
+    # reuses whatever image already carries the tag, so a fix never reaches the
+    # Demo Runtime. The release override resets build and pins digests instead.
+    pull_policy: build
     environment:
       GODS_EYE_DATASET_ROOT: /datasets
       GODS_EYE_INDEX_ROOT: /indexes
@@ -72,5 +76,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
+    pull_policy: build
     depends_on: [service]
     ports: ["127.0.0.1:${GODS_EYE_WEB_PORT:-5173}:80"]
