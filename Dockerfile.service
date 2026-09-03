@@ -1,8 +1,15 @@
 FROM python:3.11-slim
 WORKDIR /app
+# Third-party dependencies resolve from pyproject.toml alone. The stub package
+# only exists so the project metadata can be built here; it never ships, because
+# the real source is copied and reinstalled below. Keeping this layer free of
+# ./service means editing project source no longer rebuilds the torch/faiss stack.
 COPY pyproject.toml README.md ./
+RUN mkdir -p service/gods_eye \
+    && touch service/gods_eye/__init__.py service/gods_eye/dataset_registry.json \
+    && pip install --no-cache-dir '.[indexing,clip]'
 COPY service ./service
-RUN pip install --no-cache-dir '.[indexing,clip]'
+RUN pip install --no-cache-dir --no-deps --force-reinstall .
 ENV GODS_EYE_DATASET_ROOT=/datasets \
     GODS_EYE_INDEX_ROOT=/indexes \
     GODS_EYE_ACTIVE_INDEX=/indexes/active \
