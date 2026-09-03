@@ -50,7 +50,7 @@ def test_development_checkout_clearly_selects_local_builds(tmp_path: Path) -> No
     result = _run_launcher(tmp_path)
 
     assert result.returncode == 0
-    assert "Preparing the local Launcher image from the current checkout" in result.stderr
+    assert "Building the local Launcher image" in result.stderr
     assert " build launcher" in result.docker_log  # type: ignore[attr-defined]
     assert result.docker_log.index(" build launcher") < result.docker_log.index(
         " run --rm launcher"

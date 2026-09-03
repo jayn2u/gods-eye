@@ -43,6 +43,13 @@ The service container sees datasets at `/datasets` read-only, indexes at `/index
 the model cache at `/models`. Images and research assets are excluded from build contexts and image
 layers. `docker compose down` preserves the host assets.
 
+## Launcher image builds
+
+The Launcher runs from a locally built image. The wrapper fingerprints everything
+`Dockerfile.launcher` copies and records it as a label on the image it builds, so it rebuilds only
+when the image is missing or the checkout has moved since it was built. It says which of those it is
+doing before the build starts; a cold build installs the full model stack and takes many minutes.
+
 ## When a start fails
 
 `./gods-eye start` verifies the Demo Runtime in stages: Prepared Demo asset preflight, container

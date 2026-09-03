@@ -47,6 +47,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.launcher
+      args:
+        GODS_EYE_SOURCE_FINGERPRINT: ${GODS_EYE_SOURCE_FINGERPRINT:-unknown}
     image: ${GODS_EYE_LAUNCHER_IMAGE:-gods-eye-launcher:local}
     environment:
       GODS_EYE_PROJECT_ROOT: /workspace
