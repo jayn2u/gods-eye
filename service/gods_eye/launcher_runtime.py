@@ -537,6 +537,10 @@ def _port_is_available(port: int) -> bool:
     if os.getenv("GODS_EYE_RUNTIME_PORTS_AVAILABLE") == "1":
         return True
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        # Docker's publisher binds with SO_REUSEADDR. Without it a port left in
+        # TIME_WAIT by a previous Demo Runtime reads as occupied, which would
+        # now refuse the start outright rather than merely relocating.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
         except OSError:
@@ -550,15 +554,18 @@ def _port_held_by_this_project(command: list[str], environment: dict[str, str], 
     listed = _run([*command, "ps", "--format", "json"], environment)
     if listed.returncode != 0:
         return False
-    # Compose emits either one JSON array or newline-delimited objects.
+    # Compose v2 emits newline-delimited objects; older shapes emit one array.
     containers: list[dict] = []
-    for chunk in (listed.stdout, *listed.stdout.splitlines()):
-        try:
-            decoded = json.loads(chunk)
-        except json.JSONDecodeError:
-            continue
+    try:
+        decoded = json.loads(listed.stdout)
+    except json.JSONDecodeError:
+        for line in listed.stdout.splitlines():
+            try:
+                containers.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    else:
         containers.extend(decoded if isinstance(decoded, list) else [decoded])
-        break
     return any(
         publisher.get("PublishedPort") == port
         for container in containers
@@ -655,11 +662,12 @@ def start_runtime(
         return EXIT_PREPARATION_FAILED
     compose = _compose_command(layout, offline=offline)
     host_root = _host_project_root(layout)
-    environment = _runtime_env(web_port, api_port, offline)
-    environment.update(_runtime_compose_env(layout, offline=offline))
+    # Only for the port probe; the published ports are not settled yet.
+    probe_environment = _runtime_env(web_port, api_port, offline)
+    probe_environment.update(_runtime_compose_env(layout, offline=offline))
     selected = _resolve_runtime_ports(
         compose,
-        environment,
+        probe_environment,
         web_port=web_port,
         api_port=api_port,
         relocate=relocate_ports,
@@ -667,7 +675,12 @@ def start_runtime(
     if selected is None:
         return EXIT_PREPARATION_FAILED
     web_port, api_port = selected
-    environment.update(_runtime_env(web_port, api_port, offline))
+    # Build the runtime environment once the ports are final: _runtime_env
+    # carries the whole ambient os.environ, so applying it after
+    # _runtime_compose_env would reset the resolved host bind sources and the
+    # Compose project identity back to their (often empty) ambient values.
+    environment = _runtime_env(web_port, api_port, offline)
+    environment.update(_runtime_compose_env(layout, offline=offline))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
     if compose_check.returncode != 0:
         print(

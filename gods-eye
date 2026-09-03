@@ -65,7 +65,9 @@ gods_eye_digest() {
 gods_eye_source_fingerprint() {
     {
         cat "$SCRIPT_DIR/Dockerfile.launcher" "$SCRIPT_DIR/pyproject.toml" "$SCRIPT_DIR/README.md"
-        find "$SCRIPT_DIR/service" -type f | LC_ALL=C sort | while IFS= read -r source_file; do
+        find "$SCRIPT_DIR/service" -type f \
+            ! -name '*.pyc' ! -path '*/__pycache__/*' \
+            | LC_ALL=C sort | while IFS= read -r source_file; do
             printf '%s\n' "$source_file"
             cat "$source_file"
         done

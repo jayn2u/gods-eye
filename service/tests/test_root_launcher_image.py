@@ -471,6 +471,20 @@ def test_launcher_image_fingerprint_tracks_the_copied_sources(tmp_path: Path) ->
     assert before == restored
 
 
+def test_launcher_image_fingerprint_ignores_uncopied_bytecode(tmp_path: Path) -> None:
+    """.dockerignore keeps bytecode out of the image, so it must not force a rebuild."""
+
+    cache = ROOT / "service" / "gods_eye" / "__pycache__"
+    cache.mkdir(exist_ok=True)
+    probe = cache / "fingerprint_probe.cpython-999.pyc"
+    before = _launcher_fingerprint(tmp_path / "before")
+    probe.write_bytes(b"\x00bytecode that never reaches the build context\n")
+    try:
+        assert _launcher_fingerprint(tmp_path / "after") == before
+    finally:
+        probe.unlink()
+
+
 def _launcher_fingerprint(root: Path) -> str:
     root.mkdir(parents=True, exist_ok=True)
     _, calls = _run(root, "doctor", GODS_EYE_FAKE_LAUNCHER_IMAGE_STATE="current")

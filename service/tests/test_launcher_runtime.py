@@ -1,10 +1,12 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 import pytest
 from gods_eye import launcher_runtime
@@ -23,7 +25,15 @@ def _fake_docker(bin_dir: Path) -> Path:
 import json, os, subprocess, sys
 args = sys.argv[1:]
 with open(os.environ['FAKE_DOCKER_LOG'], 'a') as stream:
-    stream.write(json.dumps(args) + '\\n')
+    record = args
+    if 'compose' in args and 'up' in args:
+        record = args + ['env:' + json.dumps({
+            key: os.environ.get(key, '')
+            for key in ('GODS_EYE_DATASET_ROOT', 'GODS_EYE_INDEX_ROOT',
+                        'GODS_EYE_HF_CACHE', 'GODS_EYE_DATA_HOME',
+                        'COMPOSE_PROJECT_NAME')
+        })]
+    stream.write(json.dumps(record) + '\\n')
 if args[:2] == ['compose', 'version']:
     if os.environ.get('GODS_EYE_INSIDE_LAUNCHER') == '1' and os.environ.get('FAKE_LAUNCHER_COMPOSE') == 'unusable':
         print('compose plugin cannot execute', file=sys.stderr)
@@ -48,7 +58,13 @@ elif 'compose' in args and 'ps' in args:
     web = {'Service': 'web', 'State': 'running'}
     if published:
         web['Publishers'] = [{'URL': '127.0.0.1', 'PublishedPort': int(published)}]
-    print(json.dumps([{'Service': 'service', 'State': 'running'}, web]))
+    rows = [{'Service': 'service', 'State': 'running'}, web]
+    if os.environ.get('FAKE_PS_SHAPE') == 'array':
+        print(json.dumps(rows))
+    else:
+        # Compose v2 emits newline-delimited objects, one per container.
+        for row in rows:
+            print(json.dumps(row))
 elif 'compose' in args and 'logs' in args:
     print('service | ready')
 elif 'compose' in args and 'up' in args:
@@ -224,6 +240,65 @@ def test_web_entrypoint_failure_reports_the_observed_response(tmp_path):
     assert "text/html" in result.stderr
 
 
+def test_start_publishes_the_resolved_host_paths_and_project_identity(tmp_path):
+    """The runtime environment must not be reset to ambient values.
+
+    Compose hands these through to the Launcher container as empty strings,
+    so re-merging os.environ after resolving them would silently restore the
+    container-only paths and the default project name.
+    """
+
+    with loopback_http_server() as web_port:
+        _, calls = _run(
+            tmp_path,
+            "start",
+            "--detach",
+            "--no-open",
+            "--web-port",
+            str(web_port),
+            extra_env={
+                "GODS_EYE_DATASET_ROOT": "",
+                "GODS_EYE_INDEX_ROOT": "",
+                "GODS_EYE_HF_CACHE": "",
+                "GODS_EYE_DATA_HOME": "",
+                "COMPOSE_PROJECT_NAME": "",
+            },
+        )
+
+    up_call = next(call for call in calls if "compose" in call and "up" in call)
+    published = json.loads(next(item for item in up_call if item.startswith("env:"))[4:])
+
+    assert published["COMPOSE_PROJECT_NAME"].startswith("gods-eye-")
+    for key in (
+        "GODS_EYE_DATASET_ROOT",
+        "GODS_EYE_INDEX_ROOT",
+        "GODS_EYE_HF_CACHE",
+        "GODS_EYE_DATA_HOME",
+    ):
+        assert published[key], f"{key} was reset to the ambient empty value"
+        assert Path(published[key]).is_absolute(), published[key]
+
+
+def test_available_port_probe_tolerates_a_port_left_in_time_wait(tmp_path):
+    """A just-stopped Demo Runtime must not block the next start."""
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.listen(1)
+    client = socket.create_connection(("127.0.0.1", port))
+    accepted, _ = listener.accept()
+    accepted.close()
+    listener.close()
+    client.close()
+
+    environment = dict(os.environ)
+    environment.pop("GODS_EYE_RUNTIME_PORTS_AVAILABLE", None)
+    with mock.patch.dict(os.environ, environment, clear=True):
+        assert launcher_runtime._port_is_available(port)
+
+
 def test_start_refuses_an_occupied_web_port_instead_of_moving_quietly(tmp_path):
     """The advertised URL must be the URL the operator asked for."""
 
@@ -289,7 +364,12 @@ def test_start_relocates_only_when_explicitly_allowed_and_announces_the_port(tmp
     assert any("compose" in call and "up" in call for call in calls)
 
 
-def test_occupied_port_message_names_this_projects_runtime_when_it_is_the_holder(tmp_path):
+@pytest.mark.parametrize("ps_shape", ["ndjson", "array"])
+def test_occupied_port_message_names_this_projects_runtime_when_it_is_the_holder(
+    tmp_path, ps_shape
+):
+    """The holder is often the second container Compose lists."""
+
     with connection_refused_loopback_port() as taken:
         result, _ = _run(
             tmp_path,
@@ -301,6 +381,7 @@ def test_occupied_port_message_names_this_projects_runtime_when_it_is_the_holder
             extra_env={
                 "GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0",
                 "FAKE_PS_PUBLISHED_PORT": str(taken),
+                "FAKE_PS_SHAPE": ps_shape,
             },
         )
 
