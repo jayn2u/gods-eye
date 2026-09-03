@@ -1,8 +1,13 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+# See Dockerfile.service: dependencies install from pyproject.toml only, so a
+# source edit under service/ cannot invalidate this layer.
 COPY pyproject.toml README.md ./
+RUN mkdir -p service/gods_eye \
+    && touch service/gods_eye/__init__.py service/gods_eye/dataset_registry.json \
+    && pip install --no-cache-dir '.[indexing,clip]'
 COPY service ./service
-RUN pip install --no-cache-dir '.[indexing,clip]'
+RUN pip install --no-cache-dir --no-deps --force-reinstall .
 
 ENTRYPOINT ["python", "-m", "gods_eye.launcher"]
