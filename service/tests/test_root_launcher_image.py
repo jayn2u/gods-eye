@@ -618,3 +618,46 @@ def test_real_root_doctor_uses_compose_inside_launcher() -> None:
     checks = json.loads(result.stdout)["checks"]
     compose = next(check for check in checks if check["name"] == "compose")
     assert compose["status"] == "pass", result.stderr
+
+
+def test_launcher_dockerfile_fingerprints_after_the_dependency_layers() -> None:
+    """Fingerprint metadata must trail every layer that installs anything.
+
+    The fingerprint changes on every edit under service/, so each instruction
+    below it misses the build cache. Placed above the dependency install, a
+    one-line source change re-downloads the whole torch stack, which is what
+    made './gods-eye doctor' look like it was building for no reason.
+    """
+
+    lines = (ROOT / "Dockerfile.launcher").read_text().splitlines()
+    instructions = [
+        (number, line.strip())
+        for number, line in enumerate(lines, start=1)
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+    fingerprint_lines = [
+        number
+        for number, instruction in instructions
+        if "GODS_EYE_SOURCE_FINGERPRINT" in instruction
+        or "com.gods-eye.source-fingerprint" in instruction
+    ]
+    assert fingerprint_lines, "Dockerfile.launcher no longer stamps a source fingerprint"
+
+    install_lines = [
+        number
+        for number, instruction in instructions
+        if instruction.startswith("RUN") and "pip install" in instruction
+    ] + [
+        number
+        for number, instruction in instructions
+        if instruction.startswith("COPY") and "service" in instruction
+    ]
+    assert install_lines, "Dockerfile.launcher no longer installs the project"
+
+    assert min(fingerprint_lines) > max(install_lines), (
+        "Every fingerprint instruction must come after the last COPY/pip install "
+        "in Dockerfile.launcher. Above them, a source edit invalidates the cached "
+        f"dependency layer and reinstalls torch. Fingerprint lines {fingerprint_lines}, "
+        f"install lines {install_lines}."
+    )

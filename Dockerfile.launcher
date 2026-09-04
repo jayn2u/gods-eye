@@ -1,8 +1,5 @@
 FROM python:3.11-slim
 
-ARG GODS_EYE_SOURCE_FINGERPRINT=unknown
-LABEL com.gods-eye.source-fingerprint=$GODS_EYE_SOURCE_FINGERPRINT
-
 WORKDIR /app
 # See Dockerfile.service: dependencies install from pyproject.toml only, so a
 # source edit under service/ cannot invalidate this layer.
@@ -12,5 +9,13 @@ RUN mkdir -p service/gods_eye \
     && pip install --no-cache-dir '.[indexing,clip]'
 COPY service ./service
 RUN pip install --no-cache-dir --no-deps --force-reinstall .
+
+# The fingerprint changes on every source edit, so every layer below this ARG
+# misses the build cache. It therefore has to sit after the dependency install,
+# or a one-line change to service/ re-downloads the whole torch stack. The root
+# launcher only reads the label back off the finished image, so trailing
+# metadata serves it exactly as well as leading metadata would.
+ARG GODS_EYE_SOURCE_FINGERPRINT=unknown
+LABEL com.gods-eye.source-fingerprint=$GODS_EYE_SOURCE_FINGERPRINT
 
 ENTRYPOINT ["python", "-m", "gods_eye.launcher"]
