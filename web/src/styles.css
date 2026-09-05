@@ -45,6 +45,13 @@
   --overlay: #03070c;
   --overlay-text: #eaf5ff;
   --shadow: #0008;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-7: 28px;
+  --metadata-size: .82rem;
 }
 
 :root[data-theme='light'] {
@@ -330,6 +337,30 @@ fieldset {
   margin-top: 10px;
 }
 
+.model-control {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.model-control select:disabled,
+.model-control option:disabled {
+  color: var(--muted);
+}
+
+.model-guidance,
+.unprepared-models {
+  color: var(--muted);
+  font-size: var(--metadata-size);
+  margin: 0;
+}
+
+.unprepared-models {
+  display: grid;
+  gap: var(--space-1);
+  padding-left: var(--space-5);
+}
+
 .primary,
 .secondary,
 .text-button,
@@ -464,6 +495,37 @@ fieldset {
   padding: 13px;
   color: var(--score-text);
   font-size: .86rem;
+}
+
+.provenance {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3) var(--space-7);
+  color: var(--score-text);
+  font-size: var(--metadata-size);
+  margin: var(--space-4) 0;
+}
+
+.results > .provenance,
+.detail > .provenance {
+  justify-content: flex-start;
+  border: 1px solid var(--score-border);
+  background: var(--score-bg);
+  padding: var(--space-3) var(--space-4);
+}
+
+.provenance div {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.provenance dt {
+  font-weight: 700;
+}
+
+.provenance dd {
+  margin: 0;
 }
 
 .grid {
