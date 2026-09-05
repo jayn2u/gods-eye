@@ -7,27 +7,32 @@ The Full Demo ranks the CUHK-PEDES gallery with CLIP ViT-B/16.
 > neither probabilities nor evidence of identity. Do not use the app for identification,
 > surveillance, automated decisions, or safety-critical work.
 
-## See the app
+## Explore the app in light mode
 
-These screenshots show the running Docker Compose web app at a 1440-pixel desktop width,
-captured on September 5, 2026. They use the built-in deterministic fixture
+The app supports light and dark modes throughout the search workflow. Use the **dark mode** or
+**light mode** button in the upper-right corner to switch without losing your description or results.
+On your first visit, the app follows your system appearance; once you choose a mode, it remembers
+your choice in this browser. If browser storage is blocked, switching still works for the current visit.
+
+These light-mode screenshots show the local web app at a 1440-pixel desktop width,
+captured on September 5, 2026. They use the built-in deterministic fixture API
 (`GODS_EYE_USE_FIXTURES=true`): the portrait and similarity score are test data, not real
 CUHK-PEDES images or a measure of retrieval quality. No dataset images are redistributed here.
 
 **1. Compose a search.** Describe visible clothing and accessories in English, choose the gallery
 and maximum result count, then select **Search gallery**.
 
-![Search form with an English description, gallery selector, and search button](docs/images/search-compose.png)
+![Light-mode search form with an English description, gallery selector, search button, and theme switch](docs/images/search-compose.png)
 
 **2. Review results.** Inspect ranked matches and their similarity scores. Select a result to
 open its detail view, or use **Refine search** to revise the description.
 
-![Search results showing the built-in fixture portrait, rank, similarity, and image ID](docs/images/search-results.png)
+![Light-mode search results showing the built-in fixture portrait, rank, similarity, and image ID](docs/images/search-results.png)
 
 **3. Inspect an image.** View the larger portrait alongside its similarity, dataset, split,
 and image ID, then return with **Back to results**.
 
-![Image detail showing the fixture portrait and its metadata](docs/images/search-detail.png)
+![Light-mode image detail showing the fixture portrait and its metadata](docs/images/search-detail.png)
 
 To run the app yourself, follow the [Quickstart](#quickstart). For a dataset-free fixture setup,
 see [Local development and tests](docs/setup/local-development.md).
