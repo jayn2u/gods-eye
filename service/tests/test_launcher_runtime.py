@@ -417,8 +417,7 @@ def test_optional_model_missing_does_not_make_default_preparation_incomplete(tmp
     state_path = tmp_path / ".gods-eye/state.json"
     state = json.loads(state_path.read_text())
     default_record = {
-        stage: state["preparation"][stage]
-        for stage in ("model", "index", "smoke_test")
+        stage: state["preparation"][stage] for stage in ("model", "index", "smoke_test")
     }
     state["schema_version"] = 2
     state["preparation"]["models"] = {

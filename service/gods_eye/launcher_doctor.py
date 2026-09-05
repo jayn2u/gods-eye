@@ -77,9 +77,7 @@ def _check_docker() -> tuple[Check, Check]:
         "compose",
         "pass" if compose_ok else "fail",
         compose_version if compose_ok else "Docker Compose 2.30 or newer is required",
-        None
-        if compose_ok
-        else "Upgrade the Docker Compose v2 plugin to version 2.30 or newer.",
+        None if compose_ok else "Upgrade the Docker Compose v2 plugin to version 2.30 or newer.",
     )
 
 

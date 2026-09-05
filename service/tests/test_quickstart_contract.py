@@ -145,9 +145,7 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
     service = configuration["services"]["service"]
     assert service["environment"]["GODS_EYE_USE_FIXTURES"] == "true"
     assert not service.get("gpus")
-    assert not service.get("deploy", {}).get("resources", {}).get("reservations", {}).get(
-        "devices"
-    )
+    assert not service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices")
     for service_name in ("service", "web"):
         published_ports = [
             port

@@ -222,9 +222,7 @@ def _parse_model_receipt(payload: str, expected_model_id: str) -> str:
 
 
 def _parse_manifest_digest(payload: str) -> str:
-    if len(payload) != 64 or not all(
-        character in "0123456789abcdef" for character in payload
-    ):
+    if len(payload) != 64 or not all(character in "0123456789abcdef" for character in payload):
         raise PreparationError("verify-manifest returned an invalid digest")
     return payload
 
@@ -324,9 +322,7 @@ def prepare_model_index(
                 **manifest_state,
                 "manifest_sha256": manifest_sha256,
                 "completed_at": (
-                    manifest_state.get("completed_at")
-                    if stored_manifest_sha256 is None
-                    else now()
+                    manifest_state.get("completed_at") if stored_manifest_sha256 is None else now()
                 ),
             }
             preparation["gallery_manifest"] = manifest_state

@@ -229,9 +229,7 @@ def search(
         "gallery_count": availability.gallery_count or 0,
     }
     try:
-        execution = runtime.search(
-            request.model_id, request.query, request.top_k, request.datasets
-        )
+        execution = runtime.search(request.model_id, request.query, request.top_k, request.datasets)
     except ModelUnavailableError as exc:
         if isinstance(runtime, _RetrievalRuntimeAdapter):
             category = "index_unavailable"

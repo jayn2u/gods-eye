@@ -3,10 +3,7 @@ from gods_eye.clip_models import CLIP_MODELS, DEFAULT_MODEL_ID, get_clip_model
 
 
 def test_registry_has_the_approved_models_in_public_order() -> None:
-    assert [
-        (spec.model_id, spec.label, spec.storage_key)
-        for spec in CLIP_MODELS
-    ] == [
+    assert [(spec.model_id, spec.label, spec.storage_key) for spec in CLIP_MODELS] == [
         ("openai/clip-vit-base-patch32", "ViT-B/32", "clip-vit-b-32"),
         ("openai/clip-vit-base-patch16", "ViT-B/16", "clip-vit-b-16"),
         ("openai/clip-vit-large-patch14", "ViT-L/14", "clip-vit-l-14"),

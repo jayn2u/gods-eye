@@ -82,7 +82,9 @@ def _default_model_cache_error(model_cache: Path, preparation: dict) -> str | No
     revision = model.get("resolved_revision")
     repo = model_cache / f"models--{DEFAULT_MODEL_ID.replace('/', '--')}"
     if isinstance(revision, str):
-        return None if (repo / "snapshots" / revision).is_dir() else f"is missing revision {revision}"
+        return (
+            None if (repo / "snapshots" / revision).is_dir() else f"is missing revision {revision}"
+        )
     try:
         main = (repo / "refs" / "main").read_text().strip()
         snapshots = {path.name for path in (repo / "snapshots").iterdir() if path.is_dir()}

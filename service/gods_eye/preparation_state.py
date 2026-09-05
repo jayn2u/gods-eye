@@ -9,9 +9,7 @@ from .clip_models import DEFAULT_MODEL_ID, get_clip_model
 
 STATE_SCHEMA_VERSION: Final = 2
 MODEL_STAGES: Final = ("model", "index", "smoke_test")
-JsonValue: TypeAlias = (
-    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
-)
+JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 StateDictionary: TypeAlias = dict[str, JsonValue]
 
 

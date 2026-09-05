@@ -104,8 +104,7 @@ def test_supported_unprepared_model_returns_actionable_conflict() -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
-        f"Model '{model_id}' is not prepared. "
-        f"Run './gods-eye prepare --model-id {model_id}'."
+        f"Model '{model_id}' is not prepared. Run './gods-eye prepare --model-id {model_id}'."
     )
     assert "private path" not in response.text
 
@@ -129,9 +128,7 @@ def test_prepared_model_local_failure_returns_redacted_unavailability() -> None:
 def test_unknown_model_is_rejected_before_runtime_search() -> None:
     runtime = _UnavailableRuntime("unknown/model", prepared=True, guidance="must not run")
     with use_model_runtime(runtime):
-        response = client.post(
-            "/api/search", json={"query": "coat", "model_id": "unknown/model"}
-        )
+        response = client.post("/api/search", json={"query": "coat", "model_id": "unknown/model"})
 
     assert response.status_code == 422
 

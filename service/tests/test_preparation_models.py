@@ -74,7 +74,9 @@ def _option(arguments: tuple[str, ...], option: str) -> str | None:
 def _state_path(root: Path, preparation: dict | None = None) -> Path:
     state_path = root / ".gods-eye/state.json"
     state_path.parent.mkdir(parents=True)
-    state_path.write_text(json.dumps({"schema_version": 1, "preparation": preparation or {}}) + "\n")
+    state_path.write_text(
+        json.dumps({"schema_version": 1, "preparation": preparation or {}}) + "\n"
+    )
     return state_path
 
 
@@ -142,10 +144,14 @@ def test_all_models_reuse_shared_manifest_and_their_own_verified_state(tmp_path:
     runner = FakeRunner(tmp_path)
 
     for model_id in MODEL_IDS:
-        prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id)
+        prepare_model_index(
+            tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id
+        )
     first_call_count = len(runner.calls)
     for model_id in MODEL_IDS:
-        prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id)
+        prepare_model_index(
+            tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id
+        )
 
     state = json.loads(state_path.read_text())
     original_manifest_completed_at = state["preparation"]["gallery_manifest"]["completed_at"]
@@ -172,30 +178,45 @@ def test_all_models_reuse_shared_manifest_and_their_own_verified_state(tmp_path:
             assert _option(arguments, "--revision") == REVISIONS[model_id]
     runner.manifest_digest = "c" * 64
     calls_before_change = len(runner.calls)
-    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0])
+    prepare_model_index(
+        tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0]
+    )
     changed_calls = runner.calls[calls_before_change:]
-    build_arguments = next(arguments for operation, arguments in changed_calls if operation == "build-index")
+    build_arguments = next(
+        arguments for operation, arguments in changed_calls if operation == "build-index"
+    )
     signature = hashlib.sha256(
         f"{MODEL_IDS[0]}:{REVISIONS[MODEL_IDS[0]]}:{runner.manifest_digest}".encode()
     ).hexdigest()[:20]
-    assert _option(build_arguments, "--checkpoint-dir") == str(tmp_path / "indexes/.checkpoints" / signature)
+    assert _option(build_arguments, "--checkpoint-dir") == str(
+        tmp_path / "indexes/.checkpoints" / signature
+    )
     changed_state = json.loads(state_path.read_text())
     assert changed_state["preparation"]["gallery_manifest"]["manifest_sha256"] == "c" * 64
     assert (
         changed_state["preparation"]["gallery_manifest"]["completed_at"]
         != original_manifest_completed_at
     )
-    assert changed_state["preparation"]["models"][MODEL_IDS[0]]["index"]["gallery_manifest_sha256"] == "c" * 64
+    assert (
+        changed_state["preparation"]["models"][MODEL_IDS[0]]["index"]["gallery_manifest_sha256"]
+        == "c" * 64
+    )
 
 
-def test_partial_failure_preserves_first_model_and_resumes_only_unfinished_work(tmp_path: Path) -> None:
+def test_partial_failure_preserves_first_model_and_resumes_only_unfinished_work(
+    tmp_path: Path,
+) -> None:
     state_path = _state_path(tmp_path)
     runner = FakeRunner(tmp_path, [("build-index", MODEL_IDS[2])] * 2)
-    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0])
+    prepare_model_index(
+        tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0]
+    )
     first_active = PreparationPaths(tmp_path).for_model(MODEL_IDS[0]).active.read_text()
 
     with pytest.raises(PreparationError, match="interrupted build-index"):
-        prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[2])
+        prepare_model_index(
+            tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[2]
+        )
     for _ in range(2):
         calls_before_resume = len(runner.calls)
         try:
@@ -236,16 +257,21 @@ def test_stale_state_and_misleading_files_are_verified_before_reuse(tmp_path: Pa
     )
     runner = FakeRunner(tmp_path)
 
-    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0])
+    prepare_model_index(
+        tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=MODEL_IDS[0]
+    )
 
     assert [operation for operation, _ in runner.calls[:2]] == ["verify-model", "prepare-model"]
     state = json.loads(state_path.read_text())
-    assert model_preparation(state["preparation"], MODEL_IDS[0])["model"]["resolved_revision"] == REVISIONS[MODEL_IDS[0]]
+    assert (
+        model_preparation(state["preparation"], MODEL_IDS[0])["model"]["resolved_revision"]
+        == REVISIONS[MODEL_IDS[0]]
+    )
 
 
 @pytest.mark.parametrize(
     "payload",
-    ["not-json", '{}', '{"model_id":"wrong","resolved_revision":"' + "a" * 40 + '"}'],
+    ["not-json", "{}", '{"model_id":"wrong","resolved_revision":"' + "a" * 40 + '"}'],
 )
 def test_malformed_or_misleading_prepare_model_receipt_fails_closed(
     tmp_path: Path, payload: str
