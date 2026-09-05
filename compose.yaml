@@ -8,6 +8,7 @@ services:
     # reuses whatever image already carries the tag, so a fix never reaches the
     # Demo Runtime. The release override resets build and pins digests instead.
     pull_policy: build
+    gpus: all
     environment:
       GODS_EYE_DATASET_ROOT: /datasets
       GODS_EYE_INDEX_ROOT: /indexes
