@@ -16,6 +16,20 @@ provides the browser experience. The primary Full Demo path runs through Docker.
 - For issue/spec operations, read `docs/agents/issue-tracker.md`; GitHub Issues are the tracker.
 - For triage, read `docs/agents/triage-labels.md` and retain the five canonical label names.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues for `jayn2u/gods-eye`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each mapped to an identically-named label. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Structure
 
 ```text
