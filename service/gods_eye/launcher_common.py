@@ -41,7 +41,7 @@ def current_compatibility() -> dict[str, str]:
         "application": os.getenv("GODS_EYE_TARGET_APPLICATION_VERSION", "0.1.0"),
         "registry": os.getenv("GODS_EYE_TARGET_REGISTRY_VERSION", str(registry["schema_version"])),
         "model": os.getenv("GODS_EYE_TARGET_MODEL", "openai/clip-vit-base-patch16"),
-        "manifest_schema": os.getenv("GODS_EYE_TARGET_MANIFEST_SCHEMA", "1"),
+        "manifest_schema": os.getenv("GODS_EYE_TARGET_MANIFEST_SCHEMA", "2"),
         "index_schema": os.getenv("GODS_EYE_TARGET_INDEX_SCHEMA", "1"),
     }
 

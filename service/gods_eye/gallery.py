@@ -13,6 +13,10 @@ from PIL import Image, UnidentifiedImageError
 from .models import SUPPORTED_DATASETS, Dataset
 
 Split = Literal["train", "validation", "test"]
+ALL_SPLITS: tuple[Split, ...] = ("train", "validation", "test")
+# The gallery is the evaluation corpus: only the test split is searchable.
+GALLERY_SPLIT: Split = "test"
+MANIFEST_SCHEMA_VERSION = 2
 
 
 class GalleryBuildError(ValueError):
@@ -72,7 +76,7 @@ class GalleryManifest:
             dataset: str(root) for dataset, root in self.roots.items()
         }
         return {
-            "version": 1,
+            "version": MANIFEST_SCHEMA_VERSION,
             "roots": roots,
             "records": [
                 {
@@ -97,8 +101,14 @@ class GalleryManifest:
     def read(cls, path: Path, *, dataset_root: Path | None = None) -> GalleryManifest:
         try:
             raw = json.loads(path.read_text())
-            if raw.get("version") != 1:
-                raise GalleryBuildError(f"Unsupported manifest version in {path}")
+            version = raw.get("version")
+            if version != MANIFEST_SCHEMA_VERSION:
+                raise GalleryBuildError(
+                    f"Gallery Manifest schema {version!r} in {path} is not supported "
+                    f"(expected {MANIFEST_SCHEMA_VERSION}). Manifests built before the gallery was "
+                    "restricted to the CUHK-PEDES test split must be rebuilt: rerun the Launcher "
+                    "update, or regenerate with 'python -m gods_eye.gallery' and rebuild the index."
+                )
             serialized_roots = {dataset: str(value) for dataset, value in raw["roots"].items()}
             unsupported = sorted(set(serialized_roots) - set(SUPPORTED_DATASETS))
             if unsupported:
@@ -198,6 +208,10 @@ def _load_rows(metadata: Path, dataset: Dataset) -> list[dict[str, Any]]:
     return value
 
 
+def _out_of_scope_splits() -> tuple[Split, ...]:
+    return tuple(split for split in ALL_SPLITS if split != GALLERY_SPLIT)
+
+
 def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest:
     unsupported = sorted(set(sources) - set(SUPPORTED_DATASETS))
     if unsupported:
@@ -205,6 +219,9 @@ def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest
     errors: list[str] = []
     candidates: dict[tuple[Dataset, Split, str], tuple[str, list[Provenance]]] = {}
     source_rows = 0
+    out_of_scope: dict[Dataset, dict[Split, int]] = {
+        dataset: dict.fromkeys(_out_of_scope_splits(), 0) for dataset in sorted(sources)
+    }
 
     for dataset in sorted(sources):
         root, metadata = sources[dataset]
@@ -212,10 +229,16 @@ def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest
         for row_number, row in enumerate(_load_rows(metadata, dataset), 1):
             source_rows += 1
             try:
+                # Structural checks run on every row: a bad split value or an unsafe path means a
+                # corrupt Dataset Installation, whichever split it sits in. Only the image decode
+                # is scoped, because it is the dominant cost and useless for images never served.
                 relative = _relative_path(
                     row.get("img_path", row.get("file_path")), dataset, row_number
                 )
                 split = _split(row.get("split"), dataset, row_number)
+                if split != GALLERY_SPLIT:
+                    out_of_scope[dataset][split] += 1
+                    continue
                 provenance = Provenance(dataset, split, relative, str(row.get("id", "")))
                 key = (dataset, split, relative)
                 if key in candidates:
@@ -265,6 +288,8 @@ def build_manifest(sources: dict[Dataset, tuple[Path, Path]]) -> GalleryManifest
         records=records,
         report={
             "source_rows": source_rows,
+            "gallery_split": GALLERY_SPLIT,
+            "out_of_scope_by_dataset_split": out_of_scope,
             "unique_paths": len(candidates),
             "exact_content_duplicates": len(candidates) - len(records),
             "records": len(records),

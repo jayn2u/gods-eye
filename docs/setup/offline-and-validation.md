@@ -23,5 +23,6 @@ model/revision, gallery size, query count, median, p95, and maximum latency; the
 is a measured-system goal, not a universal SLA.
 
 General CLIP is not person-ReID-specialized. Bias, dataset shift, and false matches are expected.
-The CUHK-PEDES gallery is a demo, not a benchmark split. The MVP has no authentication, accounts,
+The searchable gallery is the CUHK-PEDES test split, but what the demo reports is qualitative
+visual similarity, not a ReID benchmark score. The MVP has no authentication, accounts,
 saved queries, shortlist, or case management and is intended for one local research workstation.
