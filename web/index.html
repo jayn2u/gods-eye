@@ -1,1 +1,21 @@
+<script>
+  (() => {
+    const storageKey = 'gods-eye-theme'
+    let storedTheme = null
+    try {
+      storedTheme = window.localStorage.getItem(storageKey)
+    } catch {
+      // Blocked storage should fall back to the system preference.
+    }
+    let prefersDark = true
+    try {
+      if (typeof window.matchMedia === 'function') prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    } catch {
+      // An unavailable media-query API keeps the dark default.
+    }
+    document.documentElement.dataset.theme = storedTheme === 'light' || storedTheme === 'dark'
+      ? storedTheme
+      : prefersDark ? 'dark' : 'light'
+  })()
+</script>
 <div id="root"></div><script type="module" src="/src/main.tsx"></script>

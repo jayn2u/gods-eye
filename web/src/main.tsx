@@ -3,10 +3,12 @@ import { createRoot } from 'react-dom/client'
 import { fetchReadiness, searchGallery } from './api'
 import { nextVisibleCount, validateSearch } from './search'
 import { ComposeScreen, DetailScreen, ProgressScreen, ResultsScreen } from './screens'
+import { useTheme } from './theme'
 import { GALLERIES, WORKFLOW_STEPS, type SearchResult } from './types'
 import './styles.css'
 
 function App() {
+  const [theme, chooseTheme] = useTheme()
   const [query, setQuery] = React.useState('')
   const [datasets, setDatasets] = React.useState<string[]>([...GALLERIES])
   const [topK, setTopK] = React.useState(24)
@@ -82,8 +84,9 @@ function App() {
   }
 
   const detail = selectedIndex === null ? null : results[selectedIndex]
+  const nextTheme = theme === 'dark' ? 'light' : 'dark'
   return <><div className="desktop-required" role="alert"><strong>Desktop display required</strong><span>Use a viewport at least 1200 pixels wide.</span></div><main className="shell">
-    <header className="masthead"><div><p className="eyebrow">TEXT-TO-IMAGE PERSON RETRIEVAL</p><h1>God’s Eye</h1></div><p>Search a research gallery using visible descriptions—not identity.</p></header>
+    <header className="masthead"><div><p className="eyebrow">TEXT-TO-IMAGE PERSON RETRIEVAL</p><h1>God’s Eye</h1></div><div className="masthead-actions"><p>Search a research gallery using visible descriptions—not identity.</p><button type="button" className="theme-toggle" aria-label={`Switch to ${nextTheme} mode`} title={`Switch to ${nextTheme} mode`} onClick={() => chooseTheme(nextTheme)}><span className="theme-toggle-icon" aria-hidden="true">{theme === 'dark' ? '☼' : '☾'}</span><span>{nextTheme} mode</span></button></div></header>
     <nav aria-label="Search workflow"><ol className="steps">{WORKFLOW_STEPS.map((label, index) => <li key={label} className={index === step ? 'active' : index < step ? 'complete' : ''} aria-current={index === step ? 'step' : undefined}><span>{String(index + 1).padStart(2, '0')}</span>{label}</li>)}</ol></nav>
     {step === 0 && <ComposeScreen
       query={query} datasets={datasets} topK={topK} ready={ready} guidance={guidance}
