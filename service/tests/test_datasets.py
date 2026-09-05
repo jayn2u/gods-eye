@@ -25,12 +25,12 @@ def test_registry_pins_verified_public_archives() -> None:
 
 def make_archive(path: Path, wrapper: str | None, metadata_name: str) -> str:
     prefix = f"{wrapper}/" if wrapper else ""
-    rows = [{"split": "train", "file_path": "train/person.jpg", "id": 1}]
+    rows = [{"split": "test", "file_path": "test/person.jpg", "id": 1}]
     image = io.BytesIO()
     Image.new("RGB", (2, 2), "navy").save(image, format="PNG")
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(f"{prefix}{metadata_name}", json.dumps(rows))
-        archive.writestr(f"{prefix}imgs/train/person.jpg", image.getvalue())
+        archive.writestr(f"{prefix}imgs/test/person.jpg", image.getvalue())
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -63,7 +63,7 @@ def test_install_publishes_receipts_and_gallery_manifest_atomically(tmp_path: Pa
     assert result.installed == ["CUHK-PEDES"]
     assert (tmp_path / "data/install-state/CUHK-PEDES.receipt.json").is_file()
     assert not (tmp_path / "data/datasets/CUHK-PEDES/.installation-receipt.json").exists()
-    assert (tmp_path / "data/datasets/CUHK-PEDES/imgs/train/person.jpg").is_file()
+    assert (tmp_path / "data/datasets/CUHK-PEDES/imgs/test/person.jpg").is_file()
     manifest = json.loads((tmp_path / "indexes/gallery-manifest.json").read_text())
     assert len(manifest["records"]) == 1  # exact-byte duplicate is collapsed
     assert not list((tmp_path / "data/install-state").glob("*.staging"))

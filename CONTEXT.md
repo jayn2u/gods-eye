@@ -29,7 +29,7 @@ Local metadata that proves a Dataset Installation was produced from a specific v
 _Avoid_: Done marker, install state
 
 **Gallery Manifest**:
-The normalized collection of image records and provenance derived from one or more Dataset Installations for retrieval indexing.
+The normalized collection of image records and provenance derived from the evaluation (test) split of one or more Dataset Installations for retrieval indexing. Train and validation rows are structurally validated and then left out: they are never embedded, indexed, or searchable.
 _Avoid_: Dataset index, image list
 
 **Full Demo**:
