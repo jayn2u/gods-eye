@@ -14,6 +14,8 @@ MINIMUM_VRAM_MIB = 8 * 1024
 MODEL_RESERVE_BYTES = 2 * 1024**3
 INDEX_RESERVE_BYTES = 2 * 1024**3
 SAFETY_RESERVE_BYTES = 2 * 1024**3
+OPTIONAL_MODEL_RESERVE_BYTES = 4 * 1024**3
+MINIMUM_COMPOSE_VERSION = (2, 30)
 
 
 @dataclass(frozen=True)
@@ -28,9 +30,23 @@ def _registry() -> dict[str, object]:
     return json.loads(Path(__file__).with_name("dataset_registry.json").read_text())
 
 
-def required_capacity_bytes() -> int:
+def required_capacity_bytes(additional_models: int = 0) -> int:
     archive_bytes = sum(source["size"] for source in _registry()["sources"])
-    return archive_bytes * 3 + MODEL_RESERVE_BYTES + INDEX_RESERVE_BYTES + SAFETY_RESERVE_BYTES
+    return (
+        archive_bytes * 3
+        + MODEL_RESERVE_BYTES
+        + INDEX_RESERVE_BYTES
+        + SAFETY_RESERVE_BYTES
+        + additional_models * OPTIONAL_MODEL_RESERVE_BYTES
+    )
+
+
+def compose_version_supported(value: str) -> bool:
+    try:
+        version = tuple(int(part) for part in value.removeprefix("v").split(".")[:2])
+    except ValueError:
+        return False
+    return len(version) == 2 and version >= MINIMUM_COMPOSE_VERSION
 
 
 def _check_platform() -> Check:
@@ -56,14 +72,14 @@ def _check_docker() -> tuple[Check, Check]:
     )
     compose = run("docker", "compose", "version", "--short")
     compose_version = compose.stdout.strip() if compose.returncode == 0 else ""
-    compose_ok = bool(compose_version)
+    compose_ok = compose.returncode == 0 and compose_version_supported(compose_version)
     return daemon_check, Check(
         "compose",
         "pass" if compose_ok else "fail",
-        compose_version if compose_ok else "Docker Compose v2 is unavailable",
+        compose_version if compose_ok else "Docker Compose 2.30 or newer is required",
         None
         if compose_ok
-        else "Make the Docker Compose v2 plugin available inside the Launcher environment.",
+        else "Upgrade the Docker Compose v2 plugin to version 2.30 or newer.",
     )
 
 
@@ -120,8 +136,7 @@ def _check_gpu() -> tuple[Check, Check, Check]:
 
 def _check_storage(layout: RuntimeLayout) -> tuple[Check, Check]:
     try:
-        layout.initialize()
-        probe = layout.runtime_dir / ".write-probe"
+        probe = layout.root / ".gods-eye-write-probe"
         probe.write_text("ok")
         probe.unlink()
         writable = True
@@ -165,14 +180,17 @@ def _check_port(name: str, port: int) -> Check:
     if override is not None:
         available = override == "1"
     else:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            probe.bind(("127.0.0.1", port))
-            available = True
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                probe.bind(("127.0.0.1", port))
+                available = True
+            except OSError:
+                available = False
+            finally:
+                probe.close()
         except OSError:
             available = False
-        finally:
-            probe.close()
     return Check(
         name,
         "pass" if available else "warn",
@@ -194,6 +212,16 @@ def preparation_vram_mib() -> int:
     if check.status != "pass":
         raise ValueError(check.detail)
     return int(check.detail.split()[0])
+
+
+def optional_model_capacity_available(layout: RuntimeLayout, additional_models: int) -> None:
+    required = required_capacity_bytes(additional_models)
+    override = os.getenv("GODS_EYE_DOCTOR_FREE_BYTES")
+    free = int(override) if override is not None else shutil.disk_usage(layout.root).free
+    if free < required:
+        raise ValueError(
+            f"Optional model {additional_models} requires an additional 4 GiB of free project storage"
+        )
 
 
 def print_human(checks: list[Check]) -> None:

@@ -20,6 +20,7 @@ from .launcher_common import (
     current_compatibility,
     utc_now,
 )
+from .preparation_state import MODEL_STAGES, normalize_preparation_state
 
 
 class LauncherBusyError(RuntimeError):
@@ -135,6 +136,11 @@ def reset_assets(
         preparation = state.setdefault("preparation", {})
         for stage in invalidated:
             preparation.pop(stage, None)
+        model_invalidated = set(MODEL_STAGES) & invalidated
+        for record in preparation.get("models", {}).values():
+            if isinstance(record, dict):
+                for stage in model_invalidated:
+                    record.pop(stage, None)
         layout.write_state(state)
         write_operation_log(layout, "reset", {"targets": targets, "sizes": sizes})
     if as_json:
@@ -176,11 +182,16 @@ def update_state(layout: RuntimeLayout, *, apply: bool, as_json: bool) -> int:
     }
     if apply:
         with mutation_lock(layout, "update"):
-            state = layout.read_state()
+            state = normalize_preparation_state(layout.read_state())
             target, changed, invalidated = compatibility_plan(state)
             preparation = state.setdefault("preparation", {})
             for stage in invalidated:
                 preparation.pop(stage, None)
+            model_invalidated = set(MODEL_STAGES) & set(invalidated)
+            for record in preparation.get("models", {}).values():
+                if isinstance(record, dict):
+                    for stage in model_invalidated:
+                        record.pop(stage, None)
             if "registry" in changed:
                 state["terms_acceptance"] = None
             state["compatibility"] = target

@@ -38,7 +38,7 @@ if args[:2] == ['compose', 'version']:
     if os.environ.get('GODS_EYE_INSIDE_LAUNCHER') == '1' and os.environ.get('FAKE_LAUNCHER_COMPOSE') == 'unusable':
         print('compose plugin cannot execute', file=sys.stderr)
         raise SystemExit(1)
-    print('2.32.4')
+    print(os.environ.get('FAKE_COMPOSE_VERSION', '2.32.4'))
 elif args[:2] == ['info', '--format']:
     print('/plugins/docker-compose')
 elif 'build' in args and args[-1] == 'launcher':
@@ -94,7 +94,7 @@ def _prepared_state(root: Path) -> None:
                 "compatibility": {},
                 "preparation": {
                     "dataset_acquisition": {"status": "verified"},
-                    "model": {"status": "verified"},
+                    "model": {"status": "verified", "resolved_revision": "a" * 40},
                     "gallery_manifest": {"status": "verified"},
                     "index": {"status": "active"},
                     "smoke_test": {"status": "verified"},
@@ -112,8 +112,15 @@ def _prepared_assets(
         receipt = root / "data" / "install-state" / f"{name}.json"
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text("{}")
-    (root / ".cache" / "huggingface" / "model.ready").parent.mkdir(parents=True, exist_ok=True)
-    (root / ".cache" / "huggingface" / "model.ready").write_text("ready")
+    snapshot = (
+        root
+        / ".cache"
+        / "huggingface"
+        / "models--openai--clip-vit-base-patch16"
+        / "snapshots"
+        / ("a" * 40)
+    )
+    snapshot.mkdir(parents=True, exist_ok=True)
     indexes = root / "indexes"
     if active_is_directory:
         (indexes / "active").mkdir(parents=True, exist_ok=True)
@@ -322,12 +329,18 @@ def test_start_refuses_an_occupied_web_port_instead_of_moving_quietly(tmp_path):
 
 
 def test_start_refuses_an_occupied_api_port_instead_of_moving_quietly(tmp_path):
+    available = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    available.bind(("127.0.0.1", 0))
+    web_port = int(available.getsockname()[1])
+    available.close()
     with connection_refused_loopback_port() as taken:
         result, calls = _run(
             tmp_path,
             "start",
             "--detach",
             "--no-open",
+            "--web-port",
+            str(web_port),
             "--api-port",
             str(taken),
             extra_env={"GODS_EYE_RUNTIME_PORTS_AVAILABLE": "0"},
@@ -399,6 +412,24 @@ def test_start_never_prepares_silently_and_noninteractive_use_fails(tmp_path):
     assert not any("compose" in call and "up" in call for call in calls)
 
 
+def test_optional_model_missing_does_not_make_default_preparation_incomplete(tmp_path):
+    _prepared_state(tmp_path)
+    state_path = tmp_path / ".gods-eye/state.json"
+    state = json.loads(state_path.read_text())
+    default_record = {
+        stage: state["preparation"][stage]
+        for stage in ("model", "index", "smoke_test")
+    }
+    state["schema_version"] = 2
+    state["preparation"]["models"] = {
+        "openai/clip-vit-base-patch16": default_record,
+        "openai/clip-vit-large-patch14": {"model": {"status": "failed"}},
+    }
+    state_path.write_text(json.dumps(state))
+
+    assert launcher_runtime.prepared_missing(RuntimeLayout(tmp_path)) == []
+
+
 def test_start_rejects_unusable_launcher_compose_before_runtime_mutation(tmp_path):
     result, calls = _run(
         tmp_path,
@@ -411,6 +442,20 @@ def test_start_rejects_unusable_launcher_compose_before_runtime_mutation(tmp_pat
     assert result.returncode == 4
     assert "Compose" in result.stderr
     assert "Launcher" in result.stderr
+    assert not any("compose" in call and "up" in call for call in calls)
+
+
+def test_start_rejects_compose_version_below_2_30_before_runtime_mutation(tmp_path):
+    result, calls = _run(
+        tmp_path,
+        "start",
+        "--detach",
+        "--no-open",
+        extra_env={"FAKE_COMPOSE_VERSION": "2.29.7"},
+    )
+
+    assert result.returncode == 4
+    assert "2.30 or newer" in result.stderr
     assert not any("compose" in call and "up" in call for call in calls)
 
 
@@ -462,6 +507,20 @@ def test_start_rejects_missing_active_index_before_runtime_mutation(tmp_path):
     assert "active retrieval index pointer" in result.stderr
     assert str(tmp_path.resolve()) in result.stderr
     assert "gods-eye-index build" not in result.stderr
+    assert not any("up" in call for call in calls)
+
+
+def test_start_rejects_nonempty_cache_without_exact_model_snapshot(tmp_path):
+    _prepared(tmp_path)
+    shutil.rmtree(tmp_path / ".cache/huggingface")
+    cache = tmp_path / ".cache/huggingface"
+    cache.mkdir(parents=True)
+    (cache / "unrelated.ready").write_text("present")
+
+    result, calls = _run(tmp_path, "start", "--detach", "--no-open", prepared=False)
+
+    assert result.returncode == 4
+    assert "missing revision" in result.stderr
     assert not any("up" in call for call in calls)
 
 
@@ -528,7 +587,8 @@ def test_start_validates_prepared_assets_under_lock_before_runtime_mutation(monk
 
     def fake_run(command, _environment):
         runtime_calls.append(command)
-        return subprocess.CompletedProcess(command, 0, "", "")
+        stdout = "2.32.4\n" if command[:3] == ["docker", "compose", "version"] else ""
+        return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setenv("GODS_EYE_HOST_PROJECT_ROOT", str(tmp_path))
     monkeypatch.setenv("GODS_EYE_RUNTIME_PORTS_AVAILABLE", "1")

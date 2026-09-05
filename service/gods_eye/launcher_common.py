@@ -9,6 +9,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .preparation_state import normalize_preparation_state
+
 EXIT_OK = 0
 EXIT_PREPARATION = 1
 EXIT_PREREQUISITE = 2
@@ -17,11 +19,13 @@ EXIT_TERMS_REQUIRED = 3
 EXIT_PREPARATION_FAILED = 4
 EXIT_USAGE = 64
 EXIT_BUSY = 75
-STATE_SCHEMA_VERSION = 1
-PREPARED_STAGES = {
+STATE_SCHEMA_VERSION = 2
+SHARED_PREPARED_STAGES = {
     "dataset_acquisition": "verified",
-    "model": "verified",
     "gallery_manifest": "verified",
+}
+MODEL_PREPARED_STAGES = {
+    "model": "verified",
     "index": "active",
     "smoke_test": "verified",
 }
@@ -85,6 +89,9 @@ class RuntimeLayout:
     def read_state(self) -> dict:
         self.initialize()
         return json.loads(self.state_path.read_text())
+
+    def normalized_state(self) -> dict:
+        return normalize_preparation_state(self.read_state())
 
     def write_state(self, state: dict) -> None:
         temporary = self.state_path.with_suffix(".json.tmp")

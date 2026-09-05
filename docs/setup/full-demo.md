@@ -4,7 +4,7 @@ The root `./gods-eye` Launcher is the supported operator interface. Its thin she
 only Docker; stateful orchestration runs in the launcher container. It writes project-local,
 gitignored assets under `data/`, `.cache/huggingface/`, `indexes/`, and `.gods-eye/`.
 
-`doctor` checks Linux amd64, Docker and Compose, NVIDIA driver and container GPU access, the 8 GiB
+`doctor` checks Linux amd64, Docker and Compose 2.30 or newer, NVIDIA driver and container GPU access, the 8 GiB
 VRAM floor, writable storage, calculated free space, and default ports. It reports every failure
 together and never installs packages.
 
@@ -13,6 +13,11 @@ acceptance is bound to the Dataset Registry version and selected sources. A sour
 new acceptance; `--yes` alone never accepts terms. Downloads retain resumable `.part` files and
 verified archives. Index batches retain compatible checkpoints. Detailed, redacted logs are in
 `.gods-eye/logs/`.
+
+With no model option, `prepare` downloads and indexes B/16 only. Use repeatable `--model-id` options
+to request selected additional models. They run sequentially under the same mutation lock. Startup
+still requires the shared data stages and B/16; an unavailable optional model remains visible to
+the application with preparation guidance and does not block the default Demo Runtime.
 
 `start` binds the API and web app to loopback, waits up to two minutes for health and search
 readiness, and opens the reported URL unless `--no-open`, SSH, or a headless session applies. It is
@@ -82,3 +87,5 @@ other checkouts or worktrees, so a fresh worktree needs its own `./gods-eye prep
 `update` is explicit and previews which compatibility stages would be invalidated. `reset` requires
 one or more named targets, displays the plan and size, and asks for confirmation. Use `--yes` only
 after reviewing that plan; use `--json` where supported for automation.
+Read-only `update` preview, `doctor`, and `status` do not migrate state. `update --yes` and `prepare`
+persist schema 2. Index or model-cache reset invalidates the corresponding stage for every model.
