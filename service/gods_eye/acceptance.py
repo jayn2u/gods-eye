@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from .gallery import GalleryManifest, Provenance
+from .gallery import GALLERY_SPLIT, GalleryManifest, Provenance
 from .index_store import validate_version
 from .models import SUPPORTED_DATASETS
 
@@ -36,44 +36,60 @@ def coverage(manifest: GalleryManifest) -> dict[str, Any]:
     aliases = Counter(
         (item.dataset, item.split) for record in manifest.records for item in record.aliases
     )
+    # Rows outside the gallery split never enter the manifest, so their counts come from the
+    # build report. They are structurally validated and then skipped before any image is read.
+    out_of_scope: dict[str, dict[str, int]] = manifest.report.get(
+        "out_of_scope_by_dataset_split", {}
+    )
 
     def rows(counter: Counter) -> dict[str, dict[str, int]]:
         return {
-            dataset: {split: counter[(dataset, split)] for split in ("train", "validation", "test")}
-            for dataset in ALL_DATASETS
+            dataset: {GALLERY_SPLIT: counter[(dataset, GALLERY_SPLIT)]} for dataset in ALL_DATASETS
         }
 
     source_rows = rows(source)
     active_rows = rows(active)
     duplicate_rows = rows(aliases)
+    skipped_rows = {dataset: dict(out_of_scope.get(dataset, {})) for dataset in ALL_DATASETS}
 
     def zero_rows() -> dict[str, dict[str, int]]:
         return rows(Counter())
 
     accepted_rows = {
-        dataset: {split: source_rows[dataset][split] for split in ("train", "validation", "test")}
-        for dataset in ALL_DATASETS
+        dataset: {GALLERY_SPLIT: source_rows[dataset][GALLERY_SPLIT]} for dataset in ALL_DATASETS
     }
+
+    def dataset_rows(dataset: str) -> dict[str, dict[str, int]]:
+        table = {
+            GALLERY_SPLIT: {
+                "source": source_rows[dataset][GALLERY_SPLIT],
+                "accepted": accepted_rows[dataset][GALLERY_SPLIT],
+                "duplicate": duplicate_rows[dataset][GALLERY_SPLIT],
+                "skipped": 0,
+                "failed": 0,
+                "active": active_rows[dataset][GALLERY_SPLIT],
+            }
+        }
+        # No "duplicate" key for skipped splits: their images are never hashed, so the count is
+        # unmeasured rather than zero, and printing a zero would misdescribe the build.
+        for split, count in skipped_rows[dataset].items():
+            table[split] = {
+                "source": count,
+                "accepted": 0,
+                "skipped": count,
+                "failed": 0,
+                "active": 0,
+            }
+        return table
+
     return {
         "totals": manifest.report,
-        "by_dataset_split": {
-            dataset: {
-                split: {
-                    "source": source_rows[dataset][split],
-                    "accepted": accepted_rows[dataset][split],
-                    "duplicate": duplicate_rows[dataset][split],
-                    "skipped": 0,
-                    "failed": 0,
-                    "active": active_rows[dataset][split],
-                }
-                for split in ("train", "validation", "test")
-            }
-            for dataset in ALL_DATASETS
-        },
+        "gallery_split": GALLERY_SPLIT,
+        "by_dataset_split": {dataset: dataset_rows(dataset) for dataset in ALL_DATASETS},
         "source_by_dataset_split": source_rows,
         "accepted_by_dataset_split": accepted_rows,
         "duplicate_by_dataset_split": duplicate_rows,
-        "skipped_by_dataset_split": zero_rows(),
+        "skipped_by_dataset_split": skipped_rows,
         "failed_by_dataset_split": zero_rows(),
         "active_by_dataset_split": active_rows,
         # Compatibility names retained for existing report consumers.

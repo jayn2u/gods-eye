@@ -4,7 +4,14 @@ This document records the reproducible acceptance run for the CUHK-only Full Dem
 qualitative visual-similarity observations. They are not benchmark accuracy, biometric
 identification, or evidence of a sighting.
 
-## Run recorded on 2026-09-02
+> **Superseded on 2026-09-05.** The run below predates the restriction of the Gallery Manifest to
+> the CUHK-PEDES test split. It searched all 40,193 records, which is why two of its three rank-one
+> traces are `train` and `validation` images. The current code cannot reproduce it: manifest schema
+> 1 is rejected, and a fresh build yields roughly 3,074 test records. It is retained as a dated
+> historical record. A new acceptance run against the test-split gallery has not yet been recorded;
+> append it as a new section rather than editing the numbers below.
+
+## Run recorded on 2026-09-02 (full-corpus, superseded)
 
 Manifest construction read the retained CUHK-PEDES Dataset Installation without modifying it. It
 contained 40,206 metadata rows and 40,206 unique referenced paths. Thirteen byte-identical paths

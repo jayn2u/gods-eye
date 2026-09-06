@@ -29,8 +29,9 @@ open its detail view, or use **Refine search** to revise the description.
 
 ![Synthetic light-mode search results showing the fixture model and index provenance, built-in fixture portrait, rank, similarity, and image ID](docs/images/search-results.png)
 
-**3. Inspect an image.** View the larger portrait alongside its similarity, dataset, split,
-and image ID, then return with **Back to results**.
+**3. Inspect an image.** View the larger portrait alongside its similarity, dataset, split, and
+image ID, then return with **Back to results**. Every result comes from the CUHK-PEDES test split,
+so the split appears on the detail view rather than on each result card.
 
 ![Synthetic light-mode image detail showing the fixture model and index provenance, fixture portrait, and image metadata](docs/images/search-detail.png)
 

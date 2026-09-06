@@ -29,10 +29,16 @@ docker compose --profile tools run --rm dataset-installer \
   --data-root /data --index-root /indexes install --accept-data-terms
 ```
 
-The installed layout is `CUHK-PEDES/{imgs,reid_raw.json}`. The receipt lives under
-`data/install-state/`. The Gallery Manifest normalizes split names, creates stable public IDs,
-validates paths and images, and collapses only byte-identical files. API output never exposes
-captions or absolute host paths.
+The installed layout is `CUHK-PEDES/{imgs,reid_raw.json}`. The Dataset Installation stays
+complete: every split is downloaded, verified, and retained. The receipt lives under
+`data/install-state/`.
+
+The Gallery Manifest is narrower than the installation. It normalizes split names and validates
+the path of every metadata row, then keeps **only the test split**; train and validation rows
+are counted as out of scope and skipped before their images are read. Within the test split it
+creates stable public IDs, validates images, and collapses only byte-identical files. Because
+out-of-scope images are never hashed, duplicates are detected within the test split only. API
+output never exposes captions or absolute host paths.
 
 Metadata filenames vary by release. When generating a manifest manually, explicit `--source`
 values are authoritative:
