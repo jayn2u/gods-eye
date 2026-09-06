@@ -1,4 +1,6 @@
 import hashlib
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -12,12 +14,57 @@ class RetrievalEngine(Protocol):
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]: ...
 
 
+class TextEmbedder(Protocol):
+    def embed_text(self, text: str) -> np.ndarray: ...
+
+
+class RuntimeEmbedder(TextEmbedder, Protocol):
+    def close(self) -> None: ...
+
+
+class EmbedderFactory(Protocol):
+    def __call__(
+        self,
+        model_id: str,
+        *,
+        revision: str | None,
+        device: str,
+        offline: bool,
+        cache_dir: Path | None,
+    ) -> RuntimeEmbedder: ...
+
+
+@dataclass(frozen=True, slots=True)
+class SearchExecution:
+    model_id: str
+    active_index_version: str
+    results: tuple[SearchResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModelAvailability:
+    model_id: str
+    label: str
+    ready: bool
+    prepared: bool
+    active_index_version: str | None
+    gallery_count: int | None
+    guidance: str | None
+    legacy_revision_unresolved: bool = False
+
+
+class RetrievalUnavailableError(RuntimeError):
+    def __init__(self, guidance: str) -> None:
+        self.guidance = guidance
+        super().__init__(guidance)
+
+
 class UnavailableRetrievalEngine:
     def __init__(self, guidance: str = "No valid index is active"):
         self.guidance = guidance
 
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
-        raise RuntimeError("No valid index is active")
+        raise RetrievalUnavailableError(self.guidance)
 
 
 class FixtureRetrievalEngine:
@@ -75,7 +122,7 @@ class ManifestRetrievalEngine:
 
 
 class IndexedRetrievalEngine:
-    def __init__(self, loaded: LoadedIndex, text_embedder=None):
+    def __init__(self, loaded: LoadedIndex, text_embedder: TextEmbedder | None = None):
         self.loaded = loaded
         self.manifest = loaded.manifest
         self.ready = True

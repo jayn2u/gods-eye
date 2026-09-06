@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import os
 from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from .clip_models import DEFAULT_MODEL_ID
 from .config import ClipRuntimeConfig
-
-DEFAULT_MODEL_ID = "openai/clip-vit-base-patch16"
 
 
 class ClipLoadError(RuntimeError):
@@ -43,11 +41,6 @@ class HuggingFaceClipEmbedder:
         offline: bool = False,
         cache_dir: Path | None = None,
     ):
-        # Some processor sub-loaders consult the Hub's process-level offline flag rather than
-        # forwarding local_files_only consistently. Set it before importing Transformers so an
-        # explicitly offline process never performs network probes.
-        if offline:
-            os.environ["HF_HUB_OFFLINE"] = "1"
         try:
             import torch
             from transformers import AutoProcessor, CLIPModel
@@ -75,6 +68,7 @@ class HuggingFaceClipEmbedder:
                 "Run once online to prepare the cache, or correct GODS_EYE_HF_CACHE."
             ) from exc
         self.dimension = int(self.model.config.projection_dim)
+        self._closed = False
 
     @classmethod
     def from_config(cls, config: ClipRuntimeConfig) -> HuggingFaceClipEmbedder:
@@ -103,6 +97,17 @@ class HuggingFaceClipEmbedder:
         with self.torch.inference_mode():
             features = self.model.get_image_features(**inputs)
         return self._normalized(features)
+
+    def close(self) -> None:
+        """Release model references and return allocated CUDA memory to the runtime."""
+        if self._closed:
+            return
+        self._closed = True
+        self.model.to("cpu")
+        del self.model
+        del self.processor
+        if self.device.startswith("cuda"):
+            self.torch.cuda.empty_cache()
 
 
 def prepare_cache() -> None:

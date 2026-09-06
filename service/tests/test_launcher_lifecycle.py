@@ -189,7 +189,8 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
     ]
     assert applied.returncode == 0
     preparation = json.loads((runtime / "state.json").read_text())["preparation"]
-    assert set(preparation) == {"model"}
+    assert set(preparation) == {"model", "models"}
+    assert set(preparation["models"]["openai/clip-vit-base-patch16"]) == {"model"}
 
 
 def test_registry_update_requires_renewed_terms_acceptance(tmp_path: Path) -> None:
@@ -233,6 +234,62 @@ def test_json_reset_requires_explicit_automation_confirmation(tmp_path: Path) ->
 
     assert result.returncode == 3
     assert json.loads(result.stdout) == {"status": "confirmation_required"}
+
+
+def test_schema_2_reset_index_invalidates_every_model_record(tmp_path: Path) -> None:
+    runtime = tmp_path / ".gods-eye"
+    runtime.mkdir()
+    model_record = {
+        "model": {"status": "verified"},
+        "index": {"status": "active"},
+        "smoke_test": {"status": "verified"},
+    }
+    state = {
+        "schema_version": 2,
+        "preparation": {
+            "dataset_acquisition": {"status": "verified"},
+            "gallery_manifest": {"status": "verified"},
+            "models": {
+                "openai/clip-vit-base-patch16": model_record,
+                "openai/clip-vit-large-patch14": model_record,
+            },
+            "index": {"status": "active"},
+            "smoke_test": {"status": "verified"},
+        },
+    }
+    (runtime / "state.json").write_text(json.dumps(state))
+
+    result = _run(tmp_path, "reset", "--index", "--yes", "--json")
+
+    assert result.returncode == 0, result.stderr
+    preparation = json.loads((runtime / "state.json").read_text())["preparation"]
+    assert set(preparation["models"]["openai/clip-vit-base-patch16"]) == {"model"}
+    assert set(preparation["models"]["openai/clip-vit-large-patch14"]) == {"model"}
+    assert "index" not in preparation
+    assert "smoke_test" not in preparation
+
+
+def test_schema_2_update_preview_does_not_persist_normalization(tmp_path: Path) -> None:
+    runtime = tmp_path / ".gods-eye"
+    runtime.mkdir()
+    state = {
+        "schema_version": 1,
+        "compatibility": {
+            "application": "0.1.0",
+            "registry": "1",
+            "model": "openai/clip-vit-base-patch16",
+            "manifest_schema": "1",
+            "index_schema": "1",
+        },
+        "preparation": {"model": {"status": "verified"}},
+    }
+    state_path = runtime / "state.json"
+    state_path.write_text(json.dumps(state))
+
+    result = _run(tmp_path, "update", "--json")
+
+    assert result.returncode == 0
+    assert json.loads(state_path.read_text()) == state
 
 
 def test_operation_logs_redact_secrets_and_host_identity(tmp_path: Path) -> None:

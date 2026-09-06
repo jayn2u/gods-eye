@@ -1,24 +1,55 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .clip import HuggingFaceClipEmbedder
 from .config import ClipRuntimeConfig
 from .datasets import DatasetAcquirer, load_registry
 from .gallery import GalleryManifest
-from .index_store import activate_version, build_index, load_active, validate_version
+from .index_store import (
+    activate_version,
+    build_index,
+    load_active,
+    manifest_digest,
+    validate_version,
+)
 from .models import SUPPORTED_DATASETS
 from .preparation import OOM_EXIT_CODE
 from .retrieval import IndexedRetrievalEngine
 
 
+@dataclass(frozen=True, slots=True)
+class ModelRevisionError(RuntimeError):
+    reason: str
+
+    def __str__(self) -> str:
+        return self.reason
+
+
 def _model(args: argparse.Namespace, *, offline: bool) -> None:
-    HuggingFaceClipEmbedder.from_config(
+    embedder = HuggingFaceClipEmbedder.from_config(
         ClipRuntimeConfig(args.model_id, args.revision, "cuda", offline, args.cache_dir)
     )
-    print(args.cache_dir)
+    resolved_revision = getattr(embedder.model.config, "_commit_hash", None)
+    valid_revision = (
+        isinstance(resolved_revision, str)
+        and len(resolved_revision) == 40
+        and all(character in "0123456789abcdef" for character in resolved_revision)
+    )
+    if not valid_revision:
+        raise ModelRevisionError("loaded model does not expose an immutable commit revision")
+    if args.revision is not None and resolved_revision != args.revision:
+        raise ModelRevisionError("loaded model revision does not match the requested commit")
+    print(
+        json.dumps(
+            {"model_id": args.model_id, "resolved_revision": resolved_revision},
+            separators=(",", ":"),
+        )
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     activate.add_argument("version", type=Path)
     activate.add_argument("--active-pointer", type=Path, required=True)
     activate.add_argument("--model-id", required=True)
+    activate.add_argument("--revision", required=True)
     activate.add_argument("--dataset-root", type=Path, required=True)
     verify_index = commands.add_parser("verify-index")
     verify_index.add_argument("active", type=Path)
@@ -77,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             loaded = GalleryManifest.read(args.path)
             if not loaded.records:
                 raise ValueError("Gallery Manifest contains no records")
-            print(args.path)
+            print(manifest_digest(loaded))
         elif args.operation == "build-index":
             embedder = HuggingFaceClipEmbedder(
                 args.model_id, revision=args.revision, device="cuda", cache_dir=args.cache_dir
@@ -102,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                 ).metadata.version_id
             )
         elif args.operation == "activate-index":
+            validate_version(args.version, args.model_id, args.revision, args.dataset_root)
             print(
                 activate_version(
                     args.version, args.active_pointer, args.model_id, args.dataset_root

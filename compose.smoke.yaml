@@ -2,6 +2,7 @@
 # Hugging Face downloads, or GPU access.
 services:
   service:
+    gpus: !reset []
     build:
       context: ${GODS_EYE_SOURCE_ROOT:-.}
       dockerfile: Dockerfile.service

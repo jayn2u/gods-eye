@@ -7,6 +7,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from .clip_models import CLIP_MODELS, DEFAULT_MODEL_ID
 from .launcher_assets import prepare_datasets
 from .launcher_common import (
     EXIT_OK,
@@ -16,7 +17,12 @@ from .launcher_common import (
     EXIT_USAGE,
     RuntimeLayout,
 )
-from .launcher_doctor import doctor, preparation_vram_mib, print_human
+from .launcher_doctor import (
+    doctor,
+    optional_model_capacity_available,
+    preparation_vram_mib,
+    print_human,
+)
 from .launcher_lifecycle import (
     RESET_PATHS,
     LauncherBusyError,
@@ -54,6 +60,12 @@ def _parser() -> tuple[LauncherArgumentParser, argparse.ArgumentParser]:
     prepare.add_argument("--batch-size", type=int)
     prepare.add_argument("--yes", action="store_true")
     prepare.add_argument("--accept-data-terms", action="store_true")
+    prepare.add_argument(
+        "--model-id",
+        action="append",
+        choices=[spec.model_id for spec in CLIP_MODELS],
+        dest="model_ids",
+    )
     start = commands.add_parser("start")
     start.add_argument("--detach", action="store_true")
     start.add_argument("--offline", action="store_true")
@@ -77,13 +89,14 @@ def _parser() -> tuple[LauncherArgumentParser, argparse.ArgumentParser]:
 def _prepare(layout: RuntimeLayout, args: argparse.Namespace) -> int:
     from .preparation import PreparationError, prepare_model_index
 
+    model_ids = list(dict.fromkeys(args.model_ids or [DEFAULT_MODEL_ID]))
     try:
         with mutation_lock(layout, "prepare"):
             if os.getenv("GODS_EYE_USE_FIXTURES") == "true":
                 from .fixture_preparation import prepare_fixture
 
                 layout.initialize()
-                prepare_fixture(layout.root, layout.state_path)
+                prepare_fixture(layout.root, layout.state_path, model_ids=model_ids)
                 return EXIT_OK
             result = prepare_datasets(
                 layout, accept_data_terms=args.accept_data_terms, assume_yes=args.yes
@@ -97,12 +110,18 @@ def _prepare(layout: RuntimeLayout, args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return EXIT_PREPARATION_FAILED
-            prepare_model_index(
-                layout.root,
-                layout.state_path,
-                vram_mib=preparation_vram_mib(),
-                batch_override=args.batch_size,
-            )
+            optional_count = 0
+            for model_id in model_ids:
+                if model_id != DEFAULT_MODEL_ID:
+                    optional_count += 1
+                    optional_model_capacity_available(layout, optional_count)
+                prepare_model_index(
+                    layout.root,
+                    layout.state_path,
+                    vram_mib=preparation_vram_mib(),
+                    batch_override=args.batch_size,
+                    model_id=model_id,
+                )
     except LauncherBusyError as error:
         return render_busy(error)
     except (PreparationError, ValueError) as error:

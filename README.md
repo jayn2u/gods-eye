@@ -1,7 +1,7 @@
 # God’s Eye
 
 God’s Eye is a desktop-first research demo for finding person images from an English description.
-The Full Demo ranks the CUHK-PEDES gallery with CLIP ViT-B/16.
+The Full Demo ranks the CUHK-PEDES gallery with a locally prepared CLIP model; ViT-B/16 is the default.
 
 > **Research use only.** This is visual-similarity retrieval, not identity verification. Scores are
 > neither probabilities nor evidence of identity. Do not use the app for identification,
@@ -19,21 +19,21 @@ captured on September 5, 2026. They use the built-in deterministic fixture API
 (`GODS_EYE_USE_FIXTURES=true`): the portrait and similarity score are test data, not real
 CUHK-PEDES images or a measure of retrieval quality. No dataset images are redistributed here.
 
-**1. Compose a search.** Describe visible clothing and accessories in English, choose the gallery
-and maximum result count, then select **Search gallery**.
+**1. Compose a search.** Describe visible clothing and accessories in English, choose a prepared
+CLIP model, the gallery, and maximum result count, then select **Search gallery**.
 
-![Light-mode search form with an English description, gallery selector, search button, and theme switch](docs/images/search-compose.png)
+![Synthetic light-mode search form with an English description, prepared CLIP model selector, gallery selector, search button, and theme switch](docs/images/search-compose.png)
 
 **2. Review results.** Inspect ranked matches and their similarity scores. Select a result to
 open its detail view, or use **Refine search** to revise the description.
 
-![Light-mode search results showing the built-in fixture portrait, rank, similarity, and image ID](docs/images/search-results.png)
+![Synthetic light-mode search results showing the fixture model and index provenance, built-in fixture portrait, rank, similarity, and image ID](docs/images/search-results.png)
 
 **3. Inspect an image.** View the larger portrait alongside its similarity, dataset, split, and
 image ID, then return with **Back to results**. Every result comes from the CUHK-PEDES test split,
 so the split appears on the detail view rather than on each result card.
 
-![Light-mode image detail showing the fixture portrait and its metadata](docs/images/search-detail.png)
+![Synthetic light-mode image detail showing the fixture model and index provenance, fixture portrait, and image metadata](docs/images/search-detail.png)
 
 To run the app yourself, follow the [Quickstart](#quickstart). For a dataset-free fixture setup,
 see [Local development and tests](docs/setup/local-development.md).
@@ -87,9 +87,9 @@ with `--no-open` or in a headless session—copy the printed URL into a desktop 
 God's Eye Full Demo is ready: http://127.0.0.1:5173
 ```
 
-Treat that output as authoritative. `5173` is the default web port, but the Launcher chooses a
-different loopback port when the default is occupied and prints the actual URL to use. The interface
-requires a desktop viewport at least 1200 pixels wide.
+Treat that output as authoritative. `5173` is the default web port. If a runtime port is occupied,
+restart with `./gods-eye start --relocate-ports`; the Launcher then chooses free loopback ports and
+prints the actual URL to use. The interface requires a desktop viewport at least 1200 pixels wide.
 
 The default foreground session keeps running in the terminal; press `Ctrl+C` to stop it. If you
 started with `./gods-eye start --detach`, stop the Demo Runtime with `./gods-eye stop`.
@@ -115,7 +115,8 @@ Datasets, model files, and indexes are never stored in images.
 ```text
 ./gods-eye doctor                         Check every supported-environment prerequisite
 ./gods-eye prepare [--batch-size N]       Prepare or resume the real Full Demo
-./gods-eye start [--detach] [--no-open]   Start after readiness succeeds
+./gods-eye start [--detach] [--no-open] [--relocate-ports]
+                                              Start after readiness succeeds
 ./gods-eye start --offline                Refuse model/network fallback while starting
 ./gods-eye status                         Show runtime containers
 ./gods-eye logs                           Show recent runtime logs
@@ -137,7 +138,7 @@ With no target, `reset` removes nothing. State-changing commands reject concurre
   a new compatible preparation.
 - If CUDA runs out of memory, preparation halves its conservative batch size and retries. You can
   also choose a smaller positive value with `--batch-size`.
-- If ports 5173 or 8000 are occupied, the Launcher selects free loopback ports and prints the URL.
+- If ports 5173 or 8000 are occupied, restart with `./gods-eye start --relocate-ports`; the Launcher then selects free loopback ports and prints the URL.
 
 ## Detailed setup and development
 

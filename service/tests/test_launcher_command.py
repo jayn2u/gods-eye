@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from gods_eye.launcher_doctor import required_capacity_bytes
 
 ROOT = Path(__file__).parents[2]
 
@@ -109,19 +110,21 @@ if remaining:
         print("terminal adapter failure", file=sys.stderr)
         raise SystemExit(1)
 if operation == "prepare-model":
-    path = root / ".cache/huggingface/model.ready"
+    model_id = args[args.index("--model-id") + 1]
+    path = root / ".cache/huggingface" / (model_id.rsplit("/", 1)[-1] + ".ready")
 elif operation == "verify-model":
-    path = root / ".cache/huggingface/model.ready"
+    model_id = args[args.index("--model-id") + 1]
+    path = root / ".cache/huggingface" / (model_id.rsplit("/", 1)[-1] + ".ready")
 elif operation == "build-manifest":
     path = root / "indexes/gallery-manifest.json"
 elif operation == "verify-manifest":
     path = Path(args[1])
 elif operation == "build-index":
-    path = root / "indexes/versions/test-version"
+    path = Path(args[args.index("--versions-dir") + 1]) / "test-version"
 elif operation == "validate-index":
     path = Path(args[1])
 elif operation == "activate-index":
-    path = root / "indexes/active"
+    path = Path(args[args.index("--active-pointer") + 1])
 elif operation == "verify-index":
     path = Path(args[1])
 elif operation == "smoke-search":
@@ -135,8 +138,16 @@ elif operation in {"validate-index", "verify-index", "verify-model", "verify-man
         raise SystemExit(1)
 else:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("ok")
-print(path)
+    if operation == "activate-index":
+        path.write_text(str(Path(args[1]).relative_to(path.parent)) + "\\n")
+    else:
+        path.write_text("ok")
+if operation in {"prepare-model", "verify-model"}:
+    print(json.dumps({"model_id": model_id, "resolved_revision": "a" * 40}, separators=(",", ":")))
+elif operation == "verify-manifest":
+    print("b" * 64)
+else:
+    print(path)
 """
     )
     executable.chmod(0o755)
@@ -434,8 +445,7 @@ def test_operator_can_verify_a_supported_workstation_as_json(tmp_path: Path) -> 
         "web-port",
         "api-port",
     }
-    assert (project_dir / ".gods-eye/logs").is_dir()
-    assert (project_dir / ".gods-eye/state.json").is_file()
+    assert not (project_dir / ".gods-eye").exists()
 
 
 def test_doctor_reports_a_missing_project_root_instead_of_crashing(tmp_path: Path) -> None:
@@ -513,6 +523,23 @@ def test_doctor_reports_all_prerequisite_failures_with_guidance(tmp_path: Path) 
     ):
         assert check_name in result.stdout
     assert result.stdout.count("Fix:") >= 7
+
+
+def test_doctor_does_not_create_or_migrate_launcher_state(tmp_path: Path) -> None:
+    env, _ = _prepare_env(tmp_path)
+    project = Path(env["GODS_EYE_PROJECT_ROOT"])
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (project / ".gods-eye/state.json").exists()
 
 
 def test_doctor_enforces_the_eight_gibibyte_vram_floor(tmp_path: Path) -> None:
@@ -685,3 +712,118 @@ def test_prepare_reports_terminal_index_failure_without_activation(tmp_path: Pat
     assert "terminal adapter failure" in result.stderr
     calls = [json.loads(line) for line in call_log.read_text().splitlines()]
     assert "activate-index" not in [call[0] for call in calls]
+
+
+def test_prepare_model_id_deduplicates_in_first_seen_order(tmp_path: Path) -> None:
+    env, call_log = _prepare_env(tmp_path)
+
+    result = subprocess.run(
+        [
+            str(ROOT / "gods-eye"),
+            "prepare",
+            "--accept-data-terms",
+            "--model-id",
+            "openai/clip-vit-base-patch32",
+            "--model-id",
+            "openai/clip-vit-base-patch16",
+            "--model-id",
+            "openai/clip-vit-base-patch32",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in call_log.read_text().splitlines()]
+    prepared = [call[call.index("--model-id") + 1] for call in calls if call[0] == "prepare-model"]
+    assert prepared == [
+        "openai/clip-vit-base-patch32",
+        "openai/clip-vit-base-patch16",
+    ]
+
+
+def test_prepare_unknown_model_id_exits_usage_before_mutation(tmp_path: Path) -> None:
+    env, call_log = _prepare_env(tmp_path)
+    project = Path(env["GODS_EYE_PROJECT_ROOT"])
+
+    result = subprocess.run(
+        [str(ROOT / "gods-eye"), "prepare", "--yes", "--model-id", "community/model"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 64
+    assert "invalid choice" in result.stderr
+    assert not (project / ".gods-eye/state.json").exists()
+    assert not call_log.exists()
+
+
+def test_prepare_model_id_partial_failure_resumes_completed_model(tmp_path: Path) -> None:
+    env, call_log = _prepare_env(tmp_path)
+    plan = tmp_path / "model-plan.json"
+    plan.write_text(json.dumps({"build-index": ["ok", "fail"]}))
+    env["GODS_EYE_FAKE_PREPARE_PLAN"] = str(plan)
+    command = [
+        str(ROOT / "gods-eye"),
+        "prepare",
+        "--accept-data-terms",
+        "--model-id",
+        "openai/clip-vit-base-patch32",
+        "--model-id",
+        "openai/clip-vit-large-patch14",
+    ]
+
+    failed = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True, check=False)
+    resumed = subprocess.run(
+        command[0:2] + command[3:], cwd=ROOT, env=env, text=True, capture_output=True, check=False
+    )
+
+    assert failed.returncode == 1
+    assert resumed.returncode == 0, resumed.stderr
+    calls = [json.loads(line) for line in call_log.read_text().splitlines()]
+    prepared = [call[call.index("--model-id") + 1] for call in calls if call[0] == "prepare-model"]
+    assert prepared == [
+        "openai/clip-vit-base-patch32",
+        "openai/clip-vit-large-patch14",
+    ]
+    builds = [call[call.index("--model-id") + 1] for call in calls if call[0] == "build-index"]
+    assert builds == [
+        "openai/clip-vit-base-patch32",
+        "openai/clip-vit-large-patch14",
+        "openai/clip-vit-large-patch14",
+    ]
+
+
+def test_prepare_optional_model_capacity_failure_keeps_completed_default(tmp_path: Path) -> None:
+    env, _ = _prepare_env(tmp_path)
+    env["GODS_EYE_DOCTOR_FREE_BYTES"] = str(required_capacity_bytes() + 2 * 1024**3)
+
+    result = subprocess.run(
+        [
+            str(ROOT / "gods-eye"),
+            "prepare",
+            "--accept-data-terms",
+            "--model-id",
+            "openai/clip-vit-base-patch16",
+            "--model-id",
+            "openai/clip-vit-large-patch14",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "additional 4 GiB" in result.stderr
+    state = json.loads((Path(env["GODS_EYE_PROJECT_ROOT"]) / ".gods-eye/state.json").read_text())
+    default = state["preparation"]["models"]["openai/clip-vit-base-patch16"]
+    assert default["smoke_test"]["status"] == "verified"
+    assert "openai/clip-vit-large-patch14" not in state["preparation"]["models"]

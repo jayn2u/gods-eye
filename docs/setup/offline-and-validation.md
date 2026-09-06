@@ -1,19 +1,23 @@
 # Offline operation, validation, and limitations
 
 After successful online preparation, `./gods-eye start --offline` adds network isolation and sets
-the model libraries to offline mode. Missing or incompatible cached assets fail with guidance; the
-Launcher does not fetch them. Use identical model identity, revision, cache, manifest schema, and
-index version across preparation and runtime.
+the model libraries to offline mode. Preflight requires the exact revision-bound B/16 snapshot and
+contained active index pointer; a merely nonempty cache is insufficient. Missing or incompatible
+cached assets fail with guidance, and optional-model problems do not block a valid default start.
+The Launcher does not fetch anything. Use identical model identity, revision, cache, manifest
+schema, and index version across preparation and runtime.
 
 The API accepts `POST /api/search` with an English `query`, `top_k` from 1 through 100, and a
 non-empty dataset subset. Images are served only through validated manifest IDs. Operational logs
 record timings, counts, versions, and error categories, but never raw query text. Reverse proxies
 and third-party telemetry require a separate privacy review.
 
-With cached assets, the opt-in real adapter test is:
+Routine fixture validation is synthetic and does not prove that real Hugging Face checkpoints load.
+With all four checkpoints already cached and a compatible NVIDIA GPU, the opt-in real matrix is:
 
 ```bash
-RUN_CLIP_INTEGRATION=1 GODS_EYE_OFFLINE=true uv run pytest -m integration
+RUN_CLIP_INTEGRATION=1 GODS_EYE_REAL_MODEL_MATRIX=1 GODS_EYE_OFFLINE=1 \
+  uv run pytest service/tests/test_clip_integration.py -m integration -q
 ```
 
 After building a real index, `gods-eye-acceptance` produces reproducible coverage,

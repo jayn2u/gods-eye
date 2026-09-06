@@ -14,8 +14,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .launcher_common import EXIT_OK, EXIT_PREPARATION_FAILED, PREPARED_STAGES, RuntimeLayout
+from .clip_models import DEFAULT_MODEL_ID
+from .launcher_common import (
+    EXIT_OK,
+    EXIT_PREPARATION_FAILED,
+    MODEL_PREPARED_STAGES,
+    SHARED_PREPARED_STAGES,
+    RuntimeLayout,
+)
+from .launcher_doctor import compose_version_supported
 from .launcher_lifecycle import mutation_lock, write_operation_log
+from .preparation_state import model_preparation
 
 _APP_SHELL_MARKER = '<div id="root"'
 _WEB_PROBE_RESPONSE_LIMIT = 1024 * 1024
@@ -47,12 +56,41 @@ def _compose_command(layout: RuntimeLayout, *, offline: bool = False) -> list[st
 
 
 def prepared_missing(layout: RuntimeLayout) -> list[str]:
-    preparation = layout.read_state().get("preparation", {})
-    return [
+    preparation = layout.normalized_state().get("preparation", {})
+    missing = [
         stage
-        for stage, expected in PREPARED_STAGES.items()
+        for stage, expected in SHARED_PREPARED_STAGES.items()
         if preparation.get(stage, {}).get("status") != expected
     ]
+    default = model_preparation(preparation, DEFAULT_MODEL_ID)
+    missing.extend(
+        stage
+        for stage, expected in MODEL_PREPARED_STAGES.items()
+        if default.get(stage, {}).get("status") != expected
+    )
+    return missing
+
+
+def _default_model_cache_error(model_cache: Path, preparation: dict) -> str | None:
+    if os.getenv("GODS_EYE_USE_FIXTURES") == "true":
+        try:
+            populated = model_cache.is_dir() and any(model_cache.iterdir())
+        except OSError:
+            populated = False
+        return None if populated else "is empty or not readable"
+    model = model_preparation(preparation, DEFAULT_MODEL_ID).get("model", {})
+    revision = model.get("resolved_revision")
+    repo = model_cache / f"models--{DEFAULT_MODEL_ID.replace('/', '--')}"
+    if isinstance(revision, str):
+        return (
+            None if (repo / "snapshots" / revision).is_dir() else f"is missing revision {revision}"
+        )
+    try:
+        main = (repo / "refs" / "main").read_text().strip()
+        snapshots = {path.name for path in (repo / "snapshots").iterdir() if path.is_dir()}
+    except OSError:
+        return "has no exact local snapshot"
+    return None if len(main) == 40 and snapshots == {main} else "has no unambiguous local snapshot"
 
 
 def _registry() -> dict:
@@ -129,7 +167,8 @@ def _offline_assets_missing(layout: RuntimeLayout, host_root: Path | None = None
             missing.append(
                 f"Dataset Installation: {source['name']} ({_asset_location(roots.dataset_root, dataset_root)})"
             )
-    if not model_cache.is_dir() or not any(model_cache.iterdir()):
+    preparation = layout.normalized_state().get("preparation", {})
+    if _default_model_cache_error(model_cache, preparation) is not None:
         missing.append(
             f"CLIP ViT-B/16 model cache ({_asset_location(roots.hf_cache, model_cache)})"
         )
@@ -400,19 +439,18 @@ def _prepared_asset_errors(layout: RuntimeLayout, host_root: Path) -> list[str]:
                     "version is not reachable beneath the configured index root"
                 )
 
+    preparation = layout.normalized_state().get("preparation", {})
+    cache_error = _default_model_cache_error(model_cache, preparation)
     if not model_cache.is_dir():
         errors.append(
             "CLIP ViT-B/16 model cache "
             f"({_asset_location(roots.hf_cache, model_cache)}) is not visible"
         )
-    else:
-        try:
-            next(model_cache.iterdir())
-        except (OSError, StopIteration):
-            errors.append(
-                "CLIP ViT-B/16 model cache "
-                f"({_asset_location(roots.hf_cache, model_cache)}) is empty or not readable"
-            )
+    elif cache_error is not None:
+        errors.append(
+            "CLIP ViT-B/16 model cache "
+            f"({_asset_location(roots.hf_cache, model_cache)}) {cache_error}"
+        )
     return errors
 
 
@@ -682,9 +720,9 @@ def start_runtime(
     environment = _runtime_env(web_port, api_port, offline)
     environment.update(_runtime_compose_env(layout, offline=offline))
     compose_check = _run(["docker", "compose", "version", "--short"], environment)
-    if compose_check.returncode != 0:
+    if compose_check.returncode != 0 or not compose_version_supported(compose_check.stdout.strip()):
         print(
-            "Docker Compose is unusable inside the Launcher environment. "
+            "Docker Compose 2.30 or newer is required inside the Launcher environment. "
             "Run './gods-eye doctor' for diagnostics before starting the Demo Runtime.",
             file=sys.stderr,
         )

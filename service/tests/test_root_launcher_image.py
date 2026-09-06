@@ -10,6 +10,8 @@ import pytest
 from runtime_http_server import loopback_http_server
 
 ROOT = Path(__file__).parents[2]
+DEFAULT_MODEL_ID = "openai/clip-vit-base-patch16"
+DEFAULT_MODEL_REVISION = "a" * 40
 
 
 def _fake_docker(tmp_path: Path, *, mode: str = "basic") -> tuple[Path, Path]:
@@ -128,10 +130,21 @@ def _prepared_state(root: Path) -> None:
                 "compatibility": {},
                 "preparation": {
                     "dataset_acquisition": {"status": "verified"},
-                    "model": {"status": "verified"},
+                    "model": {
+                        "status": "verified",
+                        "resolved_revision": DEFAULT_MODEL_REVISION,
+                    },
                     "gallery_manifest": {"status": "verified"},
-                    "index": {"status": "active"},
-                    "smoke_test": {"status": "verified"},
+                    "index": {
+                        "status": "active",
+                        "model_id": DEFAULT_MODEL_ID,
+                        "model_revision": DEFAULT_MODEL_REVISION,
+                    },
+                    "smoke_test": {
+                        "status": "verified",
+                        "model_id": DEFAULT_MODEL_ID,
+                        "model_revision": DEFAULT_MODEL_REVISION,
+                    },
                 },
             }
         )
@@ -147,9 +160,15 @@ def _prepared_assets(
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text("{}")
 
-    model_cache = root / ".cache" / "huggingface"
+    model_cache = (
+        root
+        / ".cache"
+        / "huggingface"
+        / f"models--{DEFAULT_MODEL_ID.replace('/', '--')}"
+        / "snapshots"
+        / DEFAULT_MODEL_REVISION
+    )
     model_cache.mkdir(parents=True, exist_ok=True)
-    (model_cache / "model.ready").write_text("ready")
 
     indexes = root / "indexes"
     indexes.mkdir(parents=True, exist_ok=True)

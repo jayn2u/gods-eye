@@ -142,7 +142,10 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
 
     assert result.returncode == 0, result.stderr
     configuration = json.loads(result.stdout)
-    assert configuration["services"]["service"]["environment"]["GODS_EYE_USE_FIXTURES"] == "true"
+    service = configuration["services"]["service"]
+    assert service["environment"]["GODS_EYE_USE_FIXTURES"] == "true"
+    assert not service.get("gpus")
+    assert not service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices")
     for service_name in ("service", "web"):
         published_ports = [
             port
@@ -190,6 +193,15 @@ def test_local_mode_demo_runtime_services_always_build_from_the_checkout() -> No
             "Compose reuses whatever image already carries the tag, so source fixes never "
             "reach the Demo Runtime"
         )
+
+
+def test_normal_service_requests_all_gpus() -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+
+    service = _rendered_compose()["services"]["service"]
+
+    assert service.get("gpus") == [{"count": -1}]
 
 
 def test_release_mode_pins_immutable_digests_and_never_builds() -> None:

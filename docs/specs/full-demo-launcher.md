@@ -7,7 +7,7 @@ A first-time operator can follow the README from prerequisites to a searchable F
 ## Supported environment
 
 - Ubuntu/Linux on amd64.
-- Docker Engine with Compose v2.
+- Docker Engine with Compose 2.30 or newer.
 - NVIDIA GPU with at least 8 GB VRAM, a compatible driver, and NVIDIA Container Toolkit access from Docker.
 - Loopback-only web and API bindings. The Launcher provides no public-host option.
 - Project-local, gitignored storage for datasets, archives, installation state, model cache, indexes, Launcher state, and logs.
@@ -24,7 +24,7 @@ The README begins with the requirements and data-use warning, followed by:
 ./gods-eye start
 ```
 
-`start` opens `http://127.0.0.1:5173` only after health and search readiness pass. When a port is occupied, the Launcher selects an available loopback port and prints the actual URL. Browser opening is skipped for SSH/headless sessions and can be disabled with `--no-open`.
+`start` opens `http://127.0.0.1:5173` only after health and search readiness pass. When a requested port is occupied, the Launcher refuses to start and reports the conflict. Pass `--relocate-ports` to opt into available loopback replacements; the Launcher prints the actual URL it selects. Browser opening is skipped for SSH/headless sessions and can be disabled with `--no-open`.
 
 If `start` finds that the Full Demo is not prepared, it describes the missing assets, expected work, and asks whether to run `prepare`. It does not begin downloads or accept data terms implicitly. Non-interactive use fails instead of prompting.
 
@@ -41,12 +41,16 @@ Runs the following verified, resumable stages:
 1. Preflight and storage calculation.
 2. Dataset terms acknowledgement.
 3. Dataset Acquisition for the registered CUHK-PEDES source.
-4. CLIP ViT-B/16 model preparation.
+4. Selected CLIP model preparation (B/16 only when no `--model-id` is supplied).
 5. Gallery Manifest generation.
 6. GPU index build and atomic activation.
 7. Model load, active-index validation, and a real-search smoke test.
 
 The command shows stage number, progress, elapsed time, and an evidence-based estimate. Detailed output is written to `.gods-eye/logs/<timestamp>.log`. Cancellation preserves verified stages, resumable archive parts, and index checkpoints; a later run validates and resumes them. GPU-memory failure halves the conservatively selected batch size and retries the current index stage.
+
+`--model-id` is repeatable for the four registered OpenAI ViT models. IDs are deduplicated in
+first-seen order and processed sequentially; a completed earlier model remains resumable if a later
+one fails. Dataset and manifest work remains shared.
 
 Before downloading, the operator sees the CUHK-PEDES official source and terms or license, its distinct mirror location, expected size, usage restrictions, and sensitive-data warning. Interactive acceptance is recorded with timestamp, Dataset Registry version, and selected source in `.gods-eye/state.json`. A Registry or source change requires renewed acceptance. `--yes` never implies `--accept-data-terms`.
 
