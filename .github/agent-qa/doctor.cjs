@@ -1,0 +1,252 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const net = require('node:net');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+
+const EXPECTED = Object.freeze({
+  runner: '2.337.0',
+  codex: '0.153.3',
+  playwright_mcp: '0.0.80',
+  node: '24.12.0',
+  uv: '0.12.6',
+  pnpm: '10.15.0',
+});
+
+function usage() {
+  return 'Usage: node doctor.cjs --json [--phase start]\n';
+}
+
+function command(bin, args, options = {}) {
+  const result = spawnSync(bin, args, {
+    cwd: options.cwd,
+    env: options.env || process.env,
+    encoding: 'utf8',
+    timeout: options.timeout || 15_000,
+    maxBuffer: 1024 * 1024,
+  });
+  return {
+    ok: result.status === 0 && !result.error,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+  };
+}
+
+function versionFrom(text) {
+  return text.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/)?.[1] || null;
+}
+
+function modeOf(target) {
+  try {
+    return (fs.statSync(target).mode & 0o777).toString(8).padStart(4, '0');
+  } catch {
+    return null;
+  }
+}
+
+function ownedByCurrentUser(target) {
+  try {
+    return typeof process.getuid !== 'function' || fs.statSync(target).uid === process.getuid();
+  } catch {
+    return false;
+  }
+}
+
+function inside(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function add(checks, name, ok, metadata = {}) {
+  checks.push({ name, ok: Boolean(ok), ...metadata });
+}
+
+function probePort() {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', () => resolve(false));
+    server.listen({ host: '127.0.0.1', port: 0, exclusive: true }, () => {
+      server.close((error) => resolve(!error));
+    });
+  });
+}
+
+function readAuthMode(authFile) {
+  try {
+    const value = parseJson(fs.readFileSync(authFile, 'utf8'));
+    return typeof value.auth_mode === 'string' ? value.auth_mode : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch {
+    return null;
+  }
+}
+
+async function runDoctor({ env = process.env, phase = 'status' } = {}) {
+  const home = env.HOME || os.homedir();
+  const qaRoot = path.resolve(env.QA_ROOT || path.join(home, '.local/share/gods-eye-agent-qa'));
+  const checkout = path.resolve(env.QA_DEVELOPER_CHECKOUT || process.cwd());
+  const runnerDir = path.join(qaRoot, 'runner');
+  const toolchainDir = path.join(qaRoot, 'toolchain');
+  const codexHome = path.join(qaRoot, 'codex-home');
+  const authFile = path.join(codexHome, 'auth.json');
+  const lockFile = path.join(qaRoot, 'auth.lock');
+  const repo = env.QA_REPOSITORY || 'jayn2u/gods-eye';
+  const checks = [];
+
+  let realQaRoot = qaRoot;
+  let realCheckout = checkout;
+  try { realQaRoot = fs.realpathSync(qaRoot); } catch {}
+  try { realCheckout = fs.realpathSync(checkout); } catch {}
+  const pathSafe = path.isAbsolute(qaRoot) && !inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout)
+    && path.resolve(codexHome) !== path.resolve(path.join(home, '.codex'));
+  add(checks, 'paths', pathSafe, { outside_developer_checkout: pathSafe });
+
+  const rootMode = modeOf(qaRoot);
+  const codexMode = modeOf(codexHome);
+  const authModeBits = modeOf(authFile);
+  const ownershipOk = [qaRoot, runnerDir, toolchainDir, codexHome, authFile, lockFile]
+    .every((target) => ownedByCurrentUser(target));
+  add(checks, 'ownership', ownershipOk, { current_user: ownershipOk });
+  add(checks, 'permissions', rootMode === '0700' && codexMode === '0700' && authModeBits === '0600', {
+    qa_root_mode: rootMode,
+    codex_home_mode: codexMode,
+    auth_file_mode: authModeBits,
+  });
+
+  const runnerVersion = (() => {
+    try { return fs.readFileSync(path.join(runnerDir, '.runner-version'), 'utf8').trim(); } catch { return null; }
+  })();
+  add(checks, 'runner_tool', runnerVersion === EXPECTED.runner && fs.existsSync(path.join(runnerDir, 'run.sh')), {
+    present: fs.existsSync(path.join(runnerDir, 'run.sh')),
+    version: runnerVersion,
+  });
+
+  const bins = {
+    codex: env.QA_CODEX_BIN || path.join(toolchainDir, 'node_modules/.bin/codex'),
+    playwright_mcp: env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchainDir, 'node_modules/.bin/playwright-mcp'),
+    uv: env.QA_UV_BIN || 'uv',
+    pnpm: env.QA_PNPM_BIN || 'pnpm',
+  };
+  const versions = { node: process.versions.node };
+  let versionCommandsOk = true;
+  for (const [name, args] of [['codex', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
+    const result = command(bins[name], args, { env });
+    versionCommandsOk &&= result.ok;
+    versions[name] = versionFrom(`${result.stdout}\n${result.stderr}`);
+  }
+  const versionsOk = versionCommandsOk && Object.entries(versions).every(([name, version]) => version === EXPECTED[name]);
+  add(checks, 'tool_versions', versionsOk, versions);
+
+  const browserProbe = env.QA_BROWSER_PROBE_BIN
+    ? command(env.QA_BROWSER_PROBE_BIN, [], { cwd: toolchainDir, env, timeout: 30_000 })
+    : command(process.execPath, ['-e', "require('playwright').chromium.launch({headless:true}).then(async b=>{await b.close()}).catch(e=>{console.error(e.message);process.exit(1)})"], {
+      cwd: toolchainDir,
+      env: { ...env, PLAYWRIGHT_BROWSERS_PATH: path.join(toolchainDir, 'browsers') },
+      timeout: 30_000,
+    });
+  add(checks, 'browser', browserProbe.ok, { available: browserProbe.ok });
+  const portOk = await probePort();
+  add(checks, 'loopback_port', portOk, { allocatable: portOk });
+
+  const ghBin = env.QA_GH_BIN || 'gh';
+  const repoResult = command(ghBin, ['repo', 'view', repo, '--json', 'nameWithOwner,isPrivate'], { env });
+  const repoData = parseJson(repoResult.stdout);
+  const privateRepo = repoResult.ok && repoData?.nameWithOwner === repo && repoData?.isPrivate === true;
+  add(checks, 'repository', privateRepo, { identity_matches: repoData?.nameWithOwner === repo, private: repoData?.isPrivate === true });
+
+  const runnersResult = command(ghBin, ['api', `repos/${repo}/actions/runners`, '--paginate', '--slurp'], { env });
+  const runnersData = parseJson(runnersResult.stdout);
+  const runners = Array.isArray(runnersData) ? runnersData.flatMap((page) => page.runners || []) : runnersData?.runners || [];
+  const named = runners.filter((runner) => runner?.name === 'gods-eye-agent-qa');
+  const localRunner = parseJson((() => {
+    try { return fs.readFileSync(path.join(runnerDir, '.runner'), 'utf8'); } catch { return ''; }
+  })());
+  const localConfigured = localRunner?.agentName === 'gods-eye-agent-qa'
+    && localRunner?.gitHubUrl === `https://github.com/${repo}`;
+  const runnerRegistered = runnersResult.ok && named.length === 1
+    && (named[0].labels || []).some((label) => label?.name === 'gods-eye-agent-qa') && localConfigured;
+  add(checks, 'runner_registration', runnerRegistered, {
+    registered: runnerRegistered,
+    exact_count: named.length,
+    local_configured: localConfigured,
+  });
+
+  const systemctlBin = env.QA_SYSTEMCTL_BIN || 'systemctl';
+  const serviceResult = command(systemctlBin, ['--user', 'is-active', 'gods-eye-agent-qa-runner.service'], { env });
+  add(checks, 'runner_service', serviceResult.ok && serviceResult.stdout.trim() === 'active', {
+    active: serviceResult.ok && serviceResult.stdout.trim() === 'active',
+    required: phase !== 'start',
+  });
+  const loginctlBin = env.QA_LOGINCTL_BIN || 'loginctl';
+  const currentUser = env.QA_CURRENT_USER || os.userInfo().username;
+  const lingerResult = command(loginctlBin, ['show-user', currentUser, '--property=Linger', '--value'], { env });
+  const lingerEnabled = lingerResult.ok && lingerResult.stdout.trim() === 'yes';
+  add(checks, 'user_linger', lingerEnabled, { enabled: lingerEnabled });
+
+  const apiVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY'];
+  const apiEnvironment = apiVariables.some((name) => Boolean(env[name]));
+  const storedAuthMode = readAuthMode(authFile);
+  const loginEnv = { ...env, CODEX_HOME: codexHome };
+  for (const name of apiVariables) delete loginEnv[name];
+  const loginStatus = command(bins.codex, ['login', 'status'], { env: loginEnv });
+  const subscriptionStatus = loginStatus.ok && /logged in using chatgpt/i.test(`${loginStatus.stdout}\n${loginStatus.stderr}`);
+  const subscriptionAuth = !apiEnvironment && storedAuthMode === 'chatgpt' && subscriptionStatus;
+  add(checks, 'subscription_auth', subscriptionAuth, {
+    auth_file_present: fs.existsSync(authFile),
+    auth_file_mode: authModeBits,
+    mode: storedAuthMode === 'chatgpt' ? 'chatgpt' : storedAuthMode === null ? 'missing' : 'rejected',
+    login_status_verified: subscriptionStatus,
+    api_environment_present: apiEnvironment,
+  });
+
+  const flockBin = env.QA_FLOCK_BIN || 'flock';
+  const lockResult = command(flockBin, ['-n', lockFile, 'true'], { env });
+  add(checks, 'auth_lock', lockResult.ok, { available: lockResult.ok });
+
+  const ok = checks.every((check) => check.ok || (phase === 'start' && check.name === 'runner_service'));
+  return { schema_version: 1, ok, phase, checks };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  if (args.includes('--help') || args.includes('-h')) {
+    process.stdout.write(usage());
+    return;
+  }
+  if (!args.includes('--json')) {
+    process.stderr.write(usage());
+    process.exitCode = 2;
+    return;
+  }
+  const statusArgs = args.length === 1 && args[0] === '--json';
+  const startArgs = args.length === 3 && args[0] === '--json' && args[1] === '--phase' && args[2] === 'start';
+  if (!statusArgs && !startArgs) {
+    process.stderr.write(usage());
+    process.exitCode = 2;
+    return;
+  }
+  const phase = startArgs ? 'start' : 'status';
+  const report = await runDoctor({ phase });
+  process.stdout.write(`${JSON.stringify(report)}\n`);
+  if (!report.ok) process.exitCode = 1;
+}
+
+module.exports = { EXPECTED, runDoctor, versionFrom };
+
+if (require.main === module) {
+  main().catch(() => {
+    process.stdout.write(`${JSON.stringify({ schema_version: 1, ok: false, phase: 'status', checks: [{ name: 'doctor', ok: false }] })}\n`);
+    process.exitCode = 1;
+  });
+}
