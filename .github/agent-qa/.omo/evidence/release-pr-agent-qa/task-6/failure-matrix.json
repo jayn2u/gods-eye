@@ -1,0 +1,52 @@
+[
+  {
+    "name": "auth_required",
+    "status": "incomplete",
+    "reason": "auth_required"
+  },
+  {
+    "name": "rate_limited",
+    "status": "incomplete",
+    "reason": "rate_limited"
+  },
+  {
+    "name": "invalid_json",
+    "status": "incomplete",
+    "reason": "invalid_output"
+  },
+  {
+    "name": "missing_screenshot",
+    "status": "incomplete",
+    "reason": "invalid_output"
+  },
+  {
+    "name": "no_mcp",
+    "status": "incomplete",
+    "reason": "invalid_output"
+  },
+  {
+    "name": "source_changed",
+    "status": "incomplete",
+    "reason": "source_changed"
+  },
+  {
+    "name": "tracked_dirty",
+    "status": "incomplete",
+    "reason": "source_changed"
+  },
+  {
+    "name": "setup_failure",
+    "status": "incomplete",
+    "reason": "setup_failed"
+  },
+  {
+    "name": "timeout",
+    "status": "incomplete",
+    "reason": "timeout"
+  },
+  {
+    "name": "cancelled",
+    "status": "cancelled",
+    "reason": "none"
+  }
+]

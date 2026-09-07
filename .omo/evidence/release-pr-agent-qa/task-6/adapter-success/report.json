@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "request": {
+    "schema_version": 1,
+    "repository": "jayn2u/gods-eye",
+    "pr_number": 41,
+    "head": {
+      "repository": "jayn2u/gods-eye",
+      "id": 12345,
+      "sha": "1111111111111111111111111111111111111111"
+    },
+    "base": {
+      "ref": "release/qa",
+      "sha": "2222222222222222222222222222222222222222"
+    },
+    "controller_sha": "3333333333333333333333333333333333333333",
+    "run": {
+      "id": 98765,
+      "attempt": 1
+    },
+    "author": "trusted-author",
+    "admitted_at": "2026-09-07T09:00:00Z"
+  },
+  "tested_head_sha": "1111111111111111111111111111111111111111",
+  "controller_sha": "3333333333333333333333333333333333333333",
+  "started_at": "2026-09-07T23:08:02.615Z",
+  "finished_at": "2026-09-07T23:08:02.625Z",
+  "tools": {
+    "node": "24.19.0",
+    "codex": "0.153.3",
+    "playwright_mcp": "0.0.80",
+    "chromium": "Chromium 140.0.0"
+  },
+  "status": "no_findings",
+  "reason": "none",
+  "deterministic_results": [
+    {
+      "name": "candidate-playwright",
+      "status": "passed",
+      "harness_started": true,
+      "app_started": true,
+      "duration_ms": 12
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "search-detail-return",
+      "status": "observed",
+      "steps": [
+        "Searched, opened detail, and returned."
+      ],
+      "expected": "Expected result detail flow.",
+      "actual": "Observed result detail flow.",
+      "evidence": [
+        "screenshots/search-detail-return.png"
+      ]
+    },
+    {
+      "id": "model-provenance",
+      "status": "observed",
+      "steps": [
+        "Selected ViT-L/14 and inspected provenance."
+      ],
+      "expected": "Expected selected model provenance.",
+      "actual": "Observed selected model provenance.",
+      "evidence": [
+        "screenshots/model-provenance.png"
+      ]
+    },
+    {
+      "id": "cancel-replace",
+      "status": "observed",
+      "steps": [
+        "Cancelled and replaced the held search."
+      ],
+      "expected": "Expected newer reply to remain.",
+      "actual": "Observed newer reply remain.",
+      "evidence": [
+        "screenshots/cancel-replace.png"
+      ]
+    },
+    {
+      "id": "unprepared-model",
+      "status": "observed",
+      "steps": [
+        "Inspected disabled model guidance."
+      ],
+      "expected": "Expected preparation guidance.",
+      "actual": "Observed preparation guidance.",
+      "evidence": [
+        "screenshots/unprepared-model.png"
+      ]
+    },
+    {
+      "id": "recover-409",
+      "status": "observed",
+      "steps": [
+        "Observed 409, refresh, and retry."
+      ],
+      "expected": "Expected recovery after 409.",
+      "actual": "Observed recovery after 409.",
+      "evidence": [
+        "screenshots/recover-409.png"
+      ]
+    },
+    {
+      "id": "blank-input",
+      "status": "observed",
+      "steps": [
+        "Submitted blank input."
+      ],
+      "expected": "Expected validation without search.",
+      "actual": "Observed validation without search.",
+      "evidence": [
+        "screenshots/blank-input.png"
+      ]
+    }
+  ],
+  "findings": [],
+  "tool_calls": [
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "search-detail-return",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/search-detail-return.png"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_select_option",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "model-provenance",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/model-provenance.png"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_select_option",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_select_option",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "cancel-replace",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/cancel-replace.png"
+    },
+    {
+      "scenario_id": "unprepared-model",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "unprepared-model",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "unprepared-model",
+      "tool": "browser_select_option",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "unprepared-model",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "unprepared-model",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/unprepared-model.png"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_select_option",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_fill_form",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "recover-409",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/recover-409.png"
+    },
+    {
+      "scenario_id": "blank-input",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "blank-input",
+      "tool": "browser_navigate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "blank-input",
+      "tool": "browser_click",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "blank-input",
+      "tool": "browser_evaluate",
+      "status": "completed"
+    },
+    {
+      "scenario_id": "blank-input",
+      "tool": "browser_take_screenshot",
+      "status": "completed",
+      "evidence": "screenshots/blank-input.png"
+    }
+  ],
+  "evidence": [
+    {
+      "path": "screenshots/search-detail-return.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    },
+    {
+      "path": "screenshots/model-provenance.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    },
+    {
+      "path": "screenshots/cancel-replace.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    },
+    {
+      "path": "screenshots/unprepared-model.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    },
+    {
+      "path": "screenshots/recover-409.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    },
+    {
+      "path": "screenshots/blank-input.png",
+      "size_bytes": 68,
+      "sha256": "431ced6916a2a21a156e38701afe55bbd7f88969fbbfc56d7fe099d47f265460",
+      "kind": "screenshot"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "cached_input_tokens": 400,
+    "output_tokens": 300
+  },
+  "cleanup": {
+    "attempted": true,
+    "completed": true,
+    "processes_stopped": 1,
+    "private_output_deleted": true
+  }
+}

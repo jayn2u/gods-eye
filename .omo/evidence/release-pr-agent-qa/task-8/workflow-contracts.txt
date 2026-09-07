@@ -1,0 +1,7 @@
+scenario=eligible metadata -> admission -> recheck -> executor -> reporter
+request_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+request_run=100/1
+executor_invocations=1
+report_status=no_findings
+comment_mutations=1
+publication_status=published/no_findings
