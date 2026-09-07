@@ -1,7 +1,0 @@
-{
-  "invocation": "node .github/agent-qa/execute.cjs run --request <json> --candidate <path> --evidence <path> --job-start <timestamp>",
-  "exit_status": 0,
-  "status": "incomplete",
-  "reason": "auth_required",
-  "developer_auth_used": false
-}

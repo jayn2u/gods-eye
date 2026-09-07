@@ -225,3 +225,5 @@ node_modules/
 dist/
 playwright-report/
 test-results/
+.omo/
+.github/agent-qa/.omo/
