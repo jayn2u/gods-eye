@@ -1,0 +1,52 @@
+{
+  "repository": {
+    "full_name": "jayn2u/gods-eye",
+    "private": true
+  },
+  "pull_request": {
+    "number": 42,
+    "state": "open",
+    "draft": false,
+    "base": {
+      "ref": "release/1.0.0",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "head": {
+      "repo": {
+        "full_name": "jayn2u/gods-eye",
+        "id": 777
+      },
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "user": {
+      "login": "team-author"
+    }
+  },
+  "permission": {
+    "permission": "write"
+  },
+  "event": {
+    "repository": "jayn2u/gods-eye",
+    "pullNumber": 42,
+    "eventHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "controllerSha": "cccccccccccccccccccccccccccccccccccccccc",
+    "runId": 100,
+    "runAttempt": 1,
+    "admittedAt": "2026-09-07T00:00:00Z"
+  },
+  "workflow_run": {
+    "id": 100,
+    "run_attempt": 1,
+    "repository": {
+      "full_name": "jayn2u/gods-eye"
+    },
+    "name": "Agent QA",
+    "path": ".github/workflows/agent-qa.yml@refs/heads/develop",
+    "event": "pull_request_target",
+    "status": "completed",
+    "conclusion": "success",
+    "display_title": "Agent QA PR #42 head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "created_at": "2026-09-07T00:00:00Z"
+  }
+}

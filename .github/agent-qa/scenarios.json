@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "profiles": ["normal", "cancel-replace", "unprepared-model", "recover-409"],
+  "browser": {
+    "origin": "runtime-allocated-loopback-only",
+    "viewport": {"width": 1440, "height": 1000},
+    "allowed_tools": [
+      "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_click",
+      "browser_type", "browser_fill_form", "browser_select_option", "browser_press_key",
+      "browser_wait_for", "browser_take_screenshot", "browser_evaluate",
+      "browser_console_messages", "browser_network_requests", "browser_network_request"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "search-detail-return",
+      "profile": "normal",
+      "description": "A person wearing a blue coat",
+      "expected": "A ranked CUHK-PEDES synthetic image loads, detail opens, and Back to results restores the results screen."
+    },
+    {
+      "id": "model-provenance",
+      "profile": "normal",
+      "description": "A person in a blue coat with a black shoulder bag",
+      "expected": "ViT-B/16 is the initial default; selecting ViT-L/14 sends that model and preserves its model ID and active-index provenance in results and detail."
+    },
+    {
+      "id": "cancel-replace",
+      "profile": "cancel-replace",
+      "description": "A person in a red jacket carrying a backpack",
+      "replacement_description": "A person wearing a blue coat",
+      "expected": "Cancel the held ViT-L/14 request, submit the replacement with ViT-B/16, and confirm the delayed first reply never replaces qa-new-b16-v1."
+    },
+    {
+      "id": "unprepared-model",
+      "profile": "unprepared-model",
+      "description": "A person wearing a yellow scarf",
+      "expected": "ViT-L/14@336px remains visible and disabled with exact Demo Preparation guidance; no search is sent for it."
+    },
+    {
+      "id": "recover-409",
+      "profile": "recover-409",
+      "description": "A person wearing a green hat",
+      "replacement_description": "A person wearing a blue coat",
+      "expected": "The first request returns the deliberate 409, refreshes the catalog, disables ViT-L/14@336px, and a later ViT-B/16 retry succeeds as qa-recovered-b16-v1."
+    },
+    {
+      "id": "blank-input",
+      "profile": "normal",
+      "description": "",
+      "expected": "Submitting shows Enter a description to search, preserves an empty input, and sends no search request."
+    }
+  ]
+}

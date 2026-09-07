@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jayn2u/gods-eye/agent-qa/agent-result.schema.json",
+  "title": "God's Eye browser agent result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "summary", "scenarios", "findings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "summary": { "$ref": "#/$defs/text" },
+    "scenarios": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": { "$ref": "#/$defs/scenario" }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 50,
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "scenarioId": { "enum": ["search-detail-return", "model-provenance", "cancel-replace", "unprepared-model", "recover-409", "blank-input"] },
+    "path": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)[^\\u0000-\\u001f\\u007f]{1,240}$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "steps", "expected", "actual", "evidence"],
+      "properties": {
+        "id": { "$ref": "#/$defs/scenarioId" },
+        "status": { "enum": ["observed", "finding", "incomplete"] },
+        "steps": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+        "expected": { "$ref": "#/$defs/text" },
+        "actual": { "$ref": "#/$defs/text" },
+        "evidence": { "type": "array", "maxItems": 10, "uniqueItems": true, "items": { "$ref": "#/$defs/path" } }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "severity", "title", "description", "evidence"],
+      "properties": {
+        "scenario_id": { "$ref": "#/$defs/scenarioId" },
+        "severity": { "enum": ["low", "medium", "high"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "description": { "$ref": "#/$defs/text" },
+        "evidence": { "type": "array", "minItems": 1, "maxItems": 10, "uniqueItems": true, "items": { "$ref": "#/$defs/path" } }
+      }
+    }
+  }
+}

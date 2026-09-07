@@ -42,3 +42,6 @@ RUN_LAUNCHER_COMPOSE_SMOKE=1 uv run pytest \
 ```
 
 This smoke path is test-only and does not claim that fixture assets constitute a real Full Demo.
+
+The repository's separate advisory browser-QA runner is documented in
+[Agent QA operator guide](agent-qa.md). It does not use this Compose smoke path.

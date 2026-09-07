@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "summary": "All six fixture journeys completed without browser-observed findings.",
+  "scenarios": [
+    {"id":"search-detail-return","status":"observed","steps":["Searched, opened detail, and returned."],"expected":"Expected result detail flow.","actual":"Observed result detail flow.","evidence":["screenshots/search-detail-return.png"]},
+    {"id":"model-provenance","status":"observed","steps":["Selected ViT-L/14 and inspected provenance."],"expected":"Expected selected model provenance.","actual":"Observed selected model provenance.","evidence":["screenshots/model-provenance.png"]},
+    {"id":"cancel-replace","status":"observed","steps":["Cancelled and replaced the held search."],"expected":"Expected newer reply to remain.","actual":"Observed newer reply remain.","evidence":["screenshots/cancel-replace.png"]},
+    {"id":"unprepared-model","status":"observed","steps":["Inspected disabled model guidance."],"expected":"Expected preparation guidance.","actual":"Observed preparation guidance.","evidence":["screenshots/unprepared-model.png"]},
+    {"id":"recover-409","status":"observed","steps":["Observed 409, refresh, and retry."],"expected":"Expected recovery after 409.","actual":"Observed recovery after 409.","evidence":["screenshots/recover-409.png"]},
+    {"id":"blank-input","status":"observed","steps":["Submitted blank input."],"expected":"Expected validation without search.","actual":"Observed validation without search.","evidence":["screenshots/blank-input.png"]}
+  ],
+  "findings": []
+}

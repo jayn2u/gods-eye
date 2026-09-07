@@ -1,0 +1,229 @@
+name: Agent QA
+run-name: "Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - edited
+      - converted_to_draft
+      - closed
+
+permissions: {}
+
+concurrency:
+  group: gods-eye-agent-qa-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  admission:
+    name: Admit trusted release PR
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      status: ${{ steps.admit.outputs.status }}
+      request: ${{ steps.admit.outputs.request }}
+    steps:
+      - name: Check out immutable trusted control code
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-control
+          persist-credentials: false
+
+      - name: Install trusted controller dependencies
+        run: npm ci --prefix trusted-control/.github/agent-qa --omit=dev
+
+      - name: Re-fetch and admit the pull request
+        id: admit
+        # actions/github-script v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CONTROLLER_SHA: ${{ github.workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        with:
+          script: |
+            const path = require('node:path');
+            const controller = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              'trusted-control/.github/agent-qa/controller.cjs',
+            ));
+            const decision = await controller.admitPullRequest({
+              github,
+              repository: process.env.EXPECTED_REPOSITORY,
+              pullNumber: Number(process.env.PULL_NUMBER),
+              eventHeadSha: process.env.EVENT_HEAD_SHA,
+              controllerSha: process.env.CONTROLLER_SHA,
+              runId: Number(process.env.RUN_ID),
+              runAttempt: Number(process.env.RUN_ATTEMPT),
+              admittedAt: new Date().toISOString(),
+            });
+            core.setOutput('status', decision.status);
+            core.info(`Agent QA admission: ${decision.status}/${decision.reason}`);
+            if (decision.request) {
+              core.setOutput('request', JSON.stringify(decision.request));
+            }
+
+  qa:
+    name: Fixture browser QA
+    needs: admission
+    if: needs.admission.outputs.status == 'admitted'
+    runs-on: [self-hosted, linux, x64, gods-eye-agent-qa]
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    concurrency:
+      group: gods-eye-agent-qa-global
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Capture the running-job start time
+        id: clock
+        shell: bash
+        run: printf 'started_at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Check out immutable trusted control code
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-control
+          persist-credentials: false
+
+      - name: Fetch the candidate through the base repository PR ref
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          path: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the admitted candidate head
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: test "$(git -C "$CANDIDATE_PATH" rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+
+      - name: Prepare isolated run paths and request
+        id: paths
+        env:
+          QA_REQUEST_JSON: ${{ needs.admission.outputs.request }}
+        shell: bash
+        run: |
+          qa_root="${QA_ROOT:-$HOME/.local/share/gods-eye-agent-qa}"
+          run_root="$qa_root/runs/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          request_path="$run_root/request.json"
+          evidence_path="$run_root/public"
+          install -d -m 0700 "$run_root" "$evidence_path"
+          printf '%s\n' "$QA_REQUEST_JSON" > "$request_path"
+          chmod 0600 "$request_path"
+          printf 'qa_root=%s\n' "$qa_root" >> "$GITHUB_OUTPUT"
+          printf 'request=%s\n' "$request_path" >> "$GITHUB_OUTPUT"
+          printf 'evidence=%s\n' "$evidence_path" >> "$GITHUB_OUTPUT"
+
+      - name: Recheck current pull request eligibility
+        id: recheck
+        # actions/github-script v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          QA_REQUEST_JSON: ${{ needs.admission.outputs.request }}
+        with:
+          script: |
+            const path = require('node:path');
+            const controller = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              'trusted-control/.github/agent-qa/controller.cjs',
+            ));
+            const decision = await controller.recheckPullRequest({
+              github,
+              request: JSON.parse(process.env.QA_REQUEST_JSON),
+            });
+            core.setOutput('status', decision.status);
+            core.info(`Agent QA recheck: ${decision.status}/${decision.reason}`);
+
+      - name: Run bounded subscription Agent QA
+        if: steps.recheck.outputs.status == 'admitted'
+        env:
+          QA_ROOT: ${{ steps.paths.outputs.qa_root }}
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
+          REQUEST_PATH: ${{ steps.paths.outputs.request }}
+          CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          EVIDENCE_PATH: ${{ steps.paths.outputs.evidence }}
+          JOB_START: ${{ steps.clock.outputs.started_at }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          GOOGLE_API_KEY: ""
+        shell: bash
+        run: |
+          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" run \
+            --request "$REQUEST_PATH" \
+            --candidate "$CANDIDATE_PATH" \
+            --evidence "$EVIDENCE_PATH" \
+            --job-start "$JOB_START"
+
+      - name: Stage validated public evidence
+        id: stage
+        if: always() && steps.recheck.outputs.status == 'admitted'
+        env:
+          CONTROL_ROOT: ${{ github.workspace }}/trusted-control/.github/agent-qa
+          REQUEST_PATH: ${{ steps.paths.outputs.request }}
+          EVIDENCE_ROOT: ${{ steps.paths.outputs.evidence }}
+        shell: bash
+        run: |
+          report_path="$EVIDENCE_ROOT/report.json"
+          if [ ! -f "$report_path" ]; then
+            printf 'ready=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          upload_root="$(mktemp -d "$RUNNER_TEMP/agent-qa-upload.XXXXXX")"
+          UPLOAD_ROOT="$upload_root" node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const {
+            readBoundedJson,
+            validateEvidenceManifest,
+            validateReport,
+            validateRequest,
+          } = require(path.join(process.env.CONTROL_ROOT, 'contracts.cjs'));
+          const request = validateRequest(readBoundedJson(process.env.REQUEST_PATH));
+          const reportPath = path.join(process.env.EVIDENCE_ROOT, 'report.json');
+          const report = validateReport(readBoundedJson(reportPath), request);
+          validateEvidenceManifest(process.env.EVIDENCE_ROOT, report.evidence);
+          fs.copyFileSync(reportPath, path.join(process.env.UPLOAD_ROOT, 'report.json'));
+          for (const entry of report.evidence) {
+            const destination = path.join(process.env.UPLOAD_ROOT, entry.path);
+            fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+            fs.copyFileSync(path.join(process.env.EVIDENCE_ROOT, entry.path), destination);
+          }
+          NODE
+          printf 'ready=true\n' >> "$GITHUB_OUTPUT"
+          printf 'path=%s\n' "$upload_root" >> "$GITHUB_OUTPUT"
+
+      - name: Upload validated public evidence
+        if: always() && steps.stage.outputs.ready == 'true'
+        # actions/upload-artifact v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.stage.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: false
