@@ -1,0 +1,8 @@
+name: Unsafe inherited token
+on: pull_request_target
+permissions: write-all
+jobs:
+  qa:
+    runs-on: self-hosted
+    steps:
+      - run: node candidate/.github/agent-qa/execute.cjs
