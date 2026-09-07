@@ -1,0 +1,40 @@
+{
+  "repository": {
+    "full_name": "jayn2u/gods-eye",
+    "private": true
+  },
+  "pull_request": {
+    "number": 52,
+    "state": "open",
+    "draft": false,
+    "base": {
+      "ref": "release/1.2.0",
+      "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "head": {
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "repo": {
+        "full_name": "trusted-team/gods-eye-change",
+        "id": 98765
+      }
+    },
+    "user": {
+      "login": "team-author"
+    },
+    "author_association": "NONE"
+  },
+  "permission": {
+    "permission": "write",
+    "role_name": "maintain"
+  },
+  "event": {
+    "repository": "jayn2u/gods-eye",
+    "pullNumber": 52,
+    "eventHeadSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "controllerSha": "cccccccccccccccccccccccccccccccccccccccc",
+    "runId": 700,
+    "runAttempt": 1,
+    "admittedAt": "2026-09-07T09:00:00Z",
+    "actor": "human-rerunner"
+  }
+}

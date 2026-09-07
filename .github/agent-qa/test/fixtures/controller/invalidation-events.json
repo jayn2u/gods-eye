@@ -1,0 +1,9 @@
+[
+  { "name": "develop target", "changes": { "base.ref": "develop" }, "status": "skipped", "reason": "base_not_release" },
+  { "name": "empty release suffix", "changes": { "base.ref": "release/" }, "status": "skipped", "reason": "base_not_release" },
+  { "name": "nested release suffix", "changes": { "base.ref": "release/x/y" }, "status": "skipped", "reason": "base_not_release" },
+  { "name": "draft conversion", "changes": { "draft": true }, "status": "skipped", "reason": "pull_request_draft" },
+  { "name": "closed pull request", "changes": { "state": "closed" }, "status": "skipped", "reason": "pull_request_closed" },
+  { "name": "retarget away", "changes": { "base.ref": "develop" }, "status": "skipped", "reason": "base_not_release" },
+  { "name": "new head", "changes": { "head.sha": "dddddddddddddddddddddddddddddddddddddddd" }, "status": "skipped", "reason": "source_changed" }
+]
