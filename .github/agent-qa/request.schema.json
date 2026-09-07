@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jayn2u/gods-eye/agent-qa/request.schema.json",
+  "title": "God's Eye agent QA request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "pr_number", "head", "base", "controller_sha", "run", "author", "admitted_at"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repository": { "const": "jayn2u/gods-eye" },
+    "pr_number": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "id", "sha"],
+      "properties": {
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", "minLength": 3, "maxLength": 200 },
+        "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "sha": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "base": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "sha"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^release/[^/\\u0000-\\u001f\\u007f]{1,200}$", "maxLength": 208 },
+        "sha": { "$ref": "#/$defs/sha" }
+      }
+    },
+    "controller_sha": { "$ref": "#/$defs/sha" },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "attempt"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      }
+    },
+    "author": { "type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,98}[A-Za-z0-9])?$", "minLength": 1, "maxLength": 100 },
+    "admitted_at": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$", "maxLength": 30 }
+  }
+}

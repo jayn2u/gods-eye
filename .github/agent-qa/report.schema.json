@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jayn2u/gods-eye/agent-qa/report.schema.json",
+  "title": "God's Eye agent QA supervisor report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request", "tested_head_sha", "controller_sha", "started_at", "finished_at", "tools", "status", "reason", "deterministic_results", "scenarios", "findings", "tool_calls", "evidence", "cleanup"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "request": { "$ref": "request.schema.json" },
+    "tested_head_sha": { "$ref": "#/$defs/sha" },
+    "controller_sha": { "$ref": "#/$defs/sha" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "finished_at": { "$ref": "#/$defs/timestamp" },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "codex", "playwright_mcp", "chromium"],
+      "properties": {
+        "node": { "$ref": "#/$defs/version" },
+        "codex": { "$ref": "#/$defs/version" },
+        "playwright_mcp": { "$ref": "#/$defs/version" },
+        "chromium": { "$ref": "#/$defs/version" },
+        "model": { "$ref": "#/$defs/version" }
+      }
+    },
+    "status": { "enum": ["no_findings", "findings", "incomplete", "cancelled"] },
+    "reason": { "enum": ["none", "auth_required", "rate_limited", "timeout", "setup_failed", "browser_unavailable", "invalid_output", "stale", "source_changed", "runner_failed", "permission_lookup_failed"] },
+    "deterministic_results": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "harness_started", "app_started", "duration_ms"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$" },
+          "status": { "enum": ["passed", "failed", "not_run"] },
+          "harness_started": { "type": "boolean" },
+          "app_started": { "type": "boolean" },
+          "duration_ms": { "type": "integer", "minimum": 0, "maximum": 900000 },
+          "details": { "$ref": "#/$defs/text" }
+        }
+      }
+    },
+    "scenarios": { "type": "array", "minItems": 6, "maxItems": 6, "items": { "$ref": "agent-result.schema.json#/$defs/scenario" } },
+    "findings": { "type": "array", "maxItems": 50, "items": { "$ref": "agent-result.schema.json#/$defs/finding" } },
+    "tool_calls": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenario_id", "tool", "status"],
+        "properties": {
+          "scenario_id": { "$ref": "agent-result.schema.json#/$defs/scenarioId" },
+          "tool": { "type": "string", "pattern": "^browser_[a-z_]{1,80}$" },
+          "status": { "enum": ["completed", "failed"] },
+          "evidence": { "$ref": "agent-result.schema.json#/$defs/path" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "size_bytes", "sha256"],
+        "properties": {
+          "path": { "$ref": "agent-result.schema.json#/$defs/path" },
+          "kind": { "enum": ["screenshot", "trace", "steps", "summary"] },
+          "size_bytes": { "type": "integer", "minimum": 1, "maximum": 10485760 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_tokens", "cached_input_tokens", "output_tokens"],
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/tokenCount" },
+        "cached_input_tokens": { "$ref": "#/$defs/tokenCount" },
+        "output_tokens": { "$ref": "#/$defs/tokenCount" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "completed", "processes_stopped", "private_output_deleted"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "completed": { "type": "boolean" },
+        "processes_stopped": { "type": "integer", "minimum": 0, "maximum": 1000 },
+        "private_output_deleted": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "timestamp": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?Z$", "maxLength": 30 },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "version": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f]{1,100}$" },
+    "tokenCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+  }
+}

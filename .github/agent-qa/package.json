@@ -1,0 +1,19 @@
+{
+  "name": "gods-eye-agent-qa",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "ajv": "8.17.1"
+  },
+  "devDependencies": {
+    "@openai/codex": "0.153.3",
+    "@playwright/mcp": "0.0.80"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
