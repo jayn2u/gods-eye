@@ -29,16 +29,19 @@ when unset, the helpers use `$HOME/.local/share/gods-eye-agent-qa`.
 export QA_ROOT="$HOME/.local/share/gods-eye-agent-qa"
 bash .github/agent-qa/setup-runner.sh install
 bash .github/agent-qa/setup-runner.sh register
-bash .github/agent-qa/setup-runner.sh login
+bash .github/agent-qa/setup-runner.sh login --device-auth
 bash .github/agent-qa/setup-runner.sh start
 ```
 
 `register` uses the already authenticated GitHub CLI to obtain a short-lived registration token;
-do not copy, print, or save that token. `login` starts the normal interactive Codex subscription
-login for the CI-only `CODEX_HOME` at `$QA_ROOT/codex-home`. It takes the auth lock itself, so use
-the same command for a normal credential refresh. It does not copy the developer session, change
-`HOME`, or allow an API-key fallback. A present auth file alone is not proof that the subscription
-can run QA.
+do not copy, print, or save that token. On this headless runner, `login --device-auth` is the
+primary Codex subscription login for the CI-only `CODEX_HOME` at `$QA_ROOT/codex-home`: Codex
+prints a URL and one-time code, which the operator completes in a browser on another device. Device
+authentication may need to be enabled in personal security settings or workspace permissions; see
+[Log in on headless devices](https://learn.chatgpt.com/docs/auth#login-on-headless-devices). Bare
+`login` remains available for a normal interactive refresh. Both forms take the auth lock, do not
+copy the developer session, change `HOME`, or allow an API-key fallback. A present auth file alone
+is not proof that the subscription can run QA.
 
 Use the read-only checks before start, after a refresh, and while investigating a report:
 

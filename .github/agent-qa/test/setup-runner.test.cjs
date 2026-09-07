@@ -65,7 +65,12 @@ cat >"$prefix/node_modules/.bin/codex" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == '--version' ]]; then echo 'codex-cli 0.153.3'; exit; fi
 if [[ "$1" == 'login' && "$#" -ge 2 && "$2" == 'status' ]]; then echo 'Logged in using ChatGPT'; exit; fi
-if [[ "$1" == 'login' ]]; then printf '{"auth_mode":"chatgpt","tokens":{"access_token":"LOGIN_CANARY"}}' >"$CODEX_HOME/auth.json"; exit; fi
+if [[ "$1" == 'login' ]]; then
+  if [[ -v OPENAI_API_KEY ]]; then api_key='set'; else api_key='unset'; fi
+  printf '%s\t%s\t%s\n' "$CODEX_HOME" "$*" "$api_key" >>"$QA_TEST_STATE/codex-login-calls"
+  printf '{"auth_mode":"chatgpt","tokens":{"access_token":"LOGIN_CANARY"}}' >"$CODEX_HOME/auth.json"
+  exit
+fi
 exit 1
 EOF
 chmod 700 "$prefix/node_modules/.bin/codex"`);
@@ -198,31 +203,53 @@ test('register rejects a conflicting remote runner without requesting a token', 
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /REGISTRATION_TOKEN_CANARY/);
 });
 
-test('login fails on an occupied auth lock before invoking Codex', (t) => {
+test('device-auth login fails on an occupied auth lock before invoking Codex', (t) => {
   const f = fixture(t);
   execFileSync('bash', [setup, 'install'], { env: f.env });
   const flock = path.join(f.temp, 'busy-flock');
   executable(flock, 'exit 1');
-  const result = spawnSync('bash', [setup, 'login'], {
+  const result = spawnSync('bash', [setup, 'login', '--device-auth'], {
     env: { ...f.env, QA_FLOCK_BIN: flock }, encoding: 'utf8',
   });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /auth lock is occupied/);
   assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home/auth.json')), false);
+  assert.equal(fs.existsSync(path.join(f.state, 'codex-login-calls')), false);
 });
 
-test('login and start use only the CI auth home after all preflight checks pass', (t) => {
+test('bare and device-auth login use only the CI auth home after all preflight checks pass', (t) => {
   const f = fixture(t);
   execFileSync('bash', [setup, 'install'], { env: f.env });
   execFileSync('bash', [setup, 'register'], { env: f.env });
   fs.writeFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'preserve-me');
-  execFileSync('bash', [setup, 'login'], { env: f.env });
+  execFileSync('bash', [setup, 'login'], { env: { ...f.env, OPENAI_API_KEY: 'API_KEY_SENTINEL' } });
+  execFileSync('bash', [setup, 'login', '--device-auth'], { env: { ...f.env, OPENAI_API_KEY: 'API_KEY_SENTINEL' } });
   const ciAuth = fs.readFileSync(path.join(f.qaRoot, 'codex-home/auth.json'), 'utf8');
   assert.match(ciAuth, /"auth_mode":"chatgpt"/);
+  assert.equal(fs.statSync(path.join(f.qaRoot, 'codex-home/auth.json')).mode & 0o777, 0o600);
   assert.equal(fs.readFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'utf8'), 'preserve-me');
   assert.equal(fs.readFileSync(path.join(f.testHome, '.codex/auth.json'), 'utf8'), 'DEVELOPER_AUTH_SENTINEL');
+  assert.deepEqual(
+    fs.readFileSync(path.join(f.state, 'codex-login-calls'), 'utf8').trim().split('\n'),
+    [`${path.join(f.qaRoot, 'codex-home')}\tlogin\tunset`, `${path.join(f.qaRoot, 'codex-home')}\tlogin --device-auth\tunset`],
+  );
   const started = execFileSync('bash', [setup, 'start'], { env: f.env, encoding: 'utf8' });
   assert.match(started, /Started gods-eye-agent-qa-runner\.service/);
+});
+
+test('login rejects unallowlisted and extra options without invoking Codex', (t) => {
+  const f = fixture(t);
+  execFileSync('bash', [setup, 'install'], { env: f.env });
+  for (const args of [
+    ['login', '--with-api-key'],
+    ['login', '--device-auth', '--enable', 'unsafe'],
+  ]) {
+    const result = spawnSync('bash', [setup, ...args], { env: f.env, encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /only accepts|at most one option/);
+  }
+  assert.equal(fs.existsSync(path.join(f.state, 'codex-login-calls')), false);
+  assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home/auth.json')), false);
 });
 
 test('help exposes only the non-destructive lifecycle commands', () => {

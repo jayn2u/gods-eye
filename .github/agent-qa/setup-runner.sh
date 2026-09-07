@@ -19,11 +19,13 @@ NPM_BIN="${QA_NPM_BIN:-npm}"
 
 usage() {
   cat <<'EOF'
-Usage: setup-runner.sh <install|register|login|start|status>
+Usage:
+  setup-runner.sh <install|register|start|status>
+  setup-runner.sh login [--device-auth]
 
   install   Install the pinned runner, locked toolchain, Chromium, and user unit.
   register  Register this repository's single gods-eye-agent-qa runner.
-  login     Complete interactive ChatGPT login in the CI-only CODEX_HOME.
+  login     Complete ChatGPT login in the CI-only CODEX_HOME; --device-auth supports headless hosts.
   start     Verify prerequisites, then enable and start the user service.
   status    Print the non-secret JSON preflight report.
 EOF
@@ -234,6 +236,8 @@ register_runner() {
 }
 
 login_codex() {
+  local -a login_args=(login)
+  [[ "$#" == 0 ]] || login_args+=(--device-auth)
   require_safe_root
   [[ -x "${QA_ROOT}/toolchain/node_modules/.bin/codex" ]] || die "run install first"
   mkdir -p "${QA_ROOT}/codex-home"
@@ -241,7 +245,7 @@ login_codex() {
   (
     "${FLOCK_BIN}" -n 9 || die "the CI Codex auth lock is occupied"
     unset OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY
-    CODEX_HOME="${QA_ROOT}/codex-home" "${QA_ROOT}/toolchain/node_modules/.bin/codex" login
+    CODEX_HOME="${QA_ROOT}/codex-home" "${QA_ROOT}/toolchain/node_modules/.bin/codex" "${login_args[@]}"
     [[ -f "${QA_ROOT}/codex-home/auth.json" ]] && chmod 600 "${QA_ROOT}/codex-home/auth.json"
   ) 9>"${QA_ROOT}/auth.lock"
 }
@@ -263,7 +267,13 @@ main() {
   case "${1:-}" in
     install) [[ "$#" == 1 ]] || die "install takes no arguments"; install_all ;;
     register) [[ "$#" == 1 ]] || die "register takes no arguments"; register_runner ;;
-    login) [[ "$#" == 1 ]] || die "login takes no arguments"; login_codex ;;
+    login)
+      case "$#" in
+        1) login_codex ;;
+        2) [[ "$2" == "--device-auth" ]] || die "login only accepts --device-auth"; login_codex "$2" ;;
+        *) die "login accepts at most one option: --device-auth" ;;
+      esac
+      ;;
     start) [[ "$#" == 1 ]] || die "start takes no arguments"; start_runner ;;
     status) [[ "$#" == 1 ]] || die "status takes no arguments"; doctor --json ;;
     --help|-h|help) usage ;;
