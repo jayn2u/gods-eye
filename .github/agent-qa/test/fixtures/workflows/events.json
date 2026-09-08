@@ -40,7 +40,7 @@
     "repository": {
       "full_name": "jayn2u/gods-eye"
     },
-    "name": "Agent QA",
+    "name": "Agent QA PR #42 head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "path": ".github/workflows/agent-qa.yml@refs/heads/develop",
     "event": "pull_request_target",
     "status": "completed",

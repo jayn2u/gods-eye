@@ -11,13 +11,13 @@ const { spawnSync } = require('node:child_process');
 
 const { SCENARIO_IDS, validateReport } = require('./contracts.cjs');
 const {
-  BOT_LOGIN, COMMENT_MARKER, inspectArtifactZip, parseRunName,
+  BOT_LOGIN, COMMENT_MARKER, WORKFLOW_PATH, inspectArtifactZip, parseWorkflowRunIdentity,
 } = require('./reporter.cjs');
 
 const EXPECTED_REPOSITORY = 'jayn2u/gods-eye';
 const DEFAULT_BRANCH = 'develop';
-const QA_WORKFLOW = 'Agent QA';
 const QA_WORKFLOW_FILE = 'agent-qa.yml';
+const COMPOSE_JOB_NAME = 'Demo Runtime Compose smoke';
 const REPORT_WORKFLOW_FILE = 'agent-qa-report.yml';
 const RUNNER_NAME = 'gods-eye-agent-qa';
 const MAX_PAGES = 20;
@@ -460,8 +460,10 @@ function loadRegistry(evidenceRoot) {
 }
 
 function matchingRun(run, prNumber, headSha) {
-  const identity = parseRunName(run?.display_title);
-  return run?.name === QA_WORKFLOW && run?.event === 'pull_request_target'
+  const identity = parseWorkflowRunIdentity(run);
+  return run?.repository?.full_name === EXPECTED_REPOSITORY
+    && run?.path === WORKFLOW_PATH
+    && run?.event === 'pull_request_target'
     && identity?.prNumber === prNumber && identity?.headSha === headSha;
 }
 
@@ -584,9 +586,9 @@ async function assertComposeSkipped(adapter, headSha) {
   const run = runs.find((candidate) => candidate.head_sha === headSha && candidate.event === 'pull_request');
   if (!run) throw new LiveVerificationError('tests_run_missing', 'pull-request Tests workflow run missing');
   const jobs = await adapter.jobs(run.id, run.run_attempt);
-  const compose = jobs.find((job) => job.name === 'Compose smoke');
+  const compose = jobs.find((job) => job.name === COMPOSE_JOB_NAME);
   if (!compose || compose.conclusion !== 'skipped') {
-    throw new LiveVerificationError('compose_not_skipped', 'Compose smoke did not skip on pull_request');
+    throw new LiveVerificationError('compose_not_skipped', `${COMPOSE_JOB_NAME} did not skip on pull_request`);
   }
   return { run_id: run.id, job_id: compose.id, conclusion: compose.conclusion };
 }
@@ -952,6 +954,7 @@ module.exports = Object.freeze({
   GhAdapter,
   LiveVerificationError,
   adversarialLedger,
+  assertComposeSkipped,
   branchNames,
   cleanupOwned,
   createOwnedBranch,

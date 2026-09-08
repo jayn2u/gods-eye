@@ -16,6 +16,7 @@ const DEFAULT_RUNTIME_MS = 12 * 60 * 1000
 const FIXTURE_MODEL_ID = 'openai/clip-vit-base-patch16'
 const FIXTURE_INDEX_VERSION = 'fixture-clip-vit-b-16-v1'
 const MANIFEST_VERSION = 1
+const TEMPORARY_DIRECTORY_PREFIX = 'gods-eye-agent-qa-'
 
 class RuntimeError extends Error {
   constructor(code, message, details = undefined) {
@@ -105,9 +106,9 @@ function identityMatches(expected) {
 
 function processGroupMembers(pgid) {
   const members = []
-  for (const entry of fs.readdirSync('/proc', { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue
-    const identity = readProcessIdentity(Number(entry.name))
+  for (const entry of fs.readdirSync('/proc')) {
+    if (!/^\d+$/.test(entry)) continue
+    const identity = readProcessIdentity(Number(entry))
     if (identity?.pgid === pgid) members.push(identity.pid)
   }
   return members
@@ -191,6 +192,7 @@ class ProcessSupervisor {
     this.receiptPath = path.join(this.runRoot, 'cleanup.json')
     this.records = new Map()
     this.ownedPaths = []
+    this.temporaryDirectory = null
     this.stopped = false
     this.stopPromise = null
     this.deadlineTimer = null
@@ -200,8 +202,15 @@ class ProcessSupervisor {
   async initialize() {
     await ensurePrivateDirectory(this.runRoot)
     await ensurePrivateDirectory(path.join(this.runRoot, 'logs'))
-    await ensurePrivateDirectory(path.join(this.runRoot, 'tmp'))
-    await this.#writeManifest()
+    try {
+      this.temporaryDirectory = await fsPromises.mkdtemp(path.join(os.tmpdir(), TEMPORARY_DIRECTORY_PREFIX))
+      await fsPromises.chmod(this.temporaryDirectory, 0o700)
+      this.ownedPaths.push({ path: this.temporaryDirectory, kind: 'temporary-directory', cleanup: true })
+      await this.#writeManifest()
+    } catch (error) {
+      if (this.temporaryDirectory) await fsPromises.rm(this.temporaryDirectory, { recursive: true, force: true })
+      throw error
+    }
     this.deadlineTimer = setTimeout(() => { void this.stop('deadline') }, remainingMilliseconds(this.deadline) + 25)
     return this
   }
@@ -234,6 +243,7 @@ class ProcessSupervisor {
 
   async spawn(name, command, args, { cwd, env }) {
     if (this.stopped) throw new RuntimeError('SUPERVISOR_STOPPED', 'Cannot start a process after cleanup')
+    if (!this.temporaryDirectory) throw new RuntimeError('SUPERVISOR_NOT_INITIALIZED', 'Cannot start a process before initialization')
     if (remainingMilliseconds(this.deadline) <= 0) throw new RuntimeError('DEADLINE_EXCEEDED', `Deadline expired before ${name}`)
     const resolvedCwd = assertAbsolutePath(cwd, `${name} cwd`)
     const stdoutPath = path.join(this.runRoot, 'logs', `${name}.stdout.log`)
@@ -246,7 +256,7 @@ class ProcessSupervisor {
     try {
       child = childProcess.spawn(command, args, {
         cwd: resolvedCwd,
-        env: { ...env, GODS_EYE_AGENT_QA_PROCESS_TOKEN: processToken },
+        env: { ...env, TMPDIR: this.temporaryDirectory, GODS_EYE_AGENT_QA_PROCESS_TOKEN: processToken },
         detached: true,
         stdio: ['ignore', stdout, stderr],
       })
@@ -340,7 +350,12 @@ class ProcessSupervisor {
         pathResults.push({ ...owned, outcome: 'retained' })
         continue
       }
-      if (!isWithin(this.runRoot, owned.path) || owned.path === this.runRoot) {
+      const isRunChild = isWithin(this.runRoot, owned.path) && owned.path !== this.runRoot
+      const isPrivateTemporaryDirectory = owned.kind === 'temporary-directory' &&
+        owned.path === this.temporaryDirectory &&
+        path.dirname(owned.path) === path.resolve(os.tmpdir()) &&
+        path.basename(owned.path).startsWith(TEMPORARY_DIRECTORY_PREFIX)
+      if (!isRunChild && !isPrivateTemporaryDirectory) {
         pathResults.push({ ...owned, outcome: 'refused' })
         continue
       }
@@ -507,11 +522,10 @@ async function startRuntime({
   const supervisor = await new ProcessSupervisor({ runRoot, deadline }).initialize()
   const cancel = () => { void supervisor.stop('cancelled') }
   signal?.addEventListener('abort', cancel, { once: true })
-  supervisor.registerOwnedPath(path.join(runRoot, 'tmp'), 'temporary-directory')
   supervisor.registerOwnedPath(path.join(runRoot, 'assets'), 'fixture-asset-roots')
   supervisor.registerOwnedPath(path.join(runRoot, 'vite.runtime.config.mjs'), 'vite-wrapper')
   try {
-    for (const directory of ['assets/datasets', 'assets/indexes', 'assets/huggingface', 'tmp']) {
+    for (const directory of ['assets/datasets', 'assets/indexes', 'assets/huggingface']) {
       await ensurePrivateDirectory(path.join(runRoot, directory))
     }
     const baseEnvironment = sanitizedChildEnvironment(runRoot)

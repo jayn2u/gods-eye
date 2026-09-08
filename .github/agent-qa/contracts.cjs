@@ -35,6 +35,7 @@ const REPORT_REASONS = Object.freeze([
   'runner_failed',
   'permission_lookup_failed',
 ]);
+const SAFE_EVIDENCE_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*\\)[^\u0000-\u001f\u007f]{1,240}$/u;
 const ajv = new Ajv2020({ allErrors: true, strict: true });
 ajv.addSchema(requestSchema);
 ajv.addSchema(agentResultSchema);
@@ -63,6 +64,18 @@ function assertExactScenarioSet(scenarios, code) {
   }
 }
 
+function assertDistinctEvidence(entries, code) {
+  if (entries.some(({ evidence }) => new Set(evidence).size !== evidence.length)) {
+    throw new ContractError(code);
+  }
+}
+
+function assertSafeEvidencePaths(entries, code) {
+  if (entries.some(({ evidence }) => evidence.some((evidencePath) => !SAFE_EVIDENCE_PATH.test(evidencePath)))) {
+    throw new ContractError(code);
+  }
+}
+
 function validateRequest(value) {
   assertSchema('request', value);
   if (!Number.isFinite(Date.parse(value.admitted_at))) {
@@ -74,6 +87,10 @@ function validateRequest(value) {
 function validateAgentResult(value) {
   assertSchema('agentResult', value);
   assertExactScenarioSet(value.scenarios, 'invalid_agentResult_scenarios');
+  assertDistinctEvidence(value.scenarios, 'invalid_agentResult_evidence');
+  assertDistinctEvidence(value.findings, 'invalid_agentResult_evidence');
+  assertSafeEvidencePaths(value.scenarios, 'invalid_agentResult_evidence');
+  assertSafeEvidencePaths(value.findings, 'invalid_agentResult_evidence');
   const scenarioStatus = new Map(value.scenarios.map(({ id, status }) => [id, status]));
   if (value.findings.some(({ scenario_id }) => scenarioStatus.get(scenario_id) !== 'finding')) {
     throw new ContractError('invalid_agentResult_finding');
@@ -104,6 +121,10 @@ function validateReport(value, expectedRequest) {
   assertSchema('report', value);
   validateRequest(value.request);
   assertExactScenarioSet(value.scenarios, 'invalid_report_scenarios');
+  assertDistinctEvidence(value.scenarios, 'invalid_report_evidence');
+  assertDistinctEvidence(value.findings, 'invalid_report_evidence');
+  assertSafeEvidencePaths(value.scenarios, 'invalid_report_evidence');
+  assertSafeEvidencePaths(value.findings, 'invalid_report_evidence');
   if (expectedRequest && !sameRequestIdentity(expectedRequest, value.request)) {
     throw new ContractError('unexpected_report_identity');
   }

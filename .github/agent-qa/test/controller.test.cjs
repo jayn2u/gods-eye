@@ -18,6 +18,7 @@ const {
 } = require('../controller.cjs');
 
 const FIXTURES = join(__dirname, 'fixtures', 'controller');
+const ACTUAL_RUN = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'actions-run-identity.json'), 'utf8')).agent_qa_run;
 
 function fixture(name) {
   return JSON.parse(readFileSync(join(FIXTURES, name), 'utf8'));
@@ -104,6 +105,24 @@ test('formats and parses only the exact trusted run-name grammar', () => {
   ]) {
     assert.equal(parseRunName(forged), null);
   }
+});
+
+test('selects the actual API dynamic run-name while rejecting misleading names', () => {
+  const identity = { prNumber: 53, headSha: '7e85081d261b3a217b422c54b4f0b95f8ce9ffe7' };
+  assert.strictEqual(selectLatestGeneration([ACTUAL_RUN], identity), ACTUAL_RUN);
+  assert.equal(selectLatestGeneration([{ ...ACTUAL_RUN, name: 'Agent QA' }], identity), null);
+  assert.equal(selectLatestGeneration([{
+    ...ACTUAL_RUN,
+    name: `Agent QA PR #54 head ${identity.headSha}`,
+  }], identity), null);
+  const forgedPath = { ...ACTUAL_RUN, id: ACTUAL_RUN.id + 1, path: '.github/workflows/forged.yml' };
+  const forgedRepository = {
+    ...ACTUAL_RUN,
+    id: ACTUAL_RUN.id + 2,
+    repository: { full_name: 'attacker/fork' },
+  };
+  assert.strictEqual(selectLatestGeneration([ACTUAL_RUN, forgedPath, forgedRepository], identity), ACTUAL_RUN);
+  assert.equal(selectLatestGeneration([null, {}, { name: undefined }], identity), null);
 });
 
 test('admits a live private release PR from a write-equivalent author', async () => {
@@ -268,8 +287,10 @@ test('paginates trusted workflow runs and selects the latest run-id/attempt gene
   const filler = Array.from({ length: 99 }, (_, offset) => ({
     id: offset + 1,
     run_attempt: 1,
-    name: 'Agent QA',
+    name: `Agent QA PR #53 head ${'a'.repeat(40)}`,
     event: 'pull_request_target',
+    path: '.github/workflows/agent-qa.yml',
+    repository: { full_name: 'jayn2u/gods-eye' },
     display_title: `Agent QA PR #53 head ${'a'.repeat(40)}`,
     head_sha: 'a'.repeat(40),
     pull_requests: [{ number: 52 }],
@@ -321,8 +342,10 @@ test('same-run attempts supersede earlier attempts while finish order and other 
   const makeRun = (id, attempt, extra = {}) => ({
     id,
     run_attempt: attempt,
-    name: 'Agent QA',
+    name: formatRunName(identity),
     event: 'pull_request_target',
+    path: '.github/workflows/agent-qa.yml',
+    repository: { full_name: 'jayn2u/gods-eye' },
     display_title: formatRunName(identity),
     ...extra,
   });

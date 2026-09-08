@@ -2,7 +2,9 @@
 
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
-const { mkdirSync, readFileSync, readdirSync, writeFileSync } = require('node:fs');
+const {
+  mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
@@ -357,50 +359,62 @@ test('now-ineligible work updates only an existing bot comment and metadata outa
 });
 
 test('archive parser rejects traversal, duplicates, symlinks, declared oversize, and invalid schema', () => {
-  const tempBefore = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith('gods-eye-agent-qa-report-')));
-  const validReport = report();
-  const reportBytes = Buffer.from(JSON.stringify(validReport));
-  const cases = [
-    ['traversal', zip([{ name: '../report.json', data: reportBytes }]), 'invalid_zip_path'],
-    ['absolute path', zip([{ name: '/report.json', data: reportBytes }]), 'invalid_zip_path'],
-    ['duplicate', zip([{ name: 'report.json', data: reportBytes }, { name: 'report.json', data: reportBytes }]), 'duplicate_entry'],
-    ['symlink', zip([{ name: 'report.json', data: reportBytes, mode: 0o120777 }]), 'symlink_entry'],
-    ['oversized screenshot', zip([{ name: 'report.json', data: reportBytes }, {
-      name: 'screenshots/large.png', data: PNG, declaredSize: 10 * 1024 * 1024 + 1,
-    }]), 'unsupported_entry'],
-  ];
-  for (const [name, archive, code] of cases) {
-    assert.throws(() => inspectArtifactZip(archive), (error) => {
-      assert.equal(error instanceof ReporterError, true, name);
-      assert.equal(error.code, code, name);
-      return true;
-    });
-  }
+  const globalTempDir = tmpdir();
+  const globalSentinel = mkdtempSync(path.join(globalTempDir, 'gods-eye-agent-qa-report-sentinel-'));
+  const ownedTempParent = mkdtempSync(path.join(globalTempDir, 'gods-eye-agent-qa-report-test-'));
+  const originalTmpDir = process.env.TMPDIR;
+  process.env.TMPDIR = ownedTempParent;
+  try {
+    const validReport = report();
+    const reportBytes = Buffer.from(JSON.stringify(validReport));
+    const cases = [
+      ['traversal', zip([{ name: '../report.json', data: reportBytes }]), 'invalid_zip_path'],
+      ['absolute path', zip([{ name: '/report.json', data: reportBytes }]), 'invalid_zip_path'],
+      ['duplicate', zip([{ name: 'report.json', data: reportBytes }, { name: 'report.json', data: reportBytes }]), 'duplicate_entry'],
+      ['symlink', zip([{ name: 'report.json', data: reportBytes, mode: 0o120777 }]), 'symlink_entry'],
+      ['oversized screenshot', zip([{ name: 'report.json', data: reportBytes }, {
+        name: 'screenshots/large.png', data: PNG, declaredSize: 10 * 1024 * 1024 + 1,
+      }]), 'unsupported_entry'],
+    ];
+    for (const [name, archive, code] of cases) {
+      assert.throws(() => inspectArtifactZip(archive), (error) => {
+        assert.equal(error instanceof ReporterError, true, name);
+        assert.equal(error.code, code, name);
+        return true;
+      });
+    }
 
-  const invalid = clone(validReport);
-  invalid.status = 'invented-success';
-  assert.throws(() => inspectArtifactZip(artifactZip(invalid)), /invalid_report/);
-  const aggregate = zip([
-    { name: 'report.json', data: reportBytes },
-    ...Array.from({ length: 11 }, (_, index) => ({
-      name: `trace-${index}.zip`, data: Buffer.from('x'), declaredSize: 10 * 1024 * 1024,
-    })),
-  ]);
-  assert.throws(() => inspectArtifactZip(aggregate), (error) => error.code === 'oversized_artifact');
-  const tempAfter = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith('gods-eye-agent-qa-report-')));
-  assert.deepEqual(tempAfter, tempBefore, 'temporary extraction roots were removed');
-  recordEvidence('rejections.txt', [
-    'traversal: invalid_zip_path',
-    'absolute path: invalid_zip_path',
-    'duplicate: duplicate_entry',
-    'symlink: symlink_entry',
-    'oversized screenshot: unsupported_entry',
-    'expanded total >100 MiB: oversized_artifact',
-    'unknown report status: invalid_report',
-    'temporary extraction roots removed: true',
-    'candidate/artifact code executed: false',
-    'token-like canary rendered: false',
-  ].join('\n') + '\n');
+    const invalid = clone(validReport);
+    invalid.status = 'invented-success';
+    assert.throws(() => inspectArtifactZip(artifactZip(invalid)), /invalid_report/);
+    const aggregate = zip([
+      { name: 'report.json', data: reportBytes },
+      ...Array.from({ length: 11 }, (_, index) => ({
+        name: `trace-${index}.zip`, data: Buffer.from('x'), declaredSize: 10 * 1024 * 1024,
+      })),
+    ]);
+    assert.throws(() => inspectArtifactZip(aggregate), (error) => error.code === 'oversized_artifact');
+    assert.deepEqual(readdirSync(ownedTempParent), [], 'owned temporary extraction roots were removed');
+    assert.ok(readdirSync(globalTempDir).includes(path.basename(globalSentinel)), 'unrelated global temporary sentinel was preserved');
+    recordEvidence('rejections.txt', [
+      'traversal: invalid_zip_path',
+      'absolute path: invalid_zip_path',
+      'duplicate: duplicate_entry',
+      'symlink: symlink_entry',
+      'oversized screenshot: unsupported_entry',
+      'expanded total >100 MiB: oversized_artifact',
+      'unknown report status: invalid_report',
+      'owned temporary extraction roots removed: true',
+      'unrelated global temporary sentinel preserved: true',
+      'candidate/artifact code executed: false',
+      'token-like canary rendered: false',
+    ].join('\n') + '\n');
+  } finally {
+    if (originalTmpDir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpDir;
+    rmSync(ownedTempParent, { recursive: true, force: true });
+    rmSync(globalSentinel, { recursive: true, force: true });
+  }
 });
 
 test('forged run metadata, empty PR arrays, and malformed artifact produce safe bounded outcomes', async () => {
@@ -417,6 +431,22 @@ test('forged run metadata, empty PR arrays, and malformed artifact produce safe 
   assert.equal(incomplete.reportStatus, 'incomplete');
   assert.ok(Buffer.byteLength(safe.state.comments.at(-1).body) < 60 * 1024);
   assert.doesNotMatch(safe.state.comments.at(-1).body, /\.\.\/report/);
+});
+
+test('authoritative correlation rejects mismatched dynamic name and event', async () => {
+  for (const [alter, reason] of [
+    [(run) => { run.name = 'Agent QA'; }, 'invalid_run_name'],
+    [(run) => { run.event = 'pull_request'; }, 'workflow_run_mismatch'],
+  ]) {
+    const forged = fakeGithub();
+    alter(forged.state.runs[0]);
+    const outcome = await publishWorkflowRun({
+      github: forged.github,
+      workflowRun: eventFor(forged.state.runs[0]),
+    });
+    assert.equal(outcome.reason, reason);
+    assert.equal(forged.state.mutations.length, 0);
+  }
 });
 
 test('late generation appearing after artifact work prevents the final write', async () => {

@@ -143,6 +143,7 @@ jobs:
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
         env:
           QA_REQUEST_JSON: ${{ needs.admission.outputs.request }}
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
         with:
           script: |
             const path = require('node:path');
@@ -184,6 +185,7 @@ jobs:
         if: always() && steps.recheck.outputs.status == 'admitted'
         env:
           CONTROL_ROOT: ${{ github.workspace }}/trusted-control/.github/agent-qa
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
           REQUEST_PATH: ${{ steps.paths.outputs.request }}
           EVIDENCE_ROOT: ${{ steps.paths.outputs.evidence }}
         shell: bash
