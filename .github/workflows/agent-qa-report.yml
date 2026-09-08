@@ -48,7 +48,6 @@ jobs:
             if (
               repository !== 'jayn2u/gods-eye'
               || run?.repository?.full_name !== repository
-              || run?.name !== 'Agent QA'
               || run?.event !== 'pull_request_target'
               || run?.status !== 'completed'
               || !Number.isSafeInteger(run?.id)
@@ -60,7 +59,7 @@ jobs:
               core.setFailed('Untrusted or malformed Agent QA workflow_run metadata');
               return;
             }
-            const identity = reporter.parseRunName(run.display_title);
+            const identity = reporter.parseWorkflowRunIdentity(run);
             if (!identity) {
               core.setFailed('Agent QA run name did not contain a trusted identity');
               return;
