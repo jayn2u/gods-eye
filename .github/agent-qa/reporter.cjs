@@ -12,19 +12,20 @@ const {
   validateReport,
 } = require('./contracts.cjs');
 const {
-  AGENT_QA_WORKFLOW,
-  AGENT_QA_WORKFLOW_NAME,
+  AGENT_QA_WORKFLOW_PATH,
   EXPECTED_REPOSITORY,
   admitPullRequest,
   findLatestGeneration,
   isLatestGeneration,
+  isTrustedWorkflowPath,
   parseRunName,
+  parseWorkflowRunIdentity,
   recheckPullRequest,
 } = require('./controller.cjs');
 
 const COMMENT_MARKER = '<!-- gods-eye-agent-qa:v1 -->';
 const BOT_LOGIN = 'github-actions[bot]';
-const WORKFLOW_PATH = `.github/workflows/${AGENT_QA_WORKFLOW}`;
+const WORKFLOW_PATH = AGENT_QA_WORKFLOW_PATH;
 const PAGE_SIZE = 100;
 const MAX_ENTRIES = 250;
 const MAX_COMMENT_BYTES = 60 * 1024;
@@ -61,13 +62,6 @@ function apiMethod(github, group, method) {
 
 function positiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
-}
-
-function isTrustedWorkflowPath(value) {
-  return value === WORKFLOW_PATH
-    || (typeof value === 'string'
-      && value.startsWith(`${WORKFLOW_PATH}@`)
-      && value.length > WORKFLOW_PATH.length + 1);
 }
 
 function safeArchivePath(name) {
@@ -308,11 +302,11 @@ async function fetchAuthoritativeRun(github, eventRun, repository) {
   });
   const run = response?.data;
   if (!run || run.id !== eventRun.id || run.run_attempt !== eventRun.run_attempt
-      || run.repository?.full_name !== repository || run.name !== AGENT_QA_WORKFLOW_NAME
+      || run.repository?.full_name !== repository
       || !isTrustedWorkflowPath(run.path) || run.event !== 'pull_request_target' || run.status !== 'completed') {
     throw new ReporterError('workflow_run_mismatch', 'authoritative run metadata does not match the trusted workflow');
   }
-  const identity = parseRunName(run.display_title);
+  const identity = parseWorkflowRunIdentity(run);
   if (!identity) throw new ReporterError('invalid_run_name', 'trusted workflow run name is not correlated');
   return { run, identity };
 }
@@ -534,6 +528,7 @@ module.exports = Object.freeze({
   escapeText,
   inspectArtifactZip,
   parseRunName,
+  parseWorkflowRunIdentity,
   publishWorkflowRun,
   renderComment,
 });

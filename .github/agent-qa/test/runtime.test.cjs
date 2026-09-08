@@ -86,6 +86,37 @@ test('child environment preserves HOME and excludes credentials', async t => {
   assert.equal(environment.TMPDIR, path.join(root, 'tmp'))
 })
 
+test('supervised children use a short private temporary directory when the run root is long', async t => {
+  const root = await temporaryDirectory(t, 'runtime-long-root')
+  const evidenceRoot = path.join(root, 'long-evidence-segment-'.repeat(7))
+  const runRoot = path.join(evidenceRoot, 'runtime-fixed')
+  const receipt = path.join(root, 'child-tmpdir.txt')
+  const sentinel = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'gods-eye-agent-qa-unrelated-'))
+  t.after(() => fsPromises.rm(sentinel, { recursive: true, force: true }))
+  await fsPromises.mkdir(evidenceRoot, { recursive: true })
+
+  const supervisor = await new ProcessSupervisor({ runRoot, deadline: monotonicDeadlineAfter(5000) }).initialize()
+  t.after(() => supervisor.stop('test_cleanup'))
+  await supervisor.runToDeadline('capture-tmpdir', process.execPath, [
+    '-e', "require('node:fs').writeFileSync(process.argv[1], process.env.TMPDIR)", receipt,
+  ], { cwd: root, env: sanitizedChildEnvironment(runRoot) })
+
+  const childTemporaryDirectory = await fsPromises.readFile(receipt, 'utf8')
+  assert.ok(runRoot.length > 150, `test run root was only ${runRoot.length} characters`)
+  assert.equal(path.dirname(childTemporaryDirectory), path.resolve(os.tmpdir()))
+  assert.match(path.basename(childTemporaryDirectory), /^gods-eye-agent-qa-/)
+  assert.ok(childTemporaryDirectory.length < 80, `child TMPDIR was ${childTemporaryDirectory.length} characters`)
+  assert.equal(fs.statSync(childTemporaryDirectory).mode & 0o777, 0o700)
+
+  const cleanup = await supervisor.stop('normal')
+  assert.equal(fs.existsSync(childTemporaryDirectory), false)
+  assert.equal(fs.existsSync(sentinel), true)
+  assert.deepEqual(
+    cleanup.paths.find(item => item.kind === 'temporary-directory'),
+    { path: childTemporaryDirectory, kind: 'temporary-directory', cleanup: true, outcome: 'removed' },
+  )
+})
+
 test('port allocation is separate, loopback-bindable, and excludes developer ports', async t => {
   const attempts = await Promise.allSettled([...EXCLUDED_PORTS].map(port => listen(port)))
   const sentinels = attempts.filter(result => result.status === 'fulfilled').map(result => result.value)
@@ -139,6 +170,9 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     assert.equal(receipt.signal, signal)
     assert.equal(receipt.error, null)
     assert.equal(receipt.cleanup.allProcessesStopped, true)
+    const temporaryPath = receipt.cleanup.paths.find(item => item.kind === 'temporary-directory')
+    assert.equal(temporaryPath.outcome, 'removed')
+    assert.equal(fs.existsSync(temporaryPath.path), false)
   })
 }
 
@@ -236,10 +270,15 @@ test('a persistent server group is cleaned when the supervisor deadline arrives'
   const cleanup = JSON.parse(await fsPromises.readFile(supervisor.receiptPath, 'utf8'))
   assert.equal(cleanup.reason, 'deadline')
   assert.equal(cleanup.allProcessesStopped, true)
+  const temporaryPath = cleanup.paths.find(item => item.kind === 'temporary-directory')
+  assert.equal(temporaryPath.outcome, 'removed')
+  assert.equal(fs.existsSync(temporaryPath.path), false)
 })
 
 test('stale manifest refuses a reused PID identity and leaves the unrelated process alive', async t => {
   const root = await temporaryDirectory(t, 'runtime-stale')
+  const unrelatedTemporaryDirectory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'gods-eye-agent-qa-unrelated-'))
+  t.after(() => fsPromises.rm(unrelatedTemporaryDirectory, { recursive: true, force: true }))
   const sentinel = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
   t.after(() => {
     try { process.kill(-sentinel.pid, 'SIGKILL') } catch {}
@@ -251,10 +290,12 @@ test('stale manifest refuses a reused PID identity and leaves the unrelated proc
     version: 1,
     runRoot: root,
     processes: [{ name: 'stale', identity: { ...identity, startTicks: `${identity.startTicks}0` } }],
+    ownedPaths: [{ path: unrelatedTemporaryDirectory, kind: 'temporary-directory', cleanup: true }],
   }))
   const results = await reclaimStaleManifest({ manifestPath: manifest, runRoot: root })
   assert.equal(results[0].outcome, 'identity_mismatch')
   assert.equal(pidExists(sentinel.pid), true)
+  assert.equal(fs.existsSync(unrelatedTemporaryDirectory), true)
 })
 
 test('cleanup removes only registered run children and preserves auth and sentinels', async t => {

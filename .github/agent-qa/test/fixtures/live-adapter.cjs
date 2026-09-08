@@ -95,9 +95,11 @@ function artifact(run, pr, status) {
 }
 
 function run(id, pr, status = 'completed', conclusion = 'success') {
+  const name = `Agent QA PR #${pr.number} head ${pr.head.sha}`;
   return {
-    id, run_attempt: 1, name: 'Agent QA', event: 'pull_request_target', status, conclusion,
-    head_sha: CONTROL_SHA, display_title: `Agent QA PR #${pr.number} head ${pr.head.sha}`,
+    id, run_attempt: 1, name, event: 'pull_request_target', status, conclusion,
+    head_sha: CONTROL_SHA, display_title: name, path: '.github/workflows/agent-qa.yml',
+    repository: { full_name: 'jayn2u/gods-eye' },
   };
 }
 
@@ -208,7 +210,7 @@ class LiveMatrixAdapter {
   }
   async testsRuns(headSha) { return [{ id: 9000, run_attempt: 1, head_sha: headSha, event: 'pull_request' }]; }
   async jobs(runId) {
-    if (runId === 9000) return [{ id: 9001, name: 'Compose smoke', conclusion: 'skipped' }];
+    if (runId === 9000) return [{ id: 9001, name: 'Demo Runtime Compose smoke', conclusion: 'skipped' }];
     const value = this.runs.find((item) => item.id === runId);
     if (!value) return [];
     if (value.invalidation) return [{ id: runId * 10, run_id: runId, name: 'Fixture browser QA', status: 'completed', conclusion: 'skipped' }];

@@ -28,6 +28,7 @@ const {
   validateReport,
   validateRequest,
 } = require('../contracts.cjs');
+const agentResultSchema = require('../agent-result.schema.json');
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -68,6 +69,14 @@ function agentResultFixture() {
     findings: [],
   };
 }
+
+test('declares explicit primitive types for Codex response-schema const and enum leaves', () => {
+  assert.deepEqual(agentResultSchema.properties.schema_version, { type: 'integer', const: 1 });
+  assert.deepEqual(agentResultSchema.$defs.path, { type: 'string', minLength: 1, maxLength: 240 });
+  assert.equal(agentResultSchema.$defs.scenarioId.type, 'string');
+  assert.equal(agentResultSchema.$defs.scenario.properties.status.type, 'string');
+  assert.equal(agentResultSchema.$defs.finding.properties.severity.type, 'string');
+});
 
 function buildEvidence(root) {
   mkdirSync(path.join(root, 'screenshots'), { recursive: true });
@@ -197,7 +206,7 @@ test('rejects malformed, expanded, and identity-bearing model data', () => {
   rejectionResults.push({ scenario: 'prompt_injection', outcome: 'treated_as_data', code: 'identity_unchanged' });
 });
 
-test('rejects duplicate scenarios, mismatched finding state, and unknown status', () => {
+test('rejects duplicate scenarios, evidence, mismatched finding state, and unknown status', () => {
   // Given: structurally plausible agent results with contradictory scenario semantics.
   const duplicate = agentResultFixture();
   duplicate.scenarios[5] = scenarioFixture(SCENARIO_IDS[0]);
@@ -211,11 +220,43 @@ test('rejects duplicate scenarios, mismatched finding state, and unknown status'
   });
   const unknownStatus = agentResultFixture();
   unknownStatus.scenarios[0].status = 'passed';
+  const duplicateScenarioEvidence = agentResultFixture();
+  duplicateScenarioEvidence.scenarios[0].evidence.push(duplicateScenarioEvidence.scenarios[0].evidence[0]);
+  const duplicateFindingEvidence = agentResultFixture();
+  duplicateFindingEvidence.scenarios[0].status = 'finding';
+  duplicateFindingEvidence.findings.push({
+    scenario_id: SCENARIO_IDS[0],
+    severity: 'high',
+    title: 'Visible regression',
+    description: 'The expected result was absent.',
+    evidence: [`screenshots/${SCENARIO_IDS[0]}.png`, `screenshots/${SCENARIO_IDS[0]}.png`],
+  });
 
   // When/Then: the finite shared scenario state rejects every contradiction.
   expectContractError('duplicate_scenario', 'invalid_agentResult_scenarios', () => validateAgentResult(duplicate));
+  const validAgent = agentResultFixture();
+  assert.strictEqual(validateAgentResult(validAgent), validAgent);
+  expectContractError('duplicate_scenario_evidence', 'invalid_agentResult_evidence', () => validateAgentResult(duplicateScenarioEvidence));
+  expectContractError('duplicate_finding_evidence', 'invalid_agentResult_evidence', () => validateAgentResult(duplicateFindingEvidence));
   expectContractError('finding_without_finding_status', 'invalid_agentResult_finding', () => validateAgentResult(mismatchedFinding));
   expectContractError('unknown_scenario_status', 'invalid_agentResult', () => validateAgentResult(unknownStatus));
+});
+
+test('retains the original evidence-path boundary after removing Codex-incompatible lookarounds', () => {
+  const valid = agentResultFixture();
+  valid.scenarios[0].evidence = ['screenshots/known.png'];
+  assert.strictEqual(validateAgentResult(valid), valid);
+  for (const [label, evidencePath, code] of [
+    ['absolute_agent_evidence', '/screenshots/known.png', 'invalid_agentResult_evidence'],
+    ['traversal_agent_evidence', '../screenshots/known.png', 'invalid_agentResult_evidence'],
+    ['backslash_agent_evidence', 'screenshots\\known.png', 'invalid_agentResult_evidence'],
+    ['control_agent_evidence', 'screenshots/\u0000known.png', 'invalid_agentResult_evidence'],
+    ['oversized_agent_evidence', 'a'.repeat(241), 'invalid_agentResult'],
+  ]) {
+    const invalid = agentResultFixture();
+    invalid.scenarios[0].evidence = [evidencePath];
+    expectContractError(label, code, () => validateAgentResult(invalid));
+  }
 });
 
 test('derives supervisor outcomes in safety precedence order', () => {
@@ -306,6 +347,14 @@ test('rejects oversized JSON and forged report generations without exposing inpu
     const selfReportedSuccess = reportFixture(root);
     selfReportedSuccess.tool_calls = selfReportedSuccess.tool_calls.filter(({ tool }) => tool !== 'browser_take_screenshot');
     expectContractError('missing_browser_proof', 'invalid_report_outcome', () => validateReport(selfReportedSuccess, expected));
+
+    const duplicateReportEvidence = reportFixture(root);
+    duplicateReportEvidence.scenarios[0].evidence.push(duplicateReportEvidence.scenarios[0].evidence[0]);
+    expectContractError('duplicate_report_evidence', 'invalid_report_evidence', () => validateReport(duplicateReportEvidence, expected));
+
+    const traversalReportEvidence = reportFixture(root);
+    traversalReportEvidence.scenarios[0].evidence = ['../outside.png'];
+    expectContractError('traversal_report_evidence', 'invalid_report_evidence', () => validateReport(traversalReportEvidence, expected));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

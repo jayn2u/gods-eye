@@ -12,6 +12,7 @@ const {
   GhAdapter,
   LiveVerificationError,
   adversarialLedger,
+  assertComposeSkipped,
   cleanupOwned,
   createOwnedBranch,
   createOwnedPull,
@@ -222,13 +223,36 @@ test('cleanup deadline leaves later owned resources explicit and incomplete', as
 });
 
 test('run identity parser binds a workflow run to exact PR and head', () => {
-  const run = {
-    name: 'Agent QA', event: 'pull_request_target',
-    display_title: `Agent QA PR #42 head ${SHA}`,
+  const run = JSON.parse(readFileSync(
+    path.join(__dirname, 'fixtures/actions-run-identity.json'),
+    'utf8',
+  )).agent_qa_run;
+  assert.equal(matchingRun(run, 53, run.head_sha), true);
+  assert.equal(matchingRun(run, 54, run.head_sha), false);
+  assert.equal(matchingRun({ ...run, name: 'Agent QA' }, 53, run.head_sha), false);
+  assert.equal(matchingRun({ ...run, path: '.github/workflows/forged.yml' }, 53, run.head_sha), false);
+  assert.equal(matchingRun({ ...run, event: 'pull_request' }, 53, run.head_sha), false);
+  assert.equal(matchingRun({ ...run, repository: { full_name: 'attacker/fork' } }, 53, run.head_sha), false);
+  assert.equal(matchingRun(null, 53, run.head_sha), false);
+});
+
+test('exact Tests API Compose job is recognized as skipped', async () => {
+  const actual = JSON.parse(readFileSync(
+    path.join(__dirname, 'fixtures/actions-run-identity.json'),
+    'utf8',
+  ));
+  const adapter = {
+    async testsRuns() { return [actual.tests_run]; },
+    async jobs(runId) {
+      assert.equal(runId, actual.tests_run.id);
+      return actual.tests_jobs;
+    },
   };
-  assert.equal(matchingRun(run, 42, SHA), true);
-  assert.equal(matchingRun(run, 43, SHA), false);
-  assert.equal(matchingRun({ ...run, display_title: 'Agent QA says success' }, 42, SHA), false);
+  assert.deepEqual(await assertComposeSkipped(adapter, actual.tests_run.head_sha), {
+    run_id: actual.tests_run.id,
+    job_id: 101913122559,
+    conclusion: 'skipped',
+  });
 });
 
 test('temporary product defect changes only the exact search-submit expression', () => {

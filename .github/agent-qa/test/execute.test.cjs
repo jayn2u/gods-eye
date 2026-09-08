@@ -68,6 +68,16 @@ async function screenshots(root, missing) {
   }
 }
 
+async function readFixtureEvents(file, screenshotsRoot) {
+  return (await fsp.readFile(file, 'utf8')).trim().split('\n').map((line) => {
+    const event = JSON.parse(line);
+    if (event.item?.tool === 'browser_take_screenshot') {
+      event.item.arguments.filename = path.join(screenshotsRoot, path.basename(event.item.arguments.filename));
+    }
+    return event;
+  });
+}
+
 function successAdapters(overrides = {}) {
   let snapshots = 0;
   let cleanChecks = 0;
@@ -118,11 +128,16 @@ function successAdapters(overrides = {}) {
         order.push('codex');
         for (const scenario of require('../scenarios.json').scenarios) {
           assert.equal(prompt.includes(receiptExpression(scenario)), true);
+          assert.equal(prompt.includes(
+            `filename ${JSON.stringify(path.join(paths.screenshotsRoot, `${scenario.id}.png`))}`,
+          ), true);
+          assert.equal(prompt.includes(`report screenshots/${scenario.id}.png`), true);
         }
         assert.match(environment.lockFile, /auth\.lock$/);
         const source = overrides.events ?? path.join(fixtureRoot, 'success.jsonl');
-        await fsp.copyFile(source, path.join(path.dirname(paths.privateResult), 'events.jsonl'));
         const eventsPath = path.join(path.dirname(paths.privateResult), 'events.jsonl');
+        const events = await readFixtureEvents(source, paths.screenshotsRoot);
+        await fsp.writeFile(eventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
         const stderrPath = path.join(path.dirname(paths.privateResult), 'stderr.log');
         await fsp.writeFile(stderrPath, overrides.stderr ?? '');
         if (!overrides.noResult) {
@@ -196,7 +211,7 @@ test('Pinned-format completed MCP events prove six distinct journeys and emitted
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const screenshotsRoot = path.join(root, 'screenshots');
   await screenshots(screenshotsRoot);
-  const events = (await fsp.readFile(path.join(fixtureRoot, 'success.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+  const events = await readFixtureEvents(path.join(fixtureRoot, 'success.jsonl'), screenshotsRoot);
   const pinnedCalls = events.filter((event) => event.item?.type === 'mcp_tool_call').map((event) => event.item);
   assert.equal(pinnedCalls.filter((item) => item.tool === 'browser_click')
     .every((item) => typeof item.arguments.target === 'string' && !Object.hasOwn(item.arguments, 'ref')), true);
@@ -230,6 +245,75 @@ test('Pinned-format completed MCP events prove six distinct journeys and emitted
   [screenshotBeforeReceipt[firstReceiptIndex], screenshotBeforeReceipt[firstScreenshotIndex]]
     = [screenshotBeforeReceipt[firstScreenshotIndex], screenshotBeforeReceipt[firstReceiptIndex]];
   assert.equal(parseCodexEvents(screenshotBeforeReceipt, { origin, screenshotsRoot }).complete, false);
+  const bareScreenshot = structuredClone(events);
+  bareScreenshot[firstScreenshotIndex].item.arguments.filename = 'search-detail-return.png';
+  assert.equal(parseCodexEvents(bareScreenshot, { origin, screenshotsRoot }).complete, false);
+  const escapedScreenshot = structuredClone(events);
+  escapedScreenshot[firstScreenshotIndex].item.arguments.filename = path.join(
+    screenshotsRoot, '..', 'search-detail-return.png',
+  );
+  assert.equal(parseCodexEvents(escapedScreenshot, { origin, screenshotsRoot }).complete, false);
+});
+
+test('A failed exploratory locator stays visible but later complete scenario proof recovers', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-recovered-events-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const screenshotsRoot = path.join(root, 'screenshots');
+  await screenshots(screenshotsRoot);
+  const events = await readFixtureEvents(path.join(fixtureRoot, 'success.jsonl'), screenshotsRoot);
+  const failedExploration = (await fsp.readFile(
+    path.join(fixtureRoot, 'recovered-exploration.jsonl'), 'utf8',
+  )).trim().split('\n').map(JSON.parse);
+  const successfulSelect = events.findIndex((event) => event.item?.id === 'item_11');
+  events.splice(successfulSelect, 0, ...failedExploration);
+
+  const recovered = parseCodexEvents(events, { origin, screenshotsRoot });
+  assert.equal(recovered.complete, true);
+  assert.deepEqual(
+    recovered.toolCalls.find((call) => call.tool === 'browser_select_option' && call.status === 'failed'),
+    { scenario_id: 'model-provenance', tool: 'browser_select_option', status: 'failed' },
+  );
+
+  const unresolved = events.filter((event) => event.item?.id !== 'item_11');
+  assert.equal(parseCodexEvents(unresolved, { origin, screenshotsRoot }).complete, false);
+
+  const failedMarker = structuredClone(events);
+  failedMarker.find((event) => event.item?.id === 'item_1').item.status = 'failed';
+  assert.equal(parseCodexEvents(failedMarker, { origin, screenshotsRoot }).complete, false);
+
+  const forbiddenEvaluate = structuredClone(events);
+  forbiddenEvaluate.splice(successfulSelect, 0, {
+    type: 'item.completed',
+    item: {
+      type: 'mcp_tool_call', server: 'playwright', tool: 'browser_evaluate',
+      arguments: { function: '() => document.title' }, result: { content: [] }, status: 'completed',
+    },
+  });
+  assert.equal(parseCodexEvents(forbiddenEvaluate, { origin, screenshotsRoot }).complete, false);
+
+  for (const type of ['command_execution', 'file_change']) {
+    const forbiddenItem = structuredClone(events);
+    forbiddenItem.splice(successfulSelect, 0, {
+      type: 'item.completed', item: { type, status: 'completed' },
+    });
+    assert.equal(parseCodexEvents(forbiddenItem, { origin, screenshotsRoot }).complete, false);
+  }
+
+  const externalOrigin = structuredClone(events);
+  externalOrigin.find((event) => event.item?.id === 'item_exploratory_failed_select')
+    .item.result.content[0].text += '\nPage URL: https://example.invalid/';
+  assert.equal(parseCodexEvents(externalOrigin, { origin, screenshotsRoot }).complete, false);
+
+  const recoveredEventsPath = path.join(root, 'recovered.jsonl');
+  await fsp.writeFile(recoveredEventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
+  const execution = await executeCase(t, { events: recoveredEventsPath });
+  assert.equal(execution.report.status, 'no_findings');
+  assert.equal(execution.report.reason, 'none');
+  assert.equal(execution.report.tool_calls.some(
+    (call) => call.scenario_id === 'model-provenance'
+      && call.tool === 'browser_select_option'
+      && call.status === 'failed',
+  ), true);
 });
 
 test('A complete adapter-backed execution emits a validated no-findings public artifact and prunes private output', async (t) => {

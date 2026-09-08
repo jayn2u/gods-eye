@@ -308,7 +308,7 @@ function parseCodexEvents(events, { origin, screenshotsRoot }) {
       invalid = true;
       continue;
     }
-    if (item.status === 'failed' || toolCalls.length >= 500) invalid = true;
+    if (toolCalls.length >= 500) invalid = true;
     for (const content of item.result?.content ?? []) {
       if (content?.type !== 'text' || typeof content.text !== 'string') continue;
       for (const match of content.text.matchAll(/Page URL:\s*(\S+)/gu)) {
@@ -322,8 +322,12 @@ function parseCodexEvents(events, { origin, screenshotsRoot }) {
       const next = scenarioContract.scenarios[scenarioIndex + 1];
       const current = currentScenario === null ? null : scenariosById.get(currentScenario);
       if (next && item.arguments?.function?.trim() === markerExpression(next)) {
-        scenarioIndex += 1;
-        currentScenario = next.id;
+        if (item.status !== 'completed') {
+          invalid = true;
+        } else {
+          scenarioIndex += 1;
+          currentScenario = next.id;
+        }
       } else if (current && item.arguments?.function?.trim() === receiptExpression(current)) {
         const scenarioProof = proof.get(current.id);
         const requirements = scenarioActionRequirements(current);
@@ -354,11 +358,11 @@ function parseCodexEvents(events, { origin, screenshotsRoot }) {
       if (requirement?.matches(item)) scenarioProof.nextAction += 1;
     }
     if (item.status === 'completed' && item.tool === 'browser_take_screenshot') {
-      const filename = `${currentScenario}.png`;
+      const filename = path.join(screenshotsRoot, `${currentScenario}.png`);
       if (!scenarioProof.receipt || item.arguments?.filename !== filename) {
         invalid = true;
       } else {
-        const relative = `screenshots/${filename}`;
+        const relative = `screenshots/${currentScenario}.png`;
         try {
           validateEvidenceFile(path.dirname(screenshotsRoot), relative, { allowedExtensions: ['.png'] });
           scenarioProof.screenshot = relative;
@@ -508,7 +512,7 @@ function buildPrompt(origin, screenshotsRoot, request, diff) {
     ...scenarioActionRequirements(scenario).map((requirement, index) => `${index + 1}. ${requirement.label}`),
     'After the actions and expected page state are visible, call browser_evaluate with this exact receipt function:',
     receiptExpression(scenario),
-    `Only after that receipt succeeds, save the screenshot as ${scenario.id}.png and report screenshots/${scenario.id}.png.`,
+    `Only after that receipt succeeds, call browser_take_screenshot with filename ${JSON.stringify(path.join(screenshotsRoot, `${scenario.id}.png`))} and report screenshots/${scenario.id}.png.`,
   ].join('\n')).join('\n\n');
   return [
     fs.readFileSync(path.join(qaRoot, 'prompt.md'), 'utf8'),

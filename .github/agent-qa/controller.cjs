@@ -5,6 +5,7 @@ const { validateRequest } = require('./contracts.cjs');
 const EXPECTED_REPOSITORY = 'jayn2u/gods-eye';
 const AGENT_QA_WORKFLOW = 'agent-qa.yml';
 const AGENT_QA_WORKFLOW_NAME = 'Agent QA';
+const AGENT_QA_WORKFLOW_PATH = `.github/workflows/${AGENT_QA_WORKFLOW}`;
 const RELEASE_BASE_PATTERN = /^release\/[^/]+$/;
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const RUN_NAME_PATTERN = /^Agent QA PR #([1-9][0-9]*) head ([0-9a-f]{40})$/;
@@ -56,6 +57,20 @@ function parseRunName(displayTitle) {
     return null;
   }
   return Object.freeze({ prNumber, headSha: match[2] });
+}
+
+function parseWorkflowRunIdentity(run) {
+  if (!run || typeof run !== 'object' || typeof run.name !== 'string'
+      || run.name !== run.display_title) {
+    return null;
+  }
+  return parseRunName(run.name);
+}
+
+function isTrustedWorkflowPath(value) {
+  return value === AGENT_QA_WORKFLOW_PATH
+    || (typeof value === 'string' && value.startsWith(`${AGENT_QA_WORKFLOW_PATH}@`)
+      && value.length > AGENT_QA_WORKFLOW_PATH.length + 1);
 }
 
 function apiMethod(github, group, method) {
@@ -326,10 +341,11 @@ function selectLatestGeneration(runs, identity) {
   }
   let latest = null;
   for (const run of runs) {
-    const parsed = parseRunName(run?.display_title);
+    const parsed = parseWorkflowRunIdentity(run);
     if (
-      run?.name !== AGENT_QA_WORKFLOW_NAME ||
       run?.event !== 'pull_request_target' ||
+      run?.repository?.full_name !== EXPECTED_REPOSITORY ||
+      !isTrustedWorkflowPath(run?.path) ||
       !parsed ||
       parsed.prNumber !== identity.prNumber ||
       parsed.headSha !== identity.headSha ||
@@ -413,6 +429,7 @@ function isLatestGeneration(currentRun, latestRun) {
 module.exports = {
   AGENT_QA_WORKFLOW,
   AGENT_QA_WORKFLOW_NAME,
+  AGENT_QA_WORKFLOW_PATH,
   ControllerError,
   EXPECTED_REPOSITORY,
   RELEASE_BASE_PATTERN,
@@ -421,8 +438,10 @@ module.exports = {
   findLatestGeneration,
   formatRunName,
   isLatestGeneration,
+  isTrustedWorkflowPath,
   listCorrelatedWorkflowRuns,
   parseRunName,
+  parseWorkflowRunIdentity,
   recheckPullRequest,
   selectLatestGeneration,
 };

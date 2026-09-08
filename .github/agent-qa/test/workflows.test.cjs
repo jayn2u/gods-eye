@@ -36,6 +36,41 @@ function parseWorkflow(name) {
   return JSON.parse(parsed.stdout);
 }
 
+function runInlineCorrelation(payload) {
+  const reporter = parseWorkflow('agent-qa-report.yml');
+  const step = reporter.jobs.correlate.steps.find(
+    ({ name }) => name === 'Parse the typed trusted run identity',
+  );
+  assert.ok(step?.with?.script, 'correlation script must be present in the workflow');
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gods-eye-inline-correlate-'));
+  fs.symlinkSync(path.resolve(__dirname, '..', '..', '..'), path.join(workspace, 'trusted-control'), 'dir');
+  const result = spawnSync(
+    process.execPath,
+    ['-e', `
+      const context = { payload: ${JSON.stringify(payload)} };
+      const result = { failed: null, outputs: {} };
+      const core = {
+        setFailed(message) { result.failed = message; },
+        setOutput(name, value) { result.outputs[name] = value; },
+      };
+      (async () => {
+        ${step.with.script}
+      })().then(
+        () => process.stdout.write(JSON.stringify(result)),
+        (error) => { process.stderr.write(error.stack || String(error)); process.exitCode = 1; },
+      );
+    `],
+    {
+      cwd: workspace,
+      encoding: 'utf8',
+      env: { ...process.env, GITHUB_WORKSPACE: workspace },
+    },
+  );
+  fs.rmSync(workspace, { recursive: true, force: true });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
 function stepUses(job, action) {
   return job.steps.filter(({ uses }) => uses === action);
 }
@@ -138,7 +173,17 @@ async function executeAdmittedRequest(t, request) {
     }),
     runCodex: async ({ paths }) => {
       order.push('executor');
-      await fsp.copyFile(path.join(fixtureRoot, 'execution', 'success.jsonl'), path.join(path.dirname(paths.privateResult), 'events.jsonl'));
+      const browserEvents = (await fsp.readFile(path.join(fixtureRoot, 'execution', 'success.jsonl'), 'utf8'))
+        .trim().split('\n').map(JSON.parse);
+      for (const event of browserEvents) {
+        if (event.item?.tool === 'browser_take_screenshot') {
+          event.item.arguments.filename = path.join(paths.screenshotsRoot, path.basename(event.item.arguments.filename));
+        }
+      }
+      await fsp.writeFile(
+        path.join(path.dirname(paths.privateResult), 'events.jsonl'),
+        `${browserEvents.map(JSON.stringify).join('\n')}\n`,
+      );
       await fsp.copyFile(path.join(fixtureRoot, 'execution', 'agent-result.json'), paths.privateResult);
       await fsp.mkdir(paths.screenshotsRoot, { recursive: true });
       await Promise.all(scenarioIds.map((id) => fsp.writeFile(path.join(paths.screenshotsRoot, `${id}.png`), png)));
@@ -250,6 +295,96 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   const upload = qa.jobs.qa.steps.find((step) => step.name === 'Upload validated public evidence');
   assert.equal(upload.if, "always() && steps.stage.outputs.ready == 'true'");
   assert.equal(upload.with['retention-days'], 14);
+});
+
+test('parsed workflow dependency environment loads trusted controller modules from the pinned toolchain', async (t) => {
+  const qa = parseWorkflow('agent-qa.yml');
+  const expectedNodePath = '${{ steps.paths.outputs.qa_root }}/toolchain/node_modules';
+  const recheck = qa.jobs.qa.steps.find((step) => step.name === 'Recheck current pull request eligibility');
+  const stage = qa.jobs.qa.steps.find((step) => step.name === 'Stage validated public evidence');
+  assert.equal(recheck.env.NODE_PATH, expectedNodePath);
+  assert.equal(stage.env.NODE_PATH, expectedNodePath);
+
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-workflow-dependency-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const trustedRoot = path.join(root, 'trusted-control', '.github', 'agent-qa');
+  await fsp.mkdir(trustedRoot, { recursive: true });
+  for (const filename of [
+    'controller.cjs',
+    'contracts.cjs',
+    'evidence-contracts.cjs',
+    'request.schema.json',
+    'agent-result.schema.json',
+    'report.schema.json',
+  ]) {
+    await fsp.copyFile(path.join(workflowRoot, '..', 'agent-qa', filename), path.join(trustedRoot, filename));
+  }
+  const toolchainModules = path.join(root, 'qa-root', 'toolchain', 'node_modules');
+  await fsp.mkdir(toolchainModules, { recursive: true });
+  for (const dependency of ['ajv', 'fast-deep-equal', 'fast-uri', 'json-schema-traverse', 'require-from-string']) {
+    await fsp.cp(
+      path.join(workflowRoot, '..', 'agent-qa', 'node_modules', dependency),
+      path.join(toolchainModules, dependency),
+      { recursive: true },
+    );
+  }
+  assert.equal(fs.existsSync(path.join(root, 'trusted-control', '.github', 'agent-qa', 'node_modules')), false);
+
+  const modulePaths = [
+    path.join(trustedRoot, 'controller.cjs'),
+    path.join(trustedRoot, 'contracts.cjs'),
+  ];
+  const requireModules = (nodePath) => spawnSync(
+    process.execPath,
+    ['-e', `for (const modulePath of ${JSON.stringify(modulePaths)}) require(modulePath);`],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, NODE_PATH: nodePath },
+    },
+  );
+  const missingDependency = requireModules('');
+  assert.notEqual(missingDependency.status, 0);
+  assert.match(`${missingDependency.stdout}${missingDependency.stderr}`, /Cannot find module ['"]ajv\/dist\/2020['"]/u);
+  const configuredDependency = requireModules(path.join(root, 'qa-root', 'toolchain', 'node_modules'));
+  assert.equal(configuredDependency.status, 0, configuredDependency.stderr);
+});
+
+test('inline reporter correlation accepts the actual run identity and rejects forged metadata', () => {
+  const reporter = parseWorkflow('agent-qa-report.yml');
+  const step = reporter.jobs.correlate.steps.find(
+    ({ name }) => name === 'Parse the typed trusted run identity',
+  );
+  assert.match(step.with.script, /reporter\.parseWorkflowRunIdentity\(run\)/u);
+  assert.doesNotMatch(step.with.script, /run\?\.name !== ['"]Agent QA['"]/u);
+
+  const actualRun = JSON.parse(
+    fs.readFileSync(path.join(fixtureRoot, 'actions-run-identity.json'), 'utf8'),
+  ).agent_qa_run;
+  const actualPayload = {
+    repository: { full_name: 'jayn2u/gods-eye' },
+    workflow_run: actualRun,
+  };
+  const accepted = runInlineCorrelation(actualPayload);
+  assert.equal(accepted.failed, null);
+  assert.deepEqual(accepted.outputs, { pr_number: '53' });
+
+  for (const [label, target, mutate] of [
+    ['name-title mismatch', 'run', (run) => { run.name = 'Agent QA'; }],
+    ['forged workflow path', 'run', (run) => { run.path = '.github/workflows/agent-qa.yml.evil'; }],
+    ['repository mismatch', 'payload', (payload) => { payload.repository.full_name = 'attacker/repo'; }],
+    ['run repository mismatch', 'run', (run) => { run.repository.full_name = 'attacker/repo'; }],
+    ['wrong event', 'run', (run) => { run.event = 'pull_request'; }],
+    ['wrong status', 'run', (run) => { run.status = 'in_progress'; }],
+    ['invalid run id', 'run', (run) => { run.id = 0; }],
+    ['invalid run attempt', 'run', (run) => { run.run_attempt = 0; }],
+    ['missing workflow run', 'payload', (payload) => { payload.workflow_run = null; }],
+  ]) {
+    const payload = structuredClone(actualPayload);
+    mutate(target === 'payload' ? payload : payload.workflow_run);
+    const rejected = runInlineCorrelation(payload);
+    assert.ok(rejected.failed, `${label} must be rejected`);
+    assert.deepEqual(rejected.outputs, {}, `${label} must not emit a PR number`);
+  }
 });
 
 test('real admission, recheck, executor, and reporter preserve one typed identity', async (t) => {
