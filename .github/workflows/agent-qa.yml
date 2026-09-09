@@ -11,6 +11,8 @@ on:
       - edited
       - converted_to_draft
       - closed
+      - labeled
+      - unlabeled
 
 permissions: {}
 
@@ -20,7 +22,7 @@ concurrency:
 
 jobs:
   admission:
-    name: Admit trusted release PR
+    name: Admit trusted requested PR
     runs-on: ubuntu-24.04
     permissions:
       actions: read

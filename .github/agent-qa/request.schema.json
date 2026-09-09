@@ -24,7 +24,7 @@
       "additionalProperties": false,
       "required": ["ref", "sha"],
       "properties": {
-        "ref": { "type": "string", "pattern": "^release/[^/\\u0000-\\u001f\\u007f]{1,200}$", "maxLength": 208 },
+        "ref": { "type": "string", "pattern": "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$", "minLength": 1, "maxLength": 208 },
         "sha": { "$ref": "#/$defs/sha" }
       }
     },
