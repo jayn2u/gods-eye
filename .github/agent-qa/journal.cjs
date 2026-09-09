@@ -38,9 +38,11 @@ const ACTION_TOOL = Object.freeze({
 
 function readJournal(file) {
   const stats = fs.statSync(file, { throwIfNoEntry: false });
-  if (!stats || !stats.isFile() || stats.size < 1 || stats.size > MAX_JOURNAL_BYTES) {
-    throw new JournalError('INVALID_JOURNAL', 'browser journal is missing or oversized');
+  if (!stats || !stats.isFile() || stats.size > MAX_JOURNAL_BYTES) {
+    throw new JournalError('INVALID_JOURNAL', 'browser journal is absent or oversized');
   }
+  // An empty journal is a legitimate observation: the agent produced no page evidence at all.
+  if (stats.size === 0) return [];
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim());
   if (lines.length > MAX_ENTRIES) throw new JournalError('INVALID_JOURNAL', 'browser journal has too many entries');
   return lines.map((line) => {
