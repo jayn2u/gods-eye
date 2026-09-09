@@ -52,6 +52,7 @@ async function prepareCopilotHome({ home, workDir, mcpBin, origin, screenshotsRo
   await fsp.mkdir(configDir, { recursive: true, mode: 0o700 });
   await fsp.mkdir(workDir, { recursive: true, mode: 0o700 });
   const configPath = path.join(configDir, 'mcp-config.json');
+  await fsp.writeFile(journal, '', { mode: 0o600 });
   const config = mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal });
   await fsp.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   for (const forbidden of ['.mcp.json', path.join('.github', 'mcp.json')]) {

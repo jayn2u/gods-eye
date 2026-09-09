@@ -424,18 +424,31 @@ async function runExecution(options, adapters = {}) {
     privatePaths = [agent.journalPath, agent.stdoutPath, agent.stderrPath, agent.configPath, agent.privateResult]
       .filter(Boolean);
     let journal = [];
-    try { journal = readJournal(agent.journalPath); } catch (error) { if (!agent.processError) throw error; }
+    try {
+      journal = readJournal(agent.journalPath);
+    } catch (error) {
+      if (!agent.processError) {
+        // Missing evidence is invalid output; only the agent's own failure classifies the run.
+        reason = 'invalid_output';
+        process.stderr.write(`Agent QA browser journal unusable: ${sanitizeText(error.message)}\n`);
+      }
+    }
     parsed = parseBrowserJournal(journal, { origin: runtime.origin, screenshotsRoot });
     if (fs.existsSync(agent.privateResult)) agentResult = validateAgentResult(readBoundedJson(agent.privateResult));
     if (options.signal?.aborted) cancelled = true;
-    else if (agent.processError) {
-      reason = mapFailure(agent.processError, parsed.errorText);
-      try {
-        const tail = fs.readFileSync(agent.stderrPath, 'utf8').slice(-2000);
-        if (tail.trim()) process.stderr.write(`Agent QA browser agent failed (${reason}): ${sanitizeText(tail)}\n`);
-      } catch { /* an unreadable log must not replace the classified reason */ }
+    else if (agent.processError) reason = mapFailure(agent.processError, parsed.errorText);
+    else if (!agentResult || !parsed.complete) reason ??= 'invalid_output';
+    if (!cancelled && (agent.processError || !parsed.complete)) {
+      // Without this the only signal is a one-word reason, which cannot distinguish an agent that
+      // refused to start from one that worked but was never observed by the journal.
+      for (const [label, file] of [['stderr', agent.stderrPath], ['stdout', agent.stdoutPath]]) {
+        try {
+          const tail = fs.readFileSync(file, 'utf8').slice(-2000);
+          if (tail.trim()) process.stderr.write(`Agent QA agent ${label} (${reason}): ${sanitizeText(tail)}\n`);
+        } catch { /* an unreadable log must not replace the classified reason */ }
+      }
+      process.stderr.write(`Agent QA journal entries: ${journal.length}\n`);
     }
-    else if (!agentResult || !parsed.complete) reason = 'invalid_output';
   } catch (error) {
     if (options.signal?.aborted || error.code === 'CANCELLED') cancelled = true;
     else if (!stale && !reason) reason = error.code === 'BASELINE_SETUP_FAILED' ? 'setup_failed' : mapFailure(error, parsed.errorText);
