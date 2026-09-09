@@ -388,6 +388,10 @@ async function runExecution(options, adapters = {}) {
     tools = toolsFromDoctor(doctor, deps.chromiumVersion(toolchain));
     if (!doctor.ok) {
       reason = doctorReason(doctor);
+      // The doctor emits only non-secret readiness metadata, so naming the failed checks in the job
+      // log is safe and is the only way an operator can tell which prerequisite broke.
+      const failed = doctor.checks.filter((check) => !check.ok).map((check) => check.name).join(', ');
+      process.stderr.write(`Agent QA doctor rejected execution; failed checks: ${failed || 'unknown'}\n`);
       throw new ExecutionError('DOCTOR_FAILED', 'Runner doctor rejected execution');
     }
     runtime = await deps.startRuntime({
