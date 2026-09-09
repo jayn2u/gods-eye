@@ -200,11 +200,15 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const foreignVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY'];
   const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
   const token = env.QA_COPILOT_TOKEN || '';
-  const tokenPresent = token.length >= 20;
+  // A secret stored from a file or `echo` keeps a trailing newline and GitHub rejects it as bad
+  // credentials, which costs a whole job to discover. Refuse a token carrying surrounding whitespace.
+  const tokenWellFormed = token === token.trim() && !/\s/u.test(token);
+  const tokenPresent = token.trim().length >= 20 && tokenWellFormed;
   // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
   // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
   add(checks, 'subscription_auth', (tokenPresent || !inWorkflow) && !foreignEnvironment, {
     token_present: tokenPresent,
+    token_well_formed: token.length === 0 || tokenWellFormed,
     token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
     required: inWorkflow,
     foreign_provider_environment: foreignEnvironment,

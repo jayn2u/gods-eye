@@ -417,7 +417,7 @@ async function runExecution(options, adapters = {}) {
       environment: {
         flockBin: process.env.QA_FLOCK_BIN || 'flock',
         lockFile: path.join(stateRoot, 'auth.lock'),
-        copilotToken: process.env.QA_COPILOT_TOKEN || '',
+        copilotToken: (process.env.QA_COPILOT_TOKEN || '').trim(),
       },
       sanitizedChildEnvironment,
     });
@@ -428,7 +428,13 @@ async function runExecution(options, adapters = {}) {
     parsed = parseBrowserJournal(journal, { origin: runtime.origin, screenshotsRoot });
     if (fs.existsSync(agent.privateResult)) agentResult = validateAgentResult(readBoundedJson(agent.privateResult));
     if (options.signal?.aborted) cancelled = true;
-    else if (agent.processError) reason = mapFailure(agent.processError, parsed.errorText);
+    else if (agent.processError) {
+      reason = mapFailure(agent.processError, parsed.errorText);
+      try {
+        const tail = fs.readFileSync(agent.stderrPath, 'utf8').slice(-2000);
+        if (tail.trim()) process.stderr.write(`Agent QA browser agent failed (${reason}): ${sanitizeText(tail)}\n`);
+      } catch { /* an unreadable log must not replace the classified reason */ }
+    }
     else if (!agentResult || !parsed.complete) reason = 'invalid_output';
   } catch (error) {
     if (options.signal?.aborted || error.code === 'CANCELLED') cancelled = true;
