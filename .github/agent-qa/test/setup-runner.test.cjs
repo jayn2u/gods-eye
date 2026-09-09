@@ -81,7 +81,13 @@ else
   printf '{"runners":[]}\n'
 fi`);
   const systemctl = path.join(temp, 'systemctl');
-  executable(systemctl, `printf 'active\\n'`);
+  executable(systemctl, String.raw`
+printf '%s
+' "$*" >>"$QA_TEST_STATE/systemctl-calls"
+printf 'active
+'`);
+  const pinnedNode = path.join(temp, 'node');
+  executable(pinnedNode, `if [[ "\${1:-}" == '--version' ]]; then echo 'v24.12.0'; exit; fi; exit 1`);
   const loginctl = path.join(temp, 'loginctl');
   executable(loginctl, `printf 'yes\\n'`);
   const uv = path.join(temp, 'uv');
@@ -108,13 +114,14 @@ fi`);
     QA_GH_BIN: gh,
     QA_SYSTEMCTL_BIN: systemctl,
     QA_LOGINCTL_BIN: loginctl,
+    QA_NODE_BIN: pinnedNode,
     QA_UV_BIN: uv,
     QA_PNPM_BIN: pnpm,
     QA_BROWSER_PROBE_BIN: browserProbe,
     QA_PLAYWRIGHT_MCP_BIN: mcp,
     QA_TEST_STATE: state,
   };
-  return { temp, qaRoot, source, systemd, state, testHome, archive, env };
+  return { temp, qaRoot, pinnedNode, source, systemd, state, testHome, archive, env };
 }
 
 test('install is idempotent, stores no agent credential, and preserves unrelated files', (t) => {
@@ -218,6 +225,38 @@ test('the unit unsets every competing provider credential and pins the copilot b
   }
   assert.match(unit, /QA_COPILOT_BIN=.*node_modules\/\.bin\/copilot/);
   assert.doesNotMatch(unit, /CODEX_HOME|QA_CODEX_BIN/);
+});
+
+test('the unit pins the verified Node directory on PATH instead of inheriting an ambient one', (t) => {
+  const f = fixture(t);
+  execFileSync('bash', [setup, 'install'], { env: f.env });
+  const unit = fs.readFileSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service'), 'utf8');
+  const pinnedDir = path.dirname(f.pinnedNode);
+  // A version-managed Node is invisible to the systemd user manager, so the pin must be explicit.
+  assert.match(unit, new RegExp(`Environment="PATH=${pinnedDir}:`));
+  assert.match(unit, /Environment="PATH=[^"]*:\/usr\/bin:/);
+});
+
+test('install refuses a Node that does not satisfy the pin', (t) => {
+  const f = fixture(t);
+  const wrong = path.join(f.temp, 'wrong-node');
+  executable(wrong, `if [[ "\${1:-}" == '--version' ]]; then echo 'v20.20.2'; exit; fi; exit 1`);
+  const result = spawnSync('bash', [setup, 'install'], {
+    env: { ...f.env, QA_NODE_BIN: wrong }, encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /node 24\.12\.0 is required/);
+  assert.equal(fs.existsSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service')), false);
+});
+
+test('start restarts the service so a rewritten unit cannot keep running the old environment', (t) => {
+  const f = fixture(t);
+  execFileSync('bash', [setup, 'install'], { env: f.env });
+  execFileSync('bash', [setup, 'register'], { env: f.env });
+  execFileSync('bash', [setup, 'start'], { env: f.env });
+  const calls = fs.readFileSync(path.join(f.state, 'systemctl-calls'), 'utf8');
+  assert.match(calls, /daemon-reload/);
+  assert.match(calls, /restart gods-eye-agent-qa-runner\.service/);
 });
 
 test('help exposes only the non-destructive lifecycle commands', () => {
