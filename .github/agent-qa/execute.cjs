@@ -19,7 +19,10 @@ const { parseBrowserJournal, readJournal, scenarioActionRequirements } = require
 const { runCopilot } = require('./agents/copilot.cjs');
 const { RuntimeError, remainingMilliseconds, sanitizedChildEnvironment, startRuntime } = require('./runtime.cjs');
 
-const INTERNAL_DEADLINE_MS = 12 * 60 * 1000;
+// Two consecutive runs of the same code took 230s and 546s for the same six scenarios, so the budget
+// has to cover agent variance rather than its best case. The runner is self-hosted, so the extra
+// wall time costs nothing and QA still runs one job at a time.
+const INTERNAL_DEADLINE_MS = 25 * 60 * 1000;
 const MAX_DIFF_BYTES = 100 * 1024;
 const MAX_EVENT_BYTES = 50 * 1024 * 1024;
 const qaRoot = fs.realpathSync(__dirname);

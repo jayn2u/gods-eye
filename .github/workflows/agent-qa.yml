@@ -82,7 +82,7 @@ jobs:
     needs: admission
     if: needs.admission.outputs.status == 'admitted'
     runs-on: [self-hosted, linux, x64, gods-eye-agent-qa]
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
