@@ -53,6 +53,18 @@ async function listen(port = 0) {
   return server
 }
 
+test('a shared cache root is used for downloads and never cleaned with the run', async (t) => {
+  const { startRuntime } = require('../runtime.cjs');
+  assert.equal(typeof startRuntime, 'function');
+  const { readFileSync } = require('node:fs');
+  const source = readFileSync(require('node:path').join(__dirname, '..', 'runtime.cjs'), 'utf8');
+  // The venv stays per-run for isolation; only the download caches are shared.
+  assert.match(source, /const venv = path\.join\(supervisor\.runRoot, 'venv'\)/u);
+  assert.match(source, /const caches = cacheRoot \?\? path\.join\(supervisor\.runRoot, 'cache'\)/u);
+  assert.match(source, /if \(isWithin\(supervisor\.runRoot, caches\)\) \{/u);
+  assert.match(source, /UV_CACHE_DIR: path\.join\(caches, 'uv'\)/u);
+});
+
 test('monotonic deadlines have explicit millisecond semantics', () => {
   const deadline = monotonicDeadlineAfter(500)
   assert.ok(remainingMilliseconds(deadline) <= 500)

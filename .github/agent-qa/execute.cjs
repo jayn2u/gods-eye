@@ -412,6 +412,12 @@ async function runExecution(options, adapters = {}) {
   let cleanupError;
   let privateOutputDeleted = false;
   let privatePaths = [];
+  const phases = [];
+  let phaseStart = performance.now();
+  const markPhase = (name) => {
+    phases.push(`${name}=${Math.round((performance.now() - phaseStart) / 1000)}s`);
+    phaseStart = performance.now();
+  };
   try {
     if (remainingMilliseconds(deadline) === 0) throw new RuntimeError('DEADLINE_EXCEEDED', 'Internal deadline expired before doctor');
     if (deps.candidateHead(roots.candidate) !== request.head.sha || !deps.candidateTrackedClean(roots.candidate)) {
@@ -420,6 +426,7 @@ async function runExecution(options, adapters = {}) {
     }
     before = deps.snapshotTrackedFiles(roots.candidate);
     doctor = await deps.runDoctor({ env: process.env, phase: 'status' });
+    markPhase('doctor');
     const stateRoot = path.resolve(process.env.QA_ROOT || path.join(process.env.HOME || os.homedir(), '.local/share/gods-eye-agent-qa'));
     const toolchain = path.join(stateRoot, 'toolchain');
     tools = toolsFromDoctor(doctor, deps.chromiumVersion(toolchain));
@@ -432,11 +439,16 @@ async function runExecution(options, adapters = {}) {
       throw new ExecutionError('DOCTOR_FAILED', 'Runner doctor rejected execution');
     }
     runtime = await deps.startRuntime({
-      candidate: roots.candidate, evidence: path.join(privateRoot, 'runtime'), deadline, signal: options.signal,
+      candidate: roots.candidate, evidence: path.join(privateRoot, 'runtime'), deadline,
+      // Shared across runs: a per-run cache made every run refetch every dependency.
+      cacheRoot: path.join(stateRoot, 'cache'),
+      signal: options.signal,
     });
+    markPhase('runtime');
     deterministic = [await deps.runBaseline({
       candidate: roots.candidate, evidence: path.join(privateRoot, 'baseline'), runtime, deadline,
     })];
+    markPhase('baseline');
     const workDir = path.join(privateRoot, 'work');
     await fsp.mkdir(workDir, { mode: 0o700 });
     const privateResult = path.join(privateRoot, 'agent-result.json');
@@ -458,6 +470,7 @@ async function runExecution(options, adapters = {}) {
       },
       sanitizedChildEnvironment,
     });
+    markPhase('agent');
     privatePaths = [agent.journalPath, agent.stdoutPath, agent.stderrPath, agent.configPath, agent.privateResult]
       .filter(Boolean);
     let journal = [];
@@ -482,7 +495,7 @@ async function runExecution(options, adapters = {}) {
       }
       process.stderr.write(`Agent QA journal entries: ${journal.length}; proven scenarios: ${
         [...parsed.proof.entries()].filter(([, item]) => item.receipt && item.screenshot).length
-      }\n`);
+      }; phases: ${phases.join(' ')}\n`);
     }
     if (fs.existsSync(agent.privateResult)) {
       try {
@@ -499,6 +512,9 @@ async function runExecution(options, adapters = {}) {
   } catch (error) {
     if (options.signal?.aborted || error.code === 'CANCELLED') cancelled = true;
     else if (!stale && !reason) reason = error.code === 'BASELINE_SETUP_FAILED' ? 'setup_failed' : mapFailure(error, parsed.errorText);
+    // A run that dies before the agent has no agent log to report, so the phase timings are the only
+    // way to see which stage consumed the deadline.
+    if (!cancelled) process.stderr.write(`Agent QA failed during ${sanitizeText(error.code ?? error.name)}; phases: ${phases.join(' ') || 'none'}\n`);
   } finally {
     for (const target of privatePaths) {
       await fsp.rm(target, { force: true }).catch((error) => { cleanupError ??= error; });
