@@ -184,12 +184,15 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
       }
       scenarioIndex += 1;
       current = next.id;
+      // The page the marker was issued from counts as this scenario's origin proof.
+      if (isMainOrigin(entry.url, origin)) proof.get(current).navigate = true;
       continue;
     }
 
     if (current === null) {
-      // Nothing observable may happen before the first trusted profile selection.
-      invalid = true;
+      // Loading the application before the first scenario is selected is expected; anything else
+      // observable before a trusted selection is not.
+      if (!(entry.kind === 'navigate' && isMainOrigin(entry.url, origin))) invalid = true;
       continue;
     }
 
