@@ -35,8 +35,9 @@ function fixture(t) {
   fs.writeFileSync(path.join(qaRoot, 'auth.lock'), '', { mode: 0o600 });
 
   const copilot = path.join(temp, 'copilot');
+  // Mirrors the real CLI: the version carries a trailing period and an update notice follows it.
   executable(copilot, `
-if [[ "\${1:-}" == '--version' ]]; then echo 'copilot 1.0.83'; exit; fi
+if [[ "\${1:-}" == '--version' ]]; then printf 'GitHub Copilot CLI 1.0.83.\nRun '\\''copilot update'\\'' to check for updates.\n'; exit; fi
 exit 1`);
   const uv = path.join(temp, 'uv');
   executable(uv, "echo 'uv 0.12.6'");
