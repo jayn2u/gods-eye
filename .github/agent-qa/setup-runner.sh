@@ -38,20 +38,40 @@ die() {
 }
 
 NODE_VERSION="24.12.0"
-NODE_BIN_DIR=""
+UNIT_PATH=""
 
-# The unit must not inherit an ambient PATH: resolve the interpreter that satisfies the pin now, and
-# record its directory so the service always runs the same Node the operator verified.
-resolve_pinned_node() {
-  local candidate
-  candidate="${QA_NODE_BIN:-$(command -v node || true)}"
-  [[ -n "${candidate}" ]] || die "node is not on PATH; install Node ${NODE_VERSION} first"
-  candidate="$(realpath -m -- "${candidate}")"
-  local found
-  found="$("${candidate}" --version 2>/dev/null || true)"
-  [[ "${found}" == "v${NODE_VERSION}" ]] \
-    || die "node ${NODE_VERSION} is required for the runner unit but ${candidate} reports ${found:-nothing}"
-  NODE_BIN_DIR="$(dirname -- "${candidate}")"
+# The unit must not inherit an ambient PATH, but pinning only one tool's directory hides the others:
+# node, uv, and pnpm each live wherever their installer put them (a version manager, a snap, a
+# per-user prefix). Resolve all three now, verify the pinned interpreter, and build the unit's PATH
+# from their directories so the service sees exactly the tools the operator verified.
+resolve_host_tools() {
+  local -a dirs=()
+  local tool candidate found override
+  for tool in node uv pnpm; do
+    override="QA_$(printf '%s' "${tool}" | tr '[:lower:]' '[:upper:]')_BIN"
+    candidate="${!override:-$(command -v "${tool}" || true)}"
+    [[ -n "${candidate}" ]] || die "${tool} is not on PATH; install it before the runner unit is written"
+    [[ "${candidate}" == /* ]] || candidate="${PWD}/${candidate}"
+    [[ -x "${candidate}" ]] || die "${candidate} is not executable"
+    if [[ "${tool}" == node ]]; then
+      found="$("${candidate}" --version 2>/dev/null || true)"
+      [[ "${found}" == "v${NODE_VERSION}" ]] \
+        || die "node ${NODE_VERSION} is required for the runner unit but ${candidate} reports ${found:-nothing}"
+    fi
+    # Keep the directory the tool is *found* in. Resolving symlinks would record a snap or pnpm
+    # internal target instead of the shim directory that must be on PATH for the tool to resolve.
+    dirs+=("$(cd -- "$(dirname -- "${candidate}")" && pwd -P)")
+  done
+  local -a unique=()
+  local dir seen
+  for dir in "${dirs[@]}" /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin; do
+    seen=0
+    for candidate in "${unique[@]+"${unique[@]}"}"; do
+      [[ "${candidate}" == "${dir}" ]] && seen=1 && break
+    done
+    (( seen )) || unique+=("${dir}")
+  done
+  UNIT_PATH="$(IFS=:; printf '%s' "${unique[*]}")"
 }
 
 require_safe_root() {
@@ -96,7 +116,7 @@ write_unit() {
   local escaped_root escaped_runner escaped_path
   escaped_root="$(escape_systemd_environment "${QA_ROOT}")"
   escaped_runner="$(escape_systemd_path "${QA_ROOT}/runner")"
-  escaped_path="$(escape_systemd_environment "${NODE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+  escaped_path="$(escape_systemd_environment "${UNIT_PATH}")"
   local temp_unit
   temp_unit="$(mktemp "${QA_ROOT}/.unit.XXXXXX")"
   cat >"${temp_unit}" <<EOF
@@ -186,7 +206,7 @@ install_all() {
   chmod 700 "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
   : >"${QA_ROOT}/auth.lock"
   chmod 600 "${QA_ROOT}/auth.lock"
-  resolve_pinned_node
+  resolve_host_tools
   install_runner
   install_toolchain
   write_unit

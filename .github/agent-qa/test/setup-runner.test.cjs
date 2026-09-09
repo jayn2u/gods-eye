@@ -235,6 +235,26 @@ test('the unit pins the verified Node directory on PATH instead of inheriting an
   // A version-managed Node is invisible to the systemd user manager, so the pin must be explicit.
   assert.match(unit, new RegExp(`Environment="PATH=${pinnedDir}:`));
   assert.match(unit, /Environment="PATH=[^"]*:\/usr\/bin:/);
+  // Pinning only Node would hide uv and pnpm, which live wherever their own installers put them.
+  const declared = /Environment="PATH=([^"]*)"/u.exec(unit)[1].split(':');
+  for (const tool of [f.env.QA_UV_BIN, f.env.QA_PNPM_BIN]) {
+    assert.ok(declared.includes(path.dirname(tool)), `${tool} directory must be on the unit PATH`);
+  }
+  assert.equal(new Set(declared).size, declared.length, 'the unit PATH must not repeat a directory');
+});
+
+test('install refuses to write a unit when a required host tool is absent', async (t) => {
+  for (const missing of ['QA_UV_BIN', 'QA_PNPM_BIN']) {
+    await t.test(missing, (subtest) => {
+      const f = fixture(subtest);
+      const result = spawnSync('bash', [setup, 'install'], {
+        env: { ...f.env, [missing]: path.join(f.temp, 'absent-tool') }, encoding: 'utf8',
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /is not executable|is not on PATH/);
+      assert.equal(fs.existsSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service')), false);
+    });
+  }
 });
 
 test('install refuses a Node that does not satisfy the pin', (t) => {
