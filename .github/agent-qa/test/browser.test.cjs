@@ -79,17 +79,70 @@ test('Given the trusted agent prompt, when inspected, then source edits and retr
   assert.match(prompt, /loopback/i);
 });
 
-test('Given an unknown fault profile, when the trusted control parses it, then the request is rejected', async () => {
-  let binding;
+function fakePage({ evaluate = async () => undefined } = {}) {
+  const bindings = new Map();
+  const journal = [];
+  const frame = { url: () => 'http://127.0.0.1:41111/' };
   const page = {
     route: async () => undefined,
-    exposeBinding: async (_name, callback) => { binding = callback; },
+    exposeBinding: async (name, callback) => { bindings.set(name, callback); },
     addInitScript: async () => undefined,
-    evaluate: async () => undefined,
+    evaluate,
+    on: (event, handler) => { journal.push([event, handler]); },
+    mainFrame: () => frame,
   };
+  return { page, bindings, listeners: journal, frame };
+}
+
+test('Given an unknown fault profile, when the trusted control parses it, then the request is rejected', async () => {
+  const { page, bindings } = fakePage();
   const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
   await installBrowserHarness({ page });
-  await assert.rejects(async () => binding({}, 'selectProfile', 'external-navigation'), /Unknown browser fault profile/);
+  const control = bindings.get('__godsEyeQaControl');
+  await assert.rejects(async () => control({}, 'selectProfile', 'external-navigation'), /Unknown browser fault profile/);
+});
+
+test('Given a receipt request, when the harness serves it, then the predicate is contract text the agent never supplies', async () => {
+  const evaluated = [];
+  const { page, bindings } = fakePage({
+    evaluate: async (expression) => {
+      if (typeof expression === 'string') evaluated.push(expression);
+      return true;
+    },
+  });
+  const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+  await installBrowserHarness({ page });
+  const control = bindings.get('__godsEyeQaControl');
+  const source = { page };
+
+  await assert.rejects(async () => control(source, 'receipt', 'not-a-scenario'), /Unknown scenario receipt/);
+  await assert.rejects(
+    async () => control(source, 'receipt', '(s) => true'),
+    /Unknown scenario receipt/,
+    'an agent-supplied predicate must not be accepted as a scenario id',
+  );
+
+  await control(source, 'selectProfile', 'normal');
+  const token = await control(source, 'receipt', 'blank-input');
+  assert.equal(token, 'qa-receipt:blank-input');
+  const contract = require(resolve(qaRoot, 'scenarios.json'));
+  const declared = contract.scenarios.find(({ id }) => id === 'blank-input').receipt;
+  assert.equal(evaluated.length, 1);
+  assert.ok(evaluated[0].startsWith(`(${declared})(`), 'the evaluated expression must be the declared predicate');
+});
+
+test('Given observed page events, when they reach the harness, then typing is coalesced into one committed action', async () => {
+  const { page, bindings } = fakePage();
+  const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+  await installBrowserHarness({ page });
+  const record = bindings.get('__godsEyeQaRecord');
+  assert.equal(typeof record, 'function');
+  const textarea = { tag: 'TEXTAREA', id: 'query', type: '', ariaLabel: '', text: '' };
+  // Without QA_BROWSER_JOURNAL the recorder is inert, so this asserts the shape contract only.
+  record({}, { kind: 'input', target: textarea, value: 'A' });
+  record({}, { kind: 'input', target: textarea, value: 'A person' });
+  record({}, { kind: 'click', target: { tag: 'BUTTON', id: '', type: 'button', ariaLabel: 'Search gallery', text: 'Search gallery' }, value: '' });
+  record({}, null);
 });
 
 test('Given the trusted baseline config, when inspected, then it requires run boundaries and never manages servers', async () => {

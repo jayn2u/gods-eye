@@ -157,7 +157,7 @@ async function executeAdmittedRequest(t, request) {
       ok: true,
       phase: 'status',
       checks: [
-        { name: 'tool_versions', ok: true, node: process.versions.node, codex: '0.153.3', playwright_mcp: '0.0.80' },
+        { name: 'tool_versions', ok: true, node: process.versions.node, copilot: '1.0.83', playwright_mcp: '0.0.80' },
         { name: 'subscription_auth', ok: true },
         { name: 'browser', ok: true },
         { name: 'auth_lock', ok: true },
@@ -171,26 +171,20 @@ async function executeAdmittedRequest(t, request) {
     runBaseline: async () => ({
       name: 'candidate-playwright', status: 'passed', harness_started: true, app_started: true, duration_ms: 12,
     }),
-    runCodex: async ({ paths }) => {
+    runAgent: async ({ paths }) => {
       order.push('executor');
-      const browserEvents = (await fsp.readFile(path.join(fixtureRoot, 'execution', 'success.jsonl'), 'utf8'))
-        .trim().split('\n').map(JSON.parse);
-      for (const event of browserEvents) {
-        if (event.item?.tool === 'browser_take_screenshot') {
-          event.item.arguments.filename = path.join(paths.screenshotsRoot, path.basename(event.item.arguments.filename));
-        }
-      }
-      await fsp.writeFile(
-        path.join(path.dirname(paths.privateResult), 'events.jsonl'),
-        `${browserEvents.map(JSON.stringify).join('\n')}\n`,
-      );
+      const { faithfulJournalEntries } = require('./fixtures/journal-builder.cjs');
+      const entries = faithfulJournalEntries(paths.origin);
+      await fsp.writeFile(paths.journal, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
       await fsp.copyFile(path.join(fixtureRoot, 'execution', 'agent-result.json'), paths.privateResult);
       await fsp.mkdir(paths.screenshotsRoot, { recursive: true });
       await Promise.all(scenarioIds.map((id) => fsp.writeFile(path.join(paths.screenshotsRoot, `${id}.png`), png)));
       const privateRoot = path.dirname(paths.privateResult);
-      const stderrPath = path.join(privateRoot, 'stderr.log');
+      const stdoutPath = path.join(privateRoot, 'copilot.stdout.log');
+      const stderrPath = path.join(privateRoot, 'copilot.stderr.log');
+      await fsp.writeFile(stdoutPath, 'reported');
       await fsp.writeFile(stderrPath, '');
-      return { eventsPath: path.join(privateRoot, 'events.jsonl'), stderrPath, privateResult: paths.privateResult };
+      return { journalPath: paths.journal, stdoutPath, stderrPath, privateResult: paths.privateResult };
     },
   };
   const result = await runExecution({
@@ -286,13 +280,16 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   assert.equal(candidateCheckout.with.path, 'candidate-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(candidateCheckout.with['persist-credentials'], false);
   assert.equal(qa.jobs.qa.steps[0].name, 'Capture the running-job start time');
-  const executeStep = qa.jobs.qa.steps.find((step) => step.name === 'Run bounded subscription Agent QA');
+  const executeStep = qa.jobs.qa.steps.find((step) => step.name === 'Run bounded Copilot browser QA');
   assert.match(executeStep.run, /execute\.cjs" run/u);
   assert.match(executeStep.run, /--job-start "\$JOB_START"/u);
   assert.equal(executeStep.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY']) {
+  // The agent holds a Copilot credential and nothing else: no repository token, no other provider.
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
     assert.equal(executeStep.env[key], '');
   }
+  assert.equal(executeStep.env.QA_COPILOT_TOKEN, '${{ secrets.AGENT_QA_COPILOT_TOKEN }}');
+  assert.equal(Object.values(executeStep.env).some((value) => /secrets\.GITHUB_TOKEN/u.test(String(value))), false);
   const upload = qa.jobs.qa.steps.find((step) => step.name === 'Upload validated public evidence');
   assert.equal(upload.if, "always() && steps.stage.outputs.ready == 'true'");
   assert.equal(upload.with['retention-days'], 14);

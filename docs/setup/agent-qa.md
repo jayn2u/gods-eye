@@ -26,48 +26,69 @@ request.
 The trusted `Agent QA` and `Agent QA report` workflows become active only after their reviewed
 change reaches the default `develop` branch through the normal team process. Do not directly push
 them to the default branch or treat this guide as merge authorization. Until that happens, a
-runner, CI subscription login, and local helper tests can be prepared, but the
+runner, the Copilot token secret, and local helper tests can be prepared, but the
 `pull_request_target` and `workflow_run` path cannot be accepted as live.
 
-## Runner and subscription lifecycle
+## Runner and agent lifecycle
 
 Run the helpers from a trusted checkout at a reviewed default-branch revision. Choose a
-repository-scoped `QA_ROOT` outside both the development checkout and the developer Codex home;
-when unset, the helpers use `$HOME/.local/share/gods-eye-agent-qa`.
+repository-scoped `QA_ROOT` outside the development checkout; when unset, the helpers use
+`$HOME/.local/share/gods-eye-agent-qa`.
 
 ```bash
 export QA_ROOT="$HOME/.local/share/gods-eye-agent-qa"
 bash .github/agent-qa/setup-runner.sh install
 bash .github/agent-qa/setup-runner.sh register
-bash .github/agent-qa/setup-runner.sh login --device-auth
 bash .github/agent-qa/setup-runner.sh start
 ```
 
-`register` uses the already authenticated GitHub CLI to obtain a short-lived registration token;
-do not copy, print, or save that token. On this headless runner, `login --device-auth` is the
-primary Codex subscription login for the CI-only `CODEX_HOME` at `$QA_ROOT/codex-home`: Codex
-prints a URL and one-time code, which the operator completes in a browser on another device. Device
-authentication may need to be enabled in personal security settings or workspace permissions; see
-[Log in on headless devices](https://learn.chatgpt.com/docs/auth#login-on-headless-devices). Bare
-`login` remains available for a normal interactive refresh. Both forms take the auth lock, do not
-copy the developer session, change `HOME`, or allow an API-key fallback. A present auth file alone
-is not proof that the subscription can run QA.
+There is no `login` step and no agent credential on this runner. The browser agent is the GitHub
+Copilot CLI, which authenticates from the `AGENT_QA_COPILOT_TOKEN` repository secret that the
+workflow passes in as `QA_COPILOT_TOKEN`. Create that secret from a token carrying the Copilot
+Requests permission. The user unit unsets `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `CODEX_API_KEY`,
+`ANTHROPIC_API_KEY`, and `COPILOT_GITHUB_TOKEN`, so no ambient provider credential can be inherited,
+and the QA step keeps `GITHUB_TOKEN` and `GH_TOKEN` empty: the agent holds a Copilot credential and
+no repository access.
 
-Use the read-only checks before start, after a refresh, and while investigating a report:
+`register` uses the already authenticated GitHub CLI to obtain a short-lived registration token; do
+not copy, print, or save that token.
+
+Use the read-only checks before start and while investigating a report:
 
 ```bash
 node .github/agent-qa/doctor.cjs --json
 bash .github/agent-qa/setup-runner.sh status
 ```
 
-The doctor output contains only non-secret readiness metadata. Keep credentials, registration
-tokens, environment dumps, and raw agent output out of terminal captures and issue comments.
+The doctor output contains only non-secret readiness metadata. Its `subscription_auth` check reports
+`token_source: workflow-secret` outside Actions, because the token exists only inside a job; inside a
+job a missing token fails the check and the run reports `auth_required`. A token that is present is
+not proof that Copilot will answer.
 
-The runner intentionally shares the current Linux user with development. Separate work roots,
-clean child environments, and a separate `CODEX_HOME` prevent routine collisions and accidental
-credential inheritance. They are not a hostile-code sandbox: eligible team code and its build
-dependencies are trusted to run with that user's access. Do not expand eligibility to untrusted
-contributors.
+Keep credentials, registration tokens, environment dumps, and raw agent output out of terminal
+captures and issue comments.
+
+The runner intentionally shares the current Linux user with development. Separate work roots and
+clean child environments prevent routine collisions and accidental credential inheritance. They are
+not a hostile-code sandbox: eligible team code and its build dependencies are trusted to run with
+that user's access. Do not expand eligibility to untrusted contributors.
+
+## Evidence channel
+
+A report's scenario status and findings come from a journal written by harness code inside the
+Playwright MCP server process, not from anything the agent narrates. The journal records the profile
+selection, the ordered page-observed actions, and each receipt; a screenshot counts only when it
+exists, is a real PNG, and postdates its scenario's receipt.
+
+Receipt conditions live in `scenarios.json` and are evaluated by that harness code. The agent calls
+`window.__GODS_EYE_QA__.receipt(<scenario id>)` and cannot supply, alter, or relay the condition. An
+agent that describes a step it did not perform through a browser tool produces `incomplete` with
+`invalid_output`, never a finding and never `no_findings`.
+
+Because Copilot CLI resolves MCP configuration from `$HOME/.copilot`, lets a project `.mcp.json` or
+`.github/mcp.json` override it, and offers no strict-config flag, each run gets its own HOME and an
+empty working directory outside the candidate checkout, and refuses to start if a stray MCP config is
+present there.
 
 ## Results, deadlines, and recovery
 
@@ -83,15 +104,18 @@ running time: an offline runner can leave a job queued until GitHub reaches a te
 
 The public artifact is named for its pull request, run, and attempt, and is retained for 14 days.
 It may include the validated report, sanitized summary and steps, known screenshots, and
-deterministic traces. It excludes CI auth, configuration, raw Codex events, environment dumps, and
-real gallery assets.
+deterministic traces. It excludes CI auth, MCP configuration, the raw browser journal, agent stdout,
+environment dumps, and real gallery assets.
 
-For `auth_required`, run `login` again and then repeat the read-only checks; do not introduce an
-API key or delete the CI auth directory. For a runner-offline result, use doctor and `status` to
+For `auth_required`, renew the `AGENT_QA_COPILOT_TOKEN` secret and then repeat the read-only checks;
+do not introduce a provider API key and do not place a token on the runner. For a runner-offline result, use doctor and `status` to
 identify the reported prerequisite, correct that prerequisite, then run `start`; do not kill all
 Node processes. For a superseded or cancelled run, allow the newer generation or the reporter to
 reach its terminal summary before deciding whether a new eligible pull-request event is needed.
 Agent QA never uses Docker or Compose as a recovery step.
+
+A report whose reason is `invalid_output` most often means the browser journal did not prove a
+scenario. Read the scenario list in the summary comment rather than the agent's prose.
 
 To stop only the runner service during a scoped rollback or maintenance window, preserve the CI
 login and use:
@@ -114,13 +138,21 @@ to `ed597411d8f924073f98dfc5c65a23a2325f34cd`, `actions/upload-artifact` v4 to
 `ea165f8d65b6e75b540449e92b4886f43607fa02`, and `actions/download-artifact` v5 to
 `634f93cb2916e3fdff6788551b99b062d0335ce0`.
 
-The CI toolchain pin is Codex `0.153.3` with npm integrity
-`sha512-SwQns+YIXvaXV4a6RUd9twgTPJkkfZpuTNEkTtIkwBnfw6fpT61+d6gU1WHZxK6vWFNqJCBoJEP69FIAsoPduA==`
+The CI toolchain pin is the GitHub Copilot CLI `1.0.83` with npm integrity
+`sha512-M8uZI0V0dahYV1KZij3nGDxaXEGG7I7YUZzQPI7NEZkL/83Nl/tNTbPdxKtdWZbOmWoXsPKXty/eEYoj6RHDhA==`
 and Playwright MCP `0.0.80` with npm integrity
 `sha512-FOPXHm2SvFhAQylm10jMZ35B/SR2TaMLVkavAlwoG4N2qCb5RqbvhQYcu3zmXNyxR2DW0Ooxe+9XPVt5UjKRCQ==`.
-It uses the matching MCP Playwright `1.63.0-alpha-2026-08-31` Chromium separately from the
-application E2E Playwright `1.62.1`. Host tooling is Node `24.12.0`, uv `0.12.6`, pnpm `10.15.0`,
-and Python `>=3.11,<3.13`.
+The Copilot CLI ships per-platform binary packages; `package-lock.json` pins each with its own
+integrity value and `npm ci` selects only `copilot-linux-x64` on this runner. `QA_AGENT_MODEL` may
+pin a model through the `AGENT_QA_MODEL` repository variable and is left unset by default.
+
+The published Actions guide installs the CLI with an unpinned `npm install -g @github/copilot` on an
+ephemeral GitHub-hosted runner. This repository does not: a global install would mutate state shared
+with development on this self-hosted runner, and an unpinned install is the `latest` substitution the
+pin policy below forbids. `setup-runner.sh install` performs the pinned `npm ci` into `$QA_ROOT/toolchain`
+instead, and a mismatched or unavailable pin is expected to fail preflight. It uses the matching MCP Playwright `1.63.0-alpha-2026-08-31` Chromium
+separately from the application E2E Playwright `1.62.1`. Host tooling is Node `24.12.0`, uv `0.12.6`,
+pnpm `10.15.0`, and Python `>=3.11,<3.13`.
 
 Pin changes require a normal reviewed change that updates the readable version comment and exact
 hash or integrity value, revalidates its availability, runs the helper and workflow policy tests,

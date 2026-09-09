@@ -70,7 +70,7 @@ function agentResultFixture() {
   };
 }
 
-test('declares explicit primitive types for Codex response-schema const and enum leaves', () => {
+test('declares explicit primitive types for response-schema const and enum leaves', () => {
   assert.deepEqual(agentResultSchema.properties.schema_version, { type: 'integer', const: 1 });
   assert.deepEqual(agentResultSchema.$defs.path, { type: 'string', minLength: 1, maxLength: 240 });
   assert.equal(agentResultSchema.$defs.scenarioId.type, 'string');
@@ -99,7 +99,7 @@ function reportFixture(root) {
     finished_at: '2026-09-07T00:02:00.000Z',
     tools: {
       node: '24.12.0',
-      codex: '0.153.3',
+      agent: { name: 'copilot', version: '1.0.83' },
       playwright_mcp: '0.0.80',
       chromium: '1.63.0-alpha-2026-08-31',
     },
@@ -242,7 +242,7 @@ test('rejects duplicate scenarios, evidence, mismatched finding state, and unkno
   expectContractError('unknown_scenario_status', 'invalid_agentResult', () => validateAgentResult(unknownStatus));
 });
 
-test('retains the original evidence-path boundary after removing Codex-incompatible lookarounds', () => {
+test('retains the original evidence-path boundary without engine-incompatible lookarounds', () => {
   const valid = agentResultFixture();
   valid.scenarios[0].evidence = ['screenshots/known.png'];
   assert.strictEqual(validateAgentResult(valid), valid);

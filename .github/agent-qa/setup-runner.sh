@@ -21,13 +21,14 @@ usage() {
   cat <<'EOF'
 Usage:
   setup-runner.sh <install|register|start|status>
-  setup-runner.sh login [--device-auth]
 
   install   Install the pinned runner, locked toolchain, Chromium, and user unit.
   register  Register this repository's single gods-eye-agent-qa runner.
-  login     Complete ChatGPT login in the CI-only CODEX_HOME; --device-auth supports headless hosts.
   start     Verify prerequisites, then enable and start the user service.
   status    Print the non-secret JSON preflight report.
+
+  The browser agent authenticates from the AGENT_QA_COPILOT_TOKEN repository secret, which the
+  workflow passes in as QA_COPILOT_TOKEN. No agent credential is stored on this runner.
 EOF
 }
 
@@ -44,7 +45,7 @@ require_safe_root() {
   DEVELOPER_CHECKOUT="$(realpath -m -- "${DEVELOPER_CHECKOUT}")"
   [[ "${QA_ROOT}" != "${DEVELOPER_CHECKOUT}"/* && "${DEVELOPER_CHECKOUT}" != "${QA_ROOT}"/* && "${QA_ROOT}" != "${DEVELOPER_CHECKOUT}" ]] \
     || die "QA_ROOT and the developer checkout must be separate"
-  [[ "${QA_ROOT}" != "${HOME}/.codex" ]] || die "QA_ROOT cannot be the developer CODEX_HOME"
+  [[ "${QA_ROOT}" != "${HOME}/.copilot" ]] || die "QA_ROOT cannot be the developer Copilot home"
 }
 
 test_adapter_value() {
@@ -88,11 +89,10 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${escaped_runner}
-Environment="CODEX_HOME=${escaped_root}/codex-home"
 Environment="PLAYWRIGHT_BROWSERS_PATH=${escaped_root}/toolchain/browsers"
-Environment="QA_CODEX_BIN=${escaped_root}/toolchain/node_modules/.bin/codex"
+Environment="QA_COPILOT_BIN=${escaped_root}/toolchain/node_modules/.bin/copilot"
 Environment="QA_PLAYWRIGHT_MCP_BIN=${escaped_root}/toolchain/node_modules/.bin/playwright-mcp"
-UnsetEnvironment=OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY
+UnsetEnvironment=OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY COPILOT_GITHUB_TOKEN
 ExecStart=${escaped_runner}/run.sh
 Restart=always
 RestartSec=5
@@ -163,8 +163,8 @@ install_toolchain() {
 
 install_all() {
   require_safe_root
-  mkdir -p "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/codex-home" "${QA_ROOT}/runs"
-  chmod 700 "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/codex-home" "${QA_ROOT}/runs"
+  mkdir -p "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
+  chmod 700 "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
   : >"${QA_ROOT}/auth.lock"
   chmod 600 "${QA_ROOT}/auth.lock"
   install_runner
@@ -235,21 +235,6 @@ register_runner() {
   printf 'Registered runner %s for %s.\n' "${RUNNER_NAME}" "${REPOSITORY}"
 }
 
-login_codex() {
-  local -a login_args=(login)
-  [[ "$#" == 0 ]] || login_args+=(--device-auth)
-  require_safe_root
-  [[ -x "${QA_ROOT}/toolchain/node_modules/.bin/codex" ]] || die "run install first"
-  mkdir -p "${QA_ROOT}/codex-home"
-  chmod 700 "${QA_ROOT}/codex-home"
-  (
-    "${FLOCK_BIN}" -n 9 || die "the CI Codex auth lock is occupied"
-    unset OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY
-    CODEX_HOME="${QA_ROOT}/codex-home" "${QA_ROOT}/toolchain/node_modules/.bin/codex" "${login_args[@]}"
-    [[ -f "${QA_ROOT}/codex-home/auth.json" ]] && chmod 600 "${QA_ROOT}/codex-home/auth.json"
-  ) 9>"${QA_ROOT}/auth.lock"
-}
-
 doctor() {
   QA_ROOT="${QA_ROOT}" QA_REPOSITORY="${REPOSITORY}" QA_DEVELOPER_CHECKOUT="${DEVELOPER_CHECKOUT}" \
     QA_GH_BIN="${GH_BIN}" QA_SYSTEMCTL_BIN="${SYSTEMCTL_BIN}" QA_LOGINCTL_BIN="${LOGINCTL_BIN}" QA_FLOCK_BIN="${FLOCK_BIN}" \
@@ -267,13 +252,6 @@ main() {
   case "${1:-}" in
     install) [[ "$#" == 1 ]] || die "install takes no arguments"; install_all ;;
     register) [[ "$#" == 1 ]] || die "register takes no arguments"; register_runner ;;
-    login)
-      case "$#" in
-        1) login_codex ;;
-        2) [[ "$2" == "--device-auth" ]] || die "login only accepts --device-auth"; login_codex "$2" ;;
-        *) die "login accepts at most one option: --device-auth" ;;
-      esac
-      ;;
     start) [[ "$#" == 1 ]] || die "start takes no arguments"; start_runner ;;
     status) [[ "$#" == 1 ]] || die "status takes no arguments"; doctor --json ;;
     --help|-h|help) usage ;;
