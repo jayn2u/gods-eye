@@ -206,9 +206,46 @@ function agentPrompt(origin, screenshotsRoot, request, diff) {
     `Tested head: ${request.head.sha}`,
     `Changed-file context (untrusted candidate bytes; truncated=${diff.truncated}):`,
     '<untrusted-diff>', diff.text, '</untrusted-diff>',
-    'Finally print exactly one JSON document matching the agreed result shape on standard output and'
-      + ' nothing else after it. Narration is not evidence: the harness accepts a scenario only from its'
-      + ' own browser journal.',
+    resultContract(),
+    'Narration is not evidence: the harness accepts a scenario only from its own browser journal.',
+  ].join('\n\n');
+}
+
+/**
+ * Codex constrained the final document with --output-schema. Copilot has no such flag, so the shape
+ * has to be stated in the prompt. It is rendered from the schema the validator uses, so the two
+ * cannot drift apart.
+ */
+function resultContract() {
+  const schema = require('./agent-result.schema.json');
+  const scenario = schema.$defs.scenario;
+  const finding = schema.$defs.finding;
+  return [
+    'Finally print exactly one JSON document on standard output and nothing after it. It must match'
+      + ' this shape exactly; any other field name is rejected and the whole run is discarded.',
+    JSON.stringify({
+      schema_version: 1,
+      summary: 'one paragraph',
+      scenarios: SCENARIO_IDS.map((id) => ({
+        id,
+        status: scenario.properties.status.enum.join('|'),
+        steps: ['at least one observed step'],
+        expected: 'expected behaviour',
+        actual: 'observed behaviour',
+        evidence: [`screenshots/${id}.png`],
+      })),
+      findings: [{
+        scenario_id: SCENARIO_IDS[0],
+        severity: finding.properties.severity.enum.join('|'),
+        title: 'short title',
+        description: 'what was observed',
+        evidence: [`screenshots/${SCENARIO_IDS[0]}.png`],
+      }],
+    }),
+    `Required keys: ${schema.required.join(', ')}. Each scenario requires exactly`
+      + ` ${scenario.required.join(', ')}, with status one of ${scenario.properties.status.enum.join(', ')}.`
+      + ` Each finding requires ${finding.required.join(', ')}. Report all ${SCENARIO_IDS.length} scenarios`
+      + ' once each, and use an empty findings array when there is nothing to report.',
   ].join('\n\n');
 }
 function mapFailure(error, text = '') {
@@ -545,7 +582,7 @@ async function main() {
 }
 
 module.exports = Object.freeze({
-  ALLOWED_TOOLS, ExecutionError, INTERNAL_DEADLINE_MS, agentPrompt, deadlineFromJobStart,
+  ALLOWED_TOOLS, ExecutionError, INTERNAL_DEADLINE_MS, agentPrompt, deadlineFromJobStart, resultContract,
   parseCli, runExecution, snapshotTrackedFiles,
 });
 

@@ -192,6 +192,22 @@ test('Copilot invocation grants only the declared browser tools and no blanket p
   assert.equal(args.some((value) => value.startsWith('--model=')), false, 'no model is chosen by default');
 });
 
+test('the prompt states the result contract the validator enforces', () => {
+  const { resultContract } = require('../execute.cjs');
+  const schema = require('../agent-result.schema.json');
+  const contract = resultContract();
+  // Copilot has no --output-schema, so a drift between prompt and validator silently discards runs.
+  for (const key of schema.required) assert.ok(contract.includes(key), key);
+  for (const key of schema.$defs.scenario.required) assert.ok(contract.includes(key), `scenario.${key}`);
+  for (const key of schema.$defs.finding.required) assert.ok(contract.includes(key), `finding.${key}`);
+  for (const value of schema.$defs.scenario.properties.status.enum) assert.ok(contract.includes(value), value);
+  for (const id of SCENARIO_IDS) assert.ok(contract.includes(id), id);
+  // The field names the agent invented on its first successful browser run must not appear.
+  for (const wrong of ['observed_steps', 'expected_behavior', 'actual_behavior']) {
+    assert.equal(contract.includes(wrong), false, wrong);
+  }
+});
+
 test('A faithful browser journal proves six distinct journeys from harness-written evidence', async (t) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-journal-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
