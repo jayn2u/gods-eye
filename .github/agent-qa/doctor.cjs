@@ -86,7 +86,11 @@ function parseJson(text) {
 async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const home = env.HOME || os.homedir();
   const qaRoot = path.resolve(env.QA_ROOT || path.join(home, '.local/share/gods-eye-agent-qa'));
-  const checkout = path.resolve(env.QA_DEVELOPER_CHECKOUT || process.cwd());
+  const inWorkflow = env.GITHUB_ACTIONS === 'true';
+  // Inside a job the working directory is the runner workspace, which lives under QA_ROOT by design.
+  // Only a declared developer checkout can be compared against the CI state root.
+  const declaredCheckout = env.QA_DEVELOPER_CHECKOUT || (inWorkflow ? '' : process.cwd());
+  const checkout = declaredCheckout ? path.resolve(declaredCheckout) : '';
   const runnerDir = path.join(qaRoot, 'runner');
   const toolchainDir = path.join(qaRoot, 'toolchain');
   const lockFile = path.join(qaRoot, 'auth.lock');
@@ -96,10 +100,15 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   let realQaRoot = qaRoot;
   let realCheckout = checkout;
   try { realQaRoot = fs.realpathSync(qaRoot); } catch {}
-  try { realCheckout = fs.realpathSync(checkout); } catch {}
-  const pathSafe = path.isAbsolute(qaRoot) && !inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout)
+  try { if (checkout) realCheckout = fs.realpathSync(checkout); } catch {}
+  const separateFromCheckout = checkout === ''
+    || (!inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout));
+  const pathSafe = path.isAbsolute(qaRoot) && separateFromCheckout
     && path.resolve(qaRoot) !== path.resolve(path.join(home, '.copilot'));
-  add(checks, 'paths', pathSafe, { outside_developer_checkout: pathSafe });
+  add(checks, 'paths', pathSafe, {
+    outside_developer_checkout: pathSafe,
+    developer_checkout: checkout ? 'declared' : 'not-applicable',
+  });
 
   const rootMode = modeOf(qaRoot);
   const toolchainMode = modeOf(toolchainDir);
@@ -132,8 +141,11 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
     versionCommandsOk &&= result.ok;
     versions[name] = versionFrom(`${result.stdout}\n${result.stderr}`);
   }
-  const versionsOk = versionCommandsOk && Object.entries(versions).every(([name, version]) => version === EXPECTED[name]);
-  add(checks, 'tool_versions', versionsOk, versions);
+  const pinned = ['node', 'copilot', 'playwright_mcp'];
+  const versionsOk = versionCommandsOk
+    && pinned.every((name) => versions[name] === EXPECTED[name])
+    && ['uv', 'pnpm'].every((name) => typeof versions[name] === 'string' && versions[name].length > 0);
+  add(checks, 'tool_versions', versionsOk, { ...versions, pinned: pinned.join(',') });
 
   const browserProbe = env.QA_BROWSER_PROBE_BIN
     ? command(env.QA_BROWSER_PROBE_BIN, [], { cwd: toolchainDir, env, timeout: 30_000 })
@@ -191,7 +203,6 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const tokenPresent = token.length >= 20;
   // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
   // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
-  const inWorkflow = env.GITHUB_ACTIONS === 'true';
   add(checks, 'subscription_auth', (tokenPresent || !inWorkflow) && !foreignEnvironment, {
     token_present: tokenPresent,
     token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',

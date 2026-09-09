@@ -117,6 +117,11 @@ Agent QA never uses Docker or Compose as a recovery step.
 A report whose reason is `invalid_output` most often means the browser journal did not prove a
 scenario. Read the scenario list in the summary comment rather than the agent's prose.
 
+Restarting the runner service can leave a job that GitHub already assigned to the dying session
+queued indefinitely, with the runner reporting `online` and `busy: false`. The runner log shows
+`A session for this runner already exists` while it reconnects. Cancel that run and let a new
+eligible event start a fresh one; do not restart the service again to clear it.
+
 To stop only the runner service during a scoped rollback or maintenance window, preserve the CI
 login and use:
 
@@ -145,6 +150,13 @@ and Playwright MCP `0.0.80` with npm integrity
 The Copilot CLI ships per-platform binary packages; `package-lock.json` pins each with its own
 integrity value and `npm ci` selects only `copilot-linux-x64` on this runner. `QA_AGENT_MODEL` may
 pin a model through the `AGENT_QA_MODEL` repository variable and is left unset by default.
+
+Node, the Copilot CLI, and Playwright MCP are the harness's own tools and are pinned exactly; the
+doctor rejects a drift. `uv` and `pnpm` build the candidate, and their versions are governed by that
+candidate's own `uv.lock` and `packageManager` field through corepack, so the doctor requires their
+presence and records the observed version rather than asserting a global one. The runner unit pins
+`PATH` to the directory of the Node that `install` verified, because the systemd user manager does
+not inherit a login shell's PATH and a version-managed interpreter would otherwise be invisible.
 
 The published Actions guide installs the CLI with an unpinned `npm install -g @github/copilot` on an
 ephemeral GitHub-hosted runner. This repository does not: a global install would mutate state shared
