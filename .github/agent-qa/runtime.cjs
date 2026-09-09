@@ -489,15 +489,21 @@ function evidenceLocations(evidence) {
   return { evidenceDir: absolute, resultPath: path.join(absolute, 'runtime.json') }
 }
 
-async function prepareCandidate({ candidate, supervisor, environment }) {
+async function prepareCandidate({ candidate, supervisor, environment, cacheRoot }) {
   const venv = path.join(supervisor.runRoot, 'venv')
-  const pnpmStore = path.join(supervisor.runRoot, 'cache', 'pnpm-store')
+  // The environment stays per-run for isolation, but the download caches are shared: a cache inside
+  // the run root made every run refetch the whole dependency set, and that is what exhausted the
+  // internal deadline. QA runs one job at a time, so a shared cache has no concurrent writer.
+  const caches = cacheRoot ?? path.join(supervisor.runRoot, 'cache')
+  const pnpmStore = path.join(caches, 'pnpm-store')
   supervisor.registerOwnedPath(venv, 'python-venv')
-  supervisor.registerOwnedPath(path.join(supervisor.runRoot, 'cache'), 'dependency-cache')
-  await ensurePrivateDirectory(path.join(supervisor.runRoot, 'cache'))
+  if (isWithin(supervisor.runRoot, caches)) {
+    supervisor.registerOwnedPath(caches, 'dependency-cache')
+  }
+  await ensurePrivateDirectory(caches)
   await supervisor.runToDeadline('uv-sync', 'uv', ['sync', '--frozen', '--no-dev'], {
     cwd: candidate,
-    env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(supervisor.runRoot, 'cache', 'uv') },
+    env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(caches, 'uv') },
   })
   await supervisor.runToDeadline('pnpm-install', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
     cwd: candidate,
@@ -511,6 +517,7 @@ async function startRuntime({
   evidence,
   deadline = monotonicDeadlineAfter(DEFAULT_RUNTIME_MS),
   skipInstall = false,
+  cacheRoot,
   signal,
 }) {
   const candidateRoot = assertAbsolutePath(candidate, 'candidate')
@@ -530,8 +537,8 @@ async function startRuntime({
     }
     const baseEnvironment = sanitizedChildEnvironment(runRoot)
     const prepared = skipInstall
-      ? { venv: path.join(runRoot, 'venv'), pnpmStore: path.join(runRoot, 'cache', 'pnpm-store') }
-      : await prepareCandidate({ candidate: candidateRoot, supervisor, environment: baseEnvironment })
+      ? { venv: path.join(runRoot, 'venv'), pnpmStore: path.join(cacheRoot ?? path.join(runRoot, 'cache'), 'pnpm-store') }
+      : await prepareCandidate({ candidate: candidateRoot, supervisor, environment: baseEnvironment, cacheRoot })
     if (skipInstall) {
       const candidateVenv = path.join(candidateRoot, '.venv')
       prepared.venv = candidateVenv

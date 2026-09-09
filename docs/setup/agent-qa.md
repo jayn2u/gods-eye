@@ -97,6 +97,11 @@ Each eligible head receives an advisory summary comment. A report can be `no_fin
 `runner_failed`, `browser_unavailable`, `timeout`, and `setup_failed` describe QA infrastructure;
 they are not product findings or merge gates.
 
+Dependency downloads are cached under `$QA_ROOT/cache` and shared across runs; only the Python
+environment is per-run. A per-run cache made every run refetch the whole dependency set, which
+exhausted the internal deadline before the browser agent started. The cache survives runs and is not
+cleaned with them; delete it by hand if a corrupt download has to be discarded.
+
 QA runs one job globally at a time. A newer event for the same pull request cancels its superseded
 generation; another pull request stays queued. The GitHub job has a 15-minute running limit, with
 an internal 12-minute work deadline reserved before scoped cleanup and upload. Queue time is not
@@ -119,6 +124,10 @@ identify the reported prerequisite, correct that prerequisite, then run `start`;
 Node processes. For a superseded or cancelled run, allow the newer generation or the reporter to
 reach its terminal summary before deciding whether a new eligible pull-request event is needed.
 Agent QA never uses Docker or Compose as a recovery step.
+
+A `timeout` report names the phase that consumed the budget in the job log, as
+`phases: doctor=1s runtime=612s ...`. A large `runtime` figure is dependency installation, not the
+browser agent.
 
 A report whose reason is `invalid_output` most often means the browser journal did not prove a
 scenario. Read the scenario list in the summary comment rather than the agent's prose.
