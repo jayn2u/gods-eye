@@ -489,18 +489,34 @@ function evidenceLocations(evidence) {
   return { evidenceDir: absolute, resultPath: path.join(absolute, 'runtime.json') }
 }
 
+/**
+ * `uv.lock` with `--frozen` fully determines the environment, so an environment built from the same
+ * lock is reusable. Downloading it again per run costs minutes on a slow link and is what exhausted
+ * the internal deadline; the lock digest is the only thing that may key that reuse.
+ */
+function lockKey(candidate) {
+  const digest = crypto.createHash('sha256')
+  for (const relative of ['uv.lock', 'pyproject.toml']) {
+    digest.update(fs.readFileSync(path.join(candidate, relative)))
+  }
+  return digest.digest('hex').slice(0, 32)
+}
+
 async function prepareCandidate({ candidate, supervisor, environment, cacheRoot }) {
-  const venv = path.join(supervisor.runRoot, 'venv')
-  // The environment stays per-run for isolation, but the download caches are shared: a cache inside
-  // the run root made every run refetch the whole dependency set, and that is what exhausted the
-  // internal deadline. QA runs one job at a time, so a shared cache has no concurrent writer.
+  // The download caches and the resolved environment are shared: QA runs one job at a time, so
+  // neither has a concurrent writer, and both are rebuilt whenever the candidate's lock changes.
   const caches = cacheRoot ?? path.join(supervisor.runRoot, 'cache')
+  const shared = cacheRoot !== undefined
+  const venv = shared
+    ? path.join(caches, 'envs', `py-${lockKey(candidate)}`)
+    : path.join(supervisor.runRoot, 'venv')
   const pnpmStore = path.join(caches, 'pnpm-store')
-  supervisor.registerOwnedPath(venv, 'python-venv')
+  if (!shared) supervisor.registerOwnedPath(venv, 'python-venv')
   if (isWithin(supervisor.runRoot, caches)) {
     supervisor.registerOwnedPath(caches, 'dependency-cache')
   }
   await ensurePrivateDirectory(caches)
+  if (shared) await ensurePrivateDirectory(path.join(caches, 'envs'))
   await supervisor.runToDeadline('uv-sync', 'uv', ['sync', '--frozen', '--no-dev'], {
     cwd: candidate,
     env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(caches, 'uv') },
