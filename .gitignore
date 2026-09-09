@@ -225,5 +225,12 @@ node_modules/
 dist/
 playwright-report/
 test-results/
+<<<<<<< HEAD
 .omo/
 .github/agent-qa/.omo/
+=======
+
+.omo/
+
+.claude/
+>>>>>>> cb77513 (chore : Update gitignore)
