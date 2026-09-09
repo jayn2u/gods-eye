@@ -521,10 +521,22 @@ async function prepareCandidate({ candidate, supervisor, environment, cacheRoot 
     cwd: candidate,
     env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(caches, 'uv') },
   })
-  await supervisor.runToDeadline('pnpm-install', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
-    cwd: candidate,
-    env: environment,
-  })
+  // A shared store keeps whatever a killed run left behind: a deadline that lands mid-download leaves
+  // partial package state that every later install then trips over. The store is a cache, so the
+  // recovery is to discard it once and retry rather than to require an operator.
+  try {
+    await supervisor.runToDeadline('pnpm-install', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
+      cwd: candidate,
+      env: environment,
+    })
+  } catch (error) {
+    if (!shared || error.code === 'CANCELLED' || error.code === 'DEADLINE_EXCEEDED') throw error
+    await fsPromises.rm(pnpmStore, { recursive: true, force: true })
+    await supervisor.runToDeadline('pnpm-install-retry', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
+      cwd: candidate,
+      env: environment,
+    })
+  }
   return { venv, pnpmStore }
 }
 

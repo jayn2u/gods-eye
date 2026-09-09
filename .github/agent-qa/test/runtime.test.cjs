@@ -66,6 +66,17 @@ test('a shared cache root is used for downloads and never cleaned with the run',
   assert.match(source, /if \(!shared\) supervisor\.registerOwnedPath\(venv, 'python-venv'\)/u);
 });
 
+test('a poisoned shared store is discarded once and the install retried', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'runtime.cjs'), 'utf8');
+  const block = source.slice(source.indexOf("'pnpm-install'"), source.indexOf('return { venv, pnpmStore }'));
+  // Only a shared store is discarded, and never in place of honouring a cancellation or a deadline.
+  assert.match(block, /if \(!shared \|\| error\.code === 'CANCELLED' \|\| error\.code === 'DEADLINE_EXCEEDED'\) throw error/u);
+  assert.match(block, /await fsPromises\.rm\(pnpmStore, \{ recursive: true, force: true \}\)/u);
+  assert.match(block, /'pnpm-install-retry'/u);
+  // Exactly one retry: a second failure must surface.
+  assert.equal((block.match(/pnpm-install-retry/gu) || []).length, 1);
+});
+
 test('the environment key changes with the lock and not with anything else', async (t) => {
   const { mkdtempSync, writeFileSync, mkdirSync } = require('node:fs');
   const os = require('node:os');
