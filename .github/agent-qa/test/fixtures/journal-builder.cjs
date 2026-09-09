@@ -39,7 +39,7 @@ function faithfulJournalEntries(origin, { startedAt = Date.now() - 60_000 } = {}
     entries.push({ seq, at: new Date(clock).toISOString(), kind, ...payload });
   };
   for (const scenario of scenarioContract.scenarios) {
-    push('profile', { profile: scenario.profile });
+    push('profile', { scenario: scenario.id, profile: scenario.profile });
     push('navigate', { url: `${origin}/` });
     for (const requirement of scenarioActionRequirements(scenario)) {
       push('action', observableFor(scenario, requirement.label));

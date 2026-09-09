@@ -94,12 +94,13 @@ function fakePage({ evaluate = async () => undefined } = {}) {
   return { page, bindings, listeners: journal, frame };
 }
 
-test('Given an unknown fault profile, when the trusted control parses it, then the request is rejected', async () => {
+test('Given an unknown scenario, when the trusted control parses it, then the request is rejected', async () => {
   const { page, bindings } = fakePage();
   const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
   await installBrowserHarness({ page });
   const control = bindings.get('__godsEyeQaControl');
-  await assert.rejects(async () => control({}, 'selectProfile', 'external-navigation'), /Unknown browser fault profile/);
+  await assert.rejects(async () => control({}, 'selectScenario', 'external-navigation'), /Unknown scenario/);
+  await assert.rejects(async () => control({}, 'selectProfile', 'normal'), /Unknown browser harness command/);
 });
 
 test('Given a receipt request, when the harness serves it, then the predicate is contract text the agent never supplies', async () => {
@@ -122,7 +123,7 @@ test('Given a receipt request, when the harness serves it, then the predicate is
     'an agent-supplied predicate must not be accepted as a scenario id',
   );
 
-  await control(source, 'selectProfile', 'normal');
+  await control(source, 'selectScenario', 'blank-input');
   const token = await control(source, 'receipt', 'blank-input');
   assert.equal(token, 'qa-receipt:blank-input');
   const contract = require(resolve(qaRoot, 'scenarios.json'));

@@ -188,7 +188,7 @@ function incompleteScenarios() {
 function agentPrompt(origin, screenshotsRoot, request, diff) {
   const steps = scenarioContract.scenarios.map((scenario) => [
     `Scenario ${scenario.id} (profile ${scenario.profile}):`,
-    `1. Call browser_evaluate with () => window.__GODS_EYE_QA__.selectProfile(${JSON.stringify(scenario.profile)}).`,
+    `1. Call browser_evaluate with () => window.__GODS_EYE_QA__.selectScenario(${JSON.stringify(scenario.id)}).`,
     `2. Call browser_navigate to ${origin}/.`,
     '3. Perform these observable user steps in order, each through its own specific browser tool:',
     ...scenarioActionRequirements(scenario).map((requirement, index) => `   ${index + 1}. ${requirement.label}`),

@@ -31,7 +31,7 @@ function faithfulJournal({ at = Date.UTC(2026, 8, 9, 12, 0, 0) } = {}) {
     entries.push({ seq, at: new Date(clock).toISOString(), kind, ...payload });
   };
   for (const item of scenarioContract.scenarios) {
-    push('profile', { profile: item.profile });
+    push('profile', { scenario: item.id, profile: item.profile });
     push('navigate', { url: `${ORIGIN}/` });
     for (const requirement of scenarioActionRequirements(item)) {
       push('action', observableFor(item, requirement.label));
@@ -161,6 +161,45 @@ test('narration cannot substitute for an observed action', async (t) => {
       assert.equal(parsed.complete, false, name);
     });
   }
+});
+
+test('a retry restarts a scenario instead of being read as the next one', () => {
+  const entries = faithfulJournal();
+  // Three scenarios share the `normal` profile, so this is the case a profile-named marker could
+  // not distinguish: repeating the first scenario used to shift every later scenario's evidence.
+  const first = entries.findIndex((entry) => entry.kind === 'profile');
+  const secondProfile = entries.findIndex((entry, index) => index > first && entry.kind === 'profile');
+  const repeated = { ...entries[first] };
+  entries.splice(secondProfile, 0, repeated);
+  const replay = entries.slice(first, secondProfile).filter((entry) => entry.kind !== 'profile');
+  entries.splice(secondProfile + 1, 0, ...replay.map((entry) => ({ ...entry })));
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, true, 'a completed retry still proves every scenario');
+  assert.equal(parsed.proof.get('model-provenance').receipt, true, 'later scenarios keep their own evidence');
+});
+
+test('a retry that does not repeat the actions loses that scenario', () => {
+  const entries = faithfulJournal();
+  const secondProfile = entries.findIndex((entry, index) =>
+    index > entries.findIndex((item) => item.kind === 'profile') && entry.kind === 'profile');
+  entries.splice(secondProfile, 0, { ...entries[0] });
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.proof.get('search-detail-return').receipt, false);
+});
+
+test('a marker naming a scenario out of declared order is refused', () => {
+  const entries = faithfulJournal();
+  entries.find((entry) => entry.kind === 'profile').scenario = 'blank-input';
+  const { screenshots } = withScreenshots(entries);
+  assert.equal(parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots }).complete, false);
 });
 
 test('a screenshot must exist and postdate its receipt', async (t) => {
