@@ -1,5 +1,6 @@
 'use strict';
 
+const { spawnSync } = require('node:child_process');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
@@ -35,7 +36,9 @@ function mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal }) {
           '--init-page', initPage,
         ],
         env: { QA_BROWSER_JOURNAL: journal },
-        tools: ALLOWED_TOOLS.join(','),
+        // An array, not a comma-separated string: Copilot discards the whole server entry for a
+        // string value, silently, and the agent then reports that no browser tools exist.
+        tools: [...ALLOWED_TOOLS],
       },
     },
   };
@@ -62,6 +65,23 @@ async function prepareCopilotHome({ home, workDir, mcpBin, origin, screenshotsRo
     }
   }
   return { configPath, configDir };
+}
+
+/**
+ * Copilot drops a malformed server entry without a warning, so the only symptom is an agent that
+ * says it had no tools. Ask the CLI what it actually loaded before spending a run on it.
+ */
+function assertMcpServerLoaded({ copilotBin, home, env }) {
+  const listed = spawnSync(copilotBin, ['mcp', 'list'], {
+    env: { ...env, HOME: home }, encoding: 'utf8', timeout: 30_000,
+  });
+  const output = `${listed.stdout ?? ''}${listed.stderr ?? ''}`;
+  if (listed.error || listed.status !== 0 || !new RegExp(`\\b${MCP_SERVER}\\b`, 'u').test(output)) {
+    throw new CopilotError(
+      'MCP_UNAVAILABLE',
+      `Copilot did not load the ${MCP_SERVER} MCP server; browser tools are unavailable`,
+    );
+  }
 }
 
 function copilotArguments({ copilotBin, prompt, model }) {
@@ -106,6 +126,14 @@ async function runCopilot({ runtime, paths, prompt, environment, sanitizedChildE
     initPage: paths.initPage,
     journal: paths.journal,
   });
+  const childEnvironment = sanitizedChildEnvironment(runtime.supervisor.runRoot, {
+    HOME: paths.agentHome,
+    XDG_CONFIG_HOME: path.join(paths.agentHome, '.config'),
+    COPILOT_GITHUB_TOKEN: environment.copilotToken,
+    PLAYWRIGHT_BROWSERS_PATH: paths.browsers,
+    QA_BROWSER_JOURNAL: paths.journal,
+  });
+  assertMcpServerLoaded({ copilotBin: paths.copilotBin, home: paths.agentHome, env: childEnvironment });
   const invocation = copilotArguments({
     copilotBin: paths.copilotBin,
     prompt,
@@ -118,13 +146,7 @@ async function runCopilot({ runtime, paths, prompt, environment, sanitizedChildE
       [environment.lockFile, invocation.command, ...invocation.args],
       {
         cwd: paths.workDir,
-        env: sanitizedChildEnvironment(runtime.supervisor.runRoot, {
-          HOME: paths.agentHome,
-          XDG_CONFIG_HOME: path.join(paths.agentHome, '.config'),
-          COPILOT_GITHUB_TOKEN: environment.copilotToken,
-          PLAYWRIGHT_BROWSERS_PATH: paths.browsers,
-          QA_BROWSER_JOURNAL: paths.journal,
-        }),
+        env: childEnvironment,
       },
     );
   } catch (error) {
@@ -154,6 +176,7 @@ module.exports = Object.freeze({
   CopilotError,
   DENIED_TOOLS,
   MCP_SERVER,
+  assertMcpServerLoaded,
   copilotArguments,
   extractAgentResult,
   mcpConfig,
