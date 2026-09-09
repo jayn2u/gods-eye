@@ -274,7 +274,9 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
       const declared = scenarios.get(value) as { profile: Profile; receipt: string }
       reset(declared.profile)
       currentScenario = value
-      journal.append('profile', { scenario: value, profile: declared.profile })
+      // Record where the page already is. An agent naturally loads the application before selecting
+      // the first scenario, and that visit is as good a proof of origin as a later navigation.
+      journal.append('profile', { scenario: value, profile: declared.profile, url: source.page.url() })
       return { scenario: value, profile: declared.profile, selections: state.selections }
     }
     if (command === 'receipt') {

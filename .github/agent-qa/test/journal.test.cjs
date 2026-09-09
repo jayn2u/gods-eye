@@ -31,7 +31,7 @@ function faithfulJournal({ at = Date.UTC(2026, 8, 9, 12, 0, 0) } = {}) {
     entries.push({ seq, at: new Date(clock).toISOString(), kind, ...payload });
   };
   for (const item of scenarioContract.scenarios) {
-    push('profile', { scenario: item.id, profile: item.profile });
+    push('profile', { scenario: item.id, profile: item.profile, url: `${ORIGIN}/` });
     push('navigate', { url: `${ORIGIN}/` });
     for (const requirement of scenarioActionRequirements(item)) {
       push('action', observableFor(item, requirement.label));
@@ -101,11 +101,11 @@ test('narration cannot substitute for an observed action', async (t) => {
       const index = entries.findIndex((entry) => entry.kind === 'action');
       entries.splice(index, 1);
     }],
-    ['an action performed before navigation', (entries) => {
-      const navigate = entries.findIndex((entry) => entry.kind === 'navigate');
-      const action = entries.findIndex((entry) => entry.kind === 'action');
-      const moved = entries.splice(action, 1)[0];
-      entries.splice(navigate, 0, moved);
+    // The marker now carries the page it was issued from, so "before the navigate entry" no longer
+    // means anything. The invariant that survives is that actions need established origin proof.
+    ['an action with no origin proof at all', (entries) => {
+      delete entries.find((entry) => entry.kind === 'profile').url;
+      entries.splice(entries.findIndex((entry) => entry.kind === 'navigate'), 1);
       let seq = 0;
       for (const entry of entries) { seq += 1; entry.seq = seq; }
     }],
@@ -198,6 +198,47 @@ test('a retry that does not repeat the actions loses that scenario', () => {
 test('a marker naming a scenario out of declared order is refused', () => {
   const entries = faithfulJournal();
   entries.find((entry) => entry.kind === 'profile').scenario = 'blank-input';
+  const { screenshots } = withScreenshots(entries);
+  assert.equal(parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots }).complete, false);
+});
+
+test('loading the application before the first scenario is selected is not fatal', () => {
+  const entries = faithfulJournal();
+  // The agent naturally opens the application before it selects the first scenario. That visit used
+  // to invalidate the whole run and leave the first scenario without origin proof.
+  entries.splice(0, 0, { seq: 0.5, at: entries[0].at, kind: 'navigate', url: `${ORIGIN}/` });
+  const firstNavigate = entries.findIndex((entry, index) => index > 1 && entry.kind === 'navigate');
+  entries.splice(firstNavigate, 1);
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, true, 'the marker page counts as that scenario origin proof');
+  assert.equal(parsed.proof.get('search-detail-return').navigate, true);
+});
+
+test('a marker issued from a foreign origin proves nothing', () => {
+  const entries = faithfulJournal();
+  const first = entries.find((entry) => entry.kind === 'profile');
+  first.url = 'http://example.test/';
+  const firstNavigate = entries.findIndex((entry) => entry.kind === 'navigate');
+  entries.splice(firstNavigate, 1);
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.proof.get('search-detail-return').navigate, false);
+});
+
+test('an action before any scenario is selected still invalidates the run', () => {
+  const entries = faithfulJournal();
+  entries.splice(0, 0, {
+    seq: 0.5, at: entries[0].at, kind: 'action', action: 'click',
+    target: { tag: 'BUTTON', id: '', type: 'button', ariaLabel: 'Search gallery', text: 'Search gallery' }, value: '',
+  });
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
   const { screenshots } = withScreenshots(entries);
   assert.equal(parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots }).complete, false);
 });

@@ -83,6 +83,7 @@ function fakePage({ evaluate = async () => undefined } = {}) {
   const bindings = new Map();
   const journal = [];
   const frame = { url: () => 'http://127.0.0.1:41111/' };
+  const pageUrl = 'http://127.0.0.1:41111/';
   const page = {
     route: async () => undefined,
     exposeBinding: async (name, callback) => { bindings.set(name, callback); },
@@ -90,6 +91,7 @@ function fakePage({ evaluate = async () => undefined } = {}) {
     evaluate,
     on: (event, handler) => { journal.push([event, handler]); },
     mainFrame: () => frame,
+    url: () => pageUrl,
   };
   return { page, bindings, listeners: journal, frame };
 }
