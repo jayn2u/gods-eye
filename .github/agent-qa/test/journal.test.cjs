@@ -217,7 +217,29 @@ test('the MCP config pins the loopback origin, the journal, and the tool list', 
   assert.ok(server.args.includes('--headless') && server.args.includes('--isolated'));
   assert.equal(server.args[server.args.indexOf('--allowed-origins') + 1], ORIGIN);
   assert.equal(server.args[server.args.indexOf('--init-page') + 1], '/control/browser-init.ts');
-  assert.equal(server.tools, scenarioContract.browser.allowed_tools.join(','));
+  // Copilot silently discards a server whose tools field is a string, and the agent then reports
+  // that it had no browser tools at all. The CLI's own writer emits an array.
+  assert.ok(Array.isArray(server.tools), 'tools must be an array, not a comma-separated string');
+  assert.deepEqual(server.tools, scenarioContract.browser.allowed_tools);
+  assert.equal(JSON.parse(JSON.stringify(config)).mcpServers.playwright.tools.length, 14);
+});
+
+test('a config Copilot will not load fails the run before it starts', () => {
+  const { assertMcpServerLoaded, CopilotError } = require('../agents/copilot.cjs');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gods-eye-mcp-'));
+  const listed = path.join(home, 'fake-copilot-listed');
+  const empty = path.join(home, 'fake-copilot-empty');
+  fs.writeFileSync(listed, '#!/usr/bin/env bash\necho "User servers:"\necho "  playwright (local)"\n', { mode: 0o700 });
+  fs.writeFileSync(empty, '#!/usr/bin/env bash\necho "No MCP servers configured."\n', { mode: 0o700 });
+
+  assert.doesNotThrow(() => assertMcpServerLoaded({ copilotBin: listed, home, env: {} }));
+  assert.throws(
+    () => assertMcpServerLoaded({ copilotBin: empty, home, env: {} }),
+    (error) => error instanceof CopilotError
+      && error.code === 'MCP_UNAVAILABLE'
+      && /browser tools are unavailable/u.test(error.message),
+  );
+  assert.throws(() => assertMcpServerLoaded({ copilotBin: path.join(home, 'absent'), home, env: {} }), CopilotError);
 });
 
 test('the final document is extracted from stdout without granting a write tool', () => {
