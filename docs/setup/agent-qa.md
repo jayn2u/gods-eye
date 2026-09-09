@@ -107,8 +107,14 @@ It may include the validated report, sanitized summary and steps, known screensh
 deterministic traces. It excludes CI auth, MCP configuration, the raw browser journal, agent stdout,
 environment dumps, and real gallery assets.
 
-For `auth_required`, renew the `AGENT_QA_COPILOT_TOKEN` secret and then repeat the read-only checks;
-do not introduce a provider API key and do not place a token on the runner. For a runner-offline result, use doctor and `status` to
+For `auth_required`, the Copilot CLI rejected the credential. The job log carries a sanitized excerpt
+of the agent's own error; `Failed to fetch PAT user login (401) ... Bad credentials` means GitHub
+refused the token itself rather than its permissions. Check, in order: the secret was stored without
+a trailing newline (`printf %s` rather than `echo`, though the harness also trims it and the doctor
+refuses a token carrying whitespace), the token has not expired, it carries the Copilot Requests
+permission, and the account it belongs to has an active Copilot subscription. Renew the
+`AGENT_QA_COPILOT_TOKEN` secret and repeat the read-only checks; do not introduce a provider API key
+and do not place a token on the runner. For a runner-offline result, use doctor and `status` to
 identify the reported prerequisite, correct that prerequisite, then run `start`; do not kill all
 Node processes. For a superseded or cancelled run, allow the newer generation or the reporter to
 reach its terminal summary before deciding whether a new eligible pull-request event is needed.

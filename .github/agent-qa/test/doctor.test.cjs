@@ -125,6 +125,26 @@ test('a missing agent token inside a workflow is not accepted', (t) => {
   assert.equal(auth.ok, false);
 });
 
+test('a token carrying a trailing newline is refused at preflight', (t) => {
+  const f = fixture(t);
+  const result = run({ ...f.env, QA_COPILOT_TOKEN: `${SECRET}\n` });
+  assert.notEqual(result.status, 0);
+  const auth = check(result.report, 'subscription_auth');
+  assert.equal(auth.token_well_formed, false);
+  assert.equal(auth.token_present, false);
+  assert.equal(auth.ok, false);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(SECRET));
+});
+
+test('a well-formed token is accepted and its shape is reported', (t) => {
+  const f = fixture(t);
+  const result = run(f.env);
+  assert.equal(result.status, 0, result.stderr);
+  const auth = check(result.report, 'subscription_auth');
+  assert.equal(auth.token_well_formed, true);
+  assert.equal(auth.token_present, true);
+});
+
 test('a token absent outside a workflow is reported without failing a read-only check', (t) => {
   const f = fixture(t);
   const env = { ...f.env };
