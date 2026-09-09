@@ -170,8 +170,15 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
     }
 
     if (entry.kind === 'profile') {
+      // The marker names the scenario, not its fault profile: three scenarios share `normal`, so a
+      // profile name could not tell a retry of one from the start of the next.
+      if (current !== null && entry.scenario === current) {
+        // A retry restarts that scenario's proof; it still has to perform every action again.
+        proof.set(current, { navigate: false, nextAction: 0, receipt: false, receiptAt: NaN, screenshot: null });
+        continue;
+      }
       const next = scenarioContract.scenarios[scenarioIndex + 1];
-      if (!next || entry.profile !== next.profile) {
+      if (!next || entry.scenario !== next.id || entry.profile !== next.profile) {
         invalid = true;
         continue;
       }

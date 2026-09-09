@@ -115,10 +115,13 @@ function createJournal(): {
   }
 }
 
-const scenarioReceipts = (): ReadonlyMap<string, string> => {
+const scenarioContract = (): ReadonlyMap<string, { readonly profile: Profile; readonly receipt: string }> => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const contract = require('./scenarios.json') as { scenarios: { id: string; profile: string; receipt: string }[] }
-  return new Map(contract.scenarios.map((scenario) => [scenario.id, scenario.receipt]))
+  return new Map(contract.scenarios.map((scenario) => [
+    scenario.id,
+    { profile: parseProfile(scenario.profile), receipt: scenario.receipt },
+  ]))
 }
 
 function collectPageEvents(): void {
@@ -156,7 +159,7 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
   }
   let firstSearch: Route | null = null
   const journal = createJournal()
-  const receipts = scenarioReceipts()
+  const scenarios = scenarioContract()
   let currentScenario: string | null = null
   let pendingType: { target: ObservedTarget; value: string } | null = null
 
@@ -261,21 +264,27 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
   })
 
   await page.exposeBinding('__godsEyeQaControl', async (source, command: unknown, value: unknown) => {
-    if (command === 'selectProfile') {
-      const profile = parseProfile(value)
-      reset(profile)
-      currentScenario = null
-      journal.append('profile', { profile })
-      return { profile, selections: state.selections }
+    if (command === 'selectScenario') {
+      // Three scenarios share the `normal` fault profile, so a profile name cannot identify which
+      // one is starting and a retry would look like the next scenario beginning.
+      if (typeof value !== 'string' || !scenarios.has(value)) {
+        journal.append('harness_error', { message: 'scenario selection named an unknown scenario' })
+        throw new BrowserHarnessInputError('Unknown scenario')
+      }
+      const declared = scenarios.get(value) as { profile: Profile; receipt: string }
+      reset(declared.profile)
+      currentScenario = value
+      journal.append('profile', { scenario: value, profile: declared.profile })
+      return { scenario: value, profile: declared.profile, selections: state.selections }
     }
     if (command === 'receipt') {
-      if (typeof value !== 'string' || !receipts.has(value)) {
+      if (typeof value !== 'string' || !scenarios.has(value)) {
         journal.append('harness_error', { message: 'receipt requested for an unknown scenario' })
         throw new BrowserHarnessInputError('Unknown scenario receipt')
       }
       flushPendingType()
       // The predicate is harness text evaluated here, never supplied or relayed by the agent.
-      const predicate = receipts.get(value) as string
+      const predicate = (scenarios.get(value) as { receipt: string }).receipt
       const satisfied = await source.page.evaluate(`(${predicate})(${JSON.stringify(state)})`) === true
       currentScenario = value
       journal.append('receipt', { scenario: value, token: `qa-receipt:${value}`, satisfied, state: { ...state } })
@@ -289,7 +298,7 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
     const binding = Reflect.get(window, '__godsEyeQaControl')
     if (typeof binding !== 'function') throw new TypeError('Browser QA binding is unavailable')
     Reflect.set(window, '__GODS_EYE_QA__', Object.freeze({
-      selectProfile: (profile: unknown) => binding('selectProfile', profile),
+      selectScenario: (scenario: unknown) => binding('selectScenario', scenario),
       receipt: (scenario: unknown) => binding('receipt', scenario),
     }))
   }
