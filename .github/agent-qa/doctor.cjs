@@ -189,9 +189,13 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
   const token = env.QA_COPILOT_TOKEN || '';
   const tokenPresent = token.length >= 20;
-  add(checks, 'subscription_auth', tokenPresent && !foreignEnvironment, {
+  // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
+  // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
+  const inWorkflow = env.GITHUB_ACTIONS === 'true';
+  add(checks, 'subscription_auth', (tokenPresent || !inWorkflow) && !foreignEnvironment, {
     token_present: tokenPresent,
-    token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : 'missing',
+    token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
+    required: inWorkflow,
     foreign_provider_environment: foreignEnvironment,
   });
 

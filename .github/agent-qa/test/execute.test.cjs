@@ -11,14 +11,13 @@ const test = require('node:test');
 const {
   ALLOWED_TOOLS,
   INTERNAL_DEADLINE_MS,
-  codexArguments,
   deadlineFromJobStart,
   parseCli,
-  parseCodexEvents,
-  receiptExpression,
   runExecution,
   snapshotTrackedFiles,
 } = require('../execute.cjs');
+const { parseBrowserJournal } = require('../journal.cjs');
+const { faithfulJournalEntries } = require('./fixtures/journal-builder.cjs');
 const { SCENARIO_IDS, validateEvidenceManifest, validateReport } = require('../contracts.cjs');
 
 const qaRoot = path.resolve(__dirname, '..');
@@ -68,16 +67,6 @@ async function screenshots(root, missing) {
   }
 }
 
-async function readFixtureEvents(file, screenshotsRoot) {
-  return (await fsp.readFile(file, 'utf8')).trim().split('\n').map((line) => {
-    const event = JSON.parse(line);
-    if (event.item?.tool === 'browser_take_screenshot') {
-      event.item.arguments.filename = path.join(screenshotsRoot, path.basename(event.item.arguments.filename));
-    }
-    return event;
-  });
-}
-
 function successAdapters(overrides = {}) {
   let snapshots = 0;
   let cleanChecks = 0;
@@ -124,22 +113,30 @@ function successAdapters(overrides = {}) {
           ...(overrides.baselineFailed ? { details: 'One browser assertion failed.' } : {}),
         };
       },
-      runCodex: async ({ paths, environment, prompt }) => {
-        order.push('codex');
+      runAgent: async ({ paths, environment, prompt }) => {
+        order.push('agent');
         for (const scenario of require('../scenarios.json').scenarios) {
-          assert.equal(prompt.includes(receiptExpression(scenario)), true);
+          assert.equal(prompt.includes(`window.__GODS_EYE_QA__.receipt(${JSON.stringify(scenario.id)})`), true);
           assert.equal(prompt.includes(
             `filename ${JSON.stringify(path.join(paths.screenshotsRoot, `${scenario.id}.png`))}`,
           ), true);
           assert.equal(prompt.includes(`report screenshots/${scenario.id}.png`), true);
+          // The receipt condition itself must never be handed to the agent.
+          assert.equal(prompt.includes(scenario.receipt), false);
         }
         assert.match(environment.lockFile, /auth\.lock$/);
-        const source = overrides.events ?? path.join(fixtureRoot, 'success.jsonl');
-        const eventsPath = path.join(path.dirname(paths.privateResult), 'events.jsonl');
-        const events = await readFixtureEvents(source, paths.screenshotsRoot);
-        await fsp.writeFile(eventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
-        const stderrPath = path.join(path.dirname(paths.privateResult), 'stderr.log');
+        const journalPath = paths.journal;
+        const stdoutPath = path.join(path.dirname(paths.privateResult), 'copilot.stdout.log');
+        const stderrPath = path.join(path.dirname(paths.privateResult), 'copilot.stderr.log');
         await fsp.writeFile(stderrPath, overrides.stderr ?? '');
+        if (!overrides.noScreenshots) {
+          await screenshots(paths.screenshotsRoot, overrides.missingScreenshot);
+          await fsp.writeFile(path.join(paths.screenshotsRoot, 'untrusted-extra.txt'), 'must be pruned');
+        }
+        const entries = overrides.journal
+          ? overrides.journal(faithfulJournalEntries(paths.origin))
+          : faithfulJournalEntries(paths.origin);
+        await fsp.writeFile(journalPath, entries.map((entry) => JSON.stringify(entry)).join('\n') + '\n');
         if (!overrides.noResult) {
           if (overrides.invalidResult) await fsp.writeFile(paths.privateResult, '{bad-json');
           else {
@@ -148,11 +145,11 @@ function successAdapters(overrides = {}) {
             await fsp.writeFile(paths.privateResult, JSON.stringify(result));
           }
         }
-        if (!overrides.noScreenshots) {
-          await screenshots(paths.screenshotsRoot, overrides.missingScreenshot);
-          await fsp.writeFile(path.join(paths.screenshotsRoot, 'untrusted-extra.txt'), 'must be pruned');
-        }
-        return { eventsPath, stderrPath, privateResult: paths.privateResult, processError: overrides.processError };
+        await fsp.writeFile(stdoutPath, overrides.noResult ? 'no document here' : 'reported');
+        return {
+          journalPath, stdoutPath, stderrPath, privateResult: paths.privateResult,
+          processError: overrides.processError,
+        };
       },
     },
   };
@@ -185,142 +182,54 @@ test('CLI parsing and the single wall-to-monotonic deadline preserve the task co
   assert.equal(deadline, 25_000 + INTERNAL_DEADLINE_MS - 120_000);
 });
 
-test('Codex invocation isolates config, pins one required MCP allowlist, and chooses no model', () => {
-  const invocation = codexArguments({
-    codexBin: '/trusted/codex',
-    mcpBin: '/trusted/playwright-mcp',
-    origin,
-    screenshotsRoot: '/evidence/screenshots',
-    privateResult: '/private/result.json',
-    workDir: '/private/empty',
-    prompt: 'trusted prompt',
-  });
-  const joined = invocation.args.join('\n');
-  assert.match(joined, /--ignore-user-config/);
-  assert.match(joined, /--ignore-rules/);
-  assert.match(joined, /--sandbox\nread-only/);
-  assert.match(joined, /mcp_servers\.playwright\.required=true/);
-  assert.match(joined, /project_doc_max_bytes=0/);
-  assert.doesNotMatch(joined, /browser_run_code/);
-  assert.doesNotMatch(joined, /--no-sandbox|--extension|--user-data-dir|--model/);
-  assert.equal(ALLOWED_TOOLS.includes('browser_take_screenshot'), true);
+test('Copilot invocation grants only the declared browser tools and no blanket permission', () => {
+  const { copilotArguments, DENIED_TOOLS } = require('../agents/copilot.cjs');
+  const { args } = copilotArguments({ copilotBin: '/toolchain/.bin/copilot', prompt: 'assignment', model: '' });
+  assert.deepEqual(args.slice(0, 4), ['-p', 'assignment', '-s', '--no-ask-user']);
+  for (const tool of ALLOWED_TOOLS) assert.ok(args.includes(`--allow-tool=playwright(${tool})`), tool);
+  for (const denied of DENIED_TOOLS) assert.ok(args.includes(`--deny-tool=${denied}`), denied);
+  assert.equal(args.some((value) => /--allow-all|--yolo/u.test(value)), false);
+  assert.equal(args.some((value) => value.startsWith('--model=')), false, 'no model is chosen by default');
 });
 
-test('Pinned-format completed MCP events prove six distinct journeys and emitted usage', async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-events-'));
+test('A faithful browser journal proves six distinct journeys from harness-written evidence', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-journal-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const screenshotsRoot = path.join(root, 'screenshots');
   await screenshots(screenshotsRoot);
-  const events = await readFixtureEvents(path.join(fixtureRoot, 'success.jsonl'), screenshotsRoot);
-  const pinnedCalls = events.filter((event) => event.item?.type === 'mcp_tool_call').map((event) => event.item);
-  assert.equal(pinnedCalls.filter((item) => item.tool === 'browser_click')
-    .every((item) => typeof item.arguments.target === 'string' && !Object.hasOwn(item.arguments, 'ref')), true);
-  assert.equal(pinnedCalls.filter((item) => item.tool === 'browser_fill_form')
-    .every((item) => item.arguments.fields.every((field) => typeof field.target === 'string')), true);
-  const parsed = parseCodexEvents(events, { origin, screenshotsRoot });
+  const entries = faithfulJournalEntries(origin);
+  const parsed = parseBrowserJournal(entries, { origin, screenshotsRoot });
   assert.equal(parsed.complete, true);
-  assert.deepEqual(parsed.usage, { input_tokens: 1200, cached_input_tokens: 400, output_tokens: 300 });
   assert.equal(parsed.toolCalls.filter(({ tool }) => tool === 'browser_take_screenshot').length, 6);
   assert.equal(parsed.toolCalls.every(({ scenario_id }) => SCENARIO_IDS.includes(scenario_id)), true);
-  const failedEvents = structuredClone(events);
-  failedEvents.find((event) => event.item?.tool === 'browser_click').item.status = 'failed';
-  assert.equal(parseCodexEvents(failedEvents, { origin, screenshotsRoot }).complete, false);
-  const unrelatedEvents = structuredClone(events);
-  for (const event of unrelatedEvents) {
-    if (['browser_click', 'browser_type', 'browser_fill_form', 'browser_select_option', 'browser_press_key'].includes(event.item?.tool)) {
-      event.item.tool = 'browser_press_key';
-      event.item.arguments = { key: 'F13' };
-    }
-  }
-  assert.equal(parseCodexEvents(unrelatedEvents, { origin, screenshotsRoot }).complete, false);
-  const missingReceiptOutput = structuredClone(events);
-  const receiptEvent = missingReceiptOutput.find((event) => event.item?.tool === 'browser_evaluate'
-    && String(event.item.arguments?.function).includes('qa-receipt:'));
-  receiptEvent.item.result.content = [{ type: 'text', text: 'unrelated output' }];
-  assert.equal(parseCodexEvents(missingReceiptOutput, { origin, screenshotsRoot }).complete, false);
-  const screenshotBeforeReceipt = structuredClone(events);
-  const firstReceiptIndex = screenshotBeforeReceipt.findIndex((event) => event.item?.tool === 'browser_evaluate'
-    && String(event.item.arguments?.function).includes('qa-receipt:'));
-  const firstScreenshotIndex = screenshotBeforeReceipt.findIndex((event) => event.item?.tool === 'browser_take_screenshot');
-  [screenshotBeforeReceipt[firstReceiptIndex], screenshotBeforeReceipt[firstScreenshotIndex]]
-    = [screenshotBeforeReceipt[firstScreenshotIndex], screenshotBeforeReceipt[firstReceiptIndex]];
-  assert.equal(parseCodexEvents(screenshotBeforeReceipt, { origin, screenshotsRoot }).complete, false);
-  const bareScreenshot = structuredClone(events);
-  bareScreenshot[firstScreenshotIndex].item.arguments.filename = 'search-detail-return.png';
-  assert.equal(parseCodexEvents(bareScreenshot, { origin, screenshotsRoot }).complete, false);
-  const escapedScreenshot = structuredClone(events);
-  escapedScreenshot[firstScreenshotIndex].item.arguments.filename = path.join(
-    screenshotsRoot, '..', 'search-detail-return.png',
-  );
-  assert.equal(parseCodexEvents(escapedScreenshot, { origin, screenshotsRoot }).complete, false);
+  assert.equal(new Set(parsed.toolCalls.map(({ scenario_id }) => scenario_id)).size, 6);
 });
 
-test('A failed exploratory locator stays visible but later complete scenario proof recovers', async (t) => {
-  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-recovered-events-'));
+test('An action the page never observed cannot be recovered by anything the agent reports', async (t) => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-journal-gap-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const screenshotsRoot = path.join(root, 'screenshots');
   await screenshots(screenshotsRoot);
-  const events = await readFixtureEvents(path.join(fixtureRoot, 'success.jsonl'), screenshotsRoot);
-  const failedExploration = (await fsp.readFile(
-    path.join(fixtureRoot, 'recovered-exploration.jsonl'), 'utf8',
-  )).trim().split('\n').map(JSON.parse);
-  const successfulSelect = events.findIndex((event) => event.item?.id === 'item_11');
-  events.splice(successfulSelect, 0, ...failedExploration);
 
-  const recovered = parseCodexEvents(events, { origin, screenshotsRoot });
-  assert.equal(recovered.complete, true);
-  assert.deepEqual(
-    recovered.toolCalls.find((call) => call.tool === 'browser_select_option' && call.status === 'failed'),
-    { scenario_id: 'model-provenance', tool: 'browser_select_option', status: 'failed' },
-  );
+  const missingClick = faithfulJournalEntries(origin);
+  const clickIndex = missingClick.findIndex((entry) => entry.action === 'click');
+  missingClick.splice(clickIndex, 1);
+  assert.equal(parseBrowserJournal(missingClick, { origin, screenshotsRoot }).complete, false);
 
-  const unresolved = events.filter((event) => event.item?.id !== 'item_11');
-  assert.equal(parseCodexEvents(unresolved, { origin, screenshotsRoot }).complete, false);
+  const forgedReceipt = faithfulJournalEntries(origin);
+  forgedReceipt.find((entry) => entry.kind === 'receipt').satisfied = false;
+  assert.equal(parseBrowserJournal(forgedReceipt, { origin, screenshotsRoot }).complete, false);
 
-  const failedMarker = structuredClone(events);
-  failedMarker.find((event) => event.item?.id === 'item_1').item.status = 'failed';
-  assert.equal(parseCodexEvents(failedMarker, { origin, screenshotsRoot }).complete, false);
-
-  const forbiddenEvaluate = structuredClone(events);
-  forbiddenEvaluate.splice(successfulSelect, 0, {
-    type: 'item.completed',
-    item: {
-      type: 'mcp_tool_call', server: 'playwright', tool: 'browser_evaluate',
-      arguments: { function: '() => document.title' }, result: { content: [] }, status: 'completed',
-    },
-  });
-  assert.equal(parseCodexEvents(forbiddenEvaluate, { origin, screenshotsRoot }).complete, false);
-
-  for (const type of ['command_execution', 'file_change']) {
-    const forbiddenItem = structuredClone(events);
-    forbiddenItem.splice(successfulSelect, 0, {
-      type: 'item.completed', item: { type, status: 'completed' },
-    });
-    assert.equal(parseCodexEvents(forbiddenItem, { origin, screenshotsRoot }).complete, false);
-  }
-
-  const externalOrigin = structuredClone(events);
-  externalOrigin.find((event) => event.item?.id === 'item_exploratory_failed_select')
-    .item.result.content[0].text += '\nPage URL: https://example.invalid/';
-  assert.equal(parseCodexEvents(externalOrigin, { origin, screenshotsRoot }).complete, false);
-
-  const recoveredEventsPath = path.join(root, 'recovered.jsonl');
-  await fsp.writeFile(recoveredEventsPath, `${events.map(JSON.stringify).join('\n')}\n`);
-  const execution = await executeCase(t, { events: recoveredEventsPath });
-  assert.equal(execution.report.status, 'no_findings');
-  assert.equal(execution.report.reason, 'none');
-  assert.equal(execution.report.tool_calls.some(
-    (call) => call.scenario_id === 'model-provenance'
-      && call.tool === 'browser_select_option'
-      && call.status === 'failed',
-  ), true);
+  const foreignOrigin = faithfulJournalEntries(origin);
+  foreignOrigin.find((entry) => entry.kind === 'navigate').url = 'http://example.test/';
+  assert.equal(parseBrowserJournal(foreignOrigin, { origin, screenshotsRoot }).complete, false);
 });
 
 test('A complete adapter-backed execution emits a validated no-findings public artifact and prunes private output', async (t) => {
   const result = await executeCase(t, { canary: true });
   assert.equal(result.report.status, 'no_findings');
   assert.equal(result.report.reason, 'none');
-  assert.deepEqual(result.order, ['doctor', 'runtime', 'baseline', 'codex', 'cleanup']);
+  assert.deepEqual(result.order, ['doctor', 'runtime', 'baseline', 'agent', 'cleanup']);
   validateReport(result.report, request);
   validateEvidenceManifest(result.evidence, result.report.evidence);
   assert.equal(fs.existsSync(path.join(result.evidence, '.private-execution')), false);
@@ -336,14 +245,14 @@ test('A complete adapter-backed execution emits a validated no-findings public a
 test('Failure matrix keeps infrastructure honest, checks source integrity, and always cleans owned state', async (t) => {
   const cases = [
     ['auth_required', { doctor: doctor(false, ['subscription_auth']) }, 'incomplete', 'auth_required'],
-    ['rate_limited', { events: path.join(fixtureRoot, 'rate-limited.jsonl'), noResult: true, noScreenshots: true, processError: { code: 'PROCESS_FAILED', message: '429 rate limit' } }, 'incomplete', 'rate_limited'],
+    ['rate_limited', { noResult: true, noScreenshots: true, processError: { code: 'PROCESS_FAILED', message: '429 rate limit' } }, 'incomplete', 'rate_limited'],
     ['invalid_json', { invalidResult: true }, 'incomplete', 'invalid_output'],
     ['missing_screenshot', { missingScreenshot: 'recover-409' }, 'incomplete', 'invalid_output'],
-    ['no_mcp', { events: path.join(fixtureRoot, 'no-mcp.jsonl'), noScreenshots: true }, 'incomplete', 'invalid_output'],
+    ['no_browser_evidence', { journal: () => [], noScreenshots: true }, 'incomplete', 'invalid_output'],
     ['source_changed', { sourceChanged: true }, 'incomplete', 'source_changed'],
     ['tracked_dirty', { dirtyAfter: true }, 'incomplete', 'source_changed'],
     ['setup_failure', { baselineError: { code: 'BASELINE_SETUP_FAILED', message: 'test setup failed' } }, 'incomplete', 'setup_failed'],
-    ['timeout', { events: path.join(fixtureRoot, 'rate-limited.jsonl'), noResult: true, noScreenshots: true, processError: { code: 'DEADLINE_EXCEEDED', message: 'deadline expired' } }, 'incomplete', 'timeout'],
+    ['timeout', { noResult: true, noScreenshots: true, processError: { code: 'DEADLINE_EXCEEDED', message: 'deadline expired' } }, 'incomplete', 'timeout'],
     ['cancelled', { startError: { code: 'CANCELLED', message: 'cancelled' } }, 'cancelled', 'none'],
   ];
   const observed = [];
@@ -389,7 +298,7 @@ test('Tracked snapshot records deletion and symlink bytes rather than following 
   assert.equal(snapshot.link.kind, 'symlink');
 });
 
-test('Real execute CLI with a disposable clean checkout reports missing CI auth without using developer auth', async (t) => {
+test('Real execute CLI with a disposable clean checkout reports a missing agent token without using developer credentials', async (t) => {
   const paths = await temporary(t);
   await fsp.writeFile(path.join(paths.candidate, 'README.md'), 'fixture\n');
   childProcess.execFileSync('git', ['init', '-q', paths.candidate]);
@@ -413,7 +322,10 @@ test('Real execute CLI with a disposable clean checkout reports missing CI auth 
     env: {
       HOME: process.env.HOME, PATH: process.env.PATH, LANG: process.env.LANG ?? 'C.UTF-8',
       QA_ROOT: stateRoot, QA_DEVELOPER_CHECKOUT: paths.candidate,
-      QA_GH_BIN: '/bin/false', QA_CODEX_BIN: '/bin/false',
+      // Inside a workflow the agent token is required, so its absence must surface as auth_required
+      // rather than as a product finding.
+      GITHUB_ACTIONS: 'true',
+      QA_GH_BIN: '/bin/false', QA_COPILOT_BIN: '/bin/false',
       QA_PLAYWRIGHT_MCP_BIN: '/bin/false', QA_UV_BIN: '/bin/false',
       QA_PNPM_BIN: '/bin/false', QA_SYSTEMCTL_BIN: '/bin/false',
       QA_LOGINCTL_BIN: '/bin/false', QA_BROWSER_PROBE_BIN: '/bin/false',
