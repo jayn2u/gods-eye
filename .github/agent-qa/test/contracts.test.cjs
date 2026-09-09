@@ -99,7 +99,7 @@ function reportFixture(root) {
     finished_at: '2026-09-07T00:02:00.000Z',
     tools: {
       node: '24.12.0',
-      agent: { name: 'copilot', version: '0.0.354' },
+      agent: { name: 'copilot', version: '1.0.83' },
       playwright_mcp: '0.0.80',
       chromium: '1.63.0-alpha-2026-08-31',
     },

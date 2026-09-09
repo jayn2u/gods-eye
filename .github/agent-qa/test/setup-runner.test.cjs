@@ -63,7 +63,7 @@ while (($#)); do if [[ "$1" == '--prefix' ]]; then prefix="$2"; shift 2; else sh
 mkdir -p "$prefix/node_modules/.bin"
 cat >"$prefix/node_modules/.bin/copilot" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == '--version' ]]; then echo 'copilot 0.0.354'; exit; fi
+if [[ "$1" == '--version' ]]; then echo 'copilot 1.0.83'; exit; fi
 printf '%s\n' "$*" >>"$QA_TEST_STATE/copilot-calls"
 exit 1
 EOF

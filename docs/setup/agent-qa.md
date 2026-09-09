@@ -138,13 +138,19 @@ to `ed597411d8f924073f98dfc5c65a23a2325f34cd`, `actions/upload-artifact` v4 to
 `ea165f8d65b6e75b540449e92b4886f43607fa02`, and `actions/download-artifact` v5 to
 `634f93cb2916e3fdff6788551b99b062d0335ce0`.
 
-The CI toolchain pin is the GitHub Copilot CLI `0.0.354` and Playwright MCP `0.0.80` with npm
-integrity
+The CI toolchain pin is the GitHub Copilot CLI `1.0.83` with npm integrity
+`sha512-M8uZI0V0dahYV1KZij3nGDxaXEGG7I7YUZzQPI7NEZkL/83Nl/tNTbPdxKtdWZbOmWoXsPKXty/eEYoj6RHDhA==`
+and Playwright MCP `0.0.80` with npm integrity
 `sha512-FOPXHm2SvFhAQylm10jMZ35B/SR2TaMLVkavAlwoG4N2qCb5RqbvhQYcu3zmXNyxR2DW0Ooxe+9XPVt5UjKRCQ==`.
-The Copilot CLI integrity value and its confirmed published version must be recorded here by the
-change that installs it; the current value is a placeholder and `install` must fail closed until it
-is replaced. `QA_AGENT_MODEL` may pin a model through the `AGENT_QA_MODEL` repository variable and is
-left unset by default. It uses the matching MCP Playwright `1.63.0-alpha-2026-08-31` Chromium
+The Copilot CLI ships per-platform binary packages; `package-lock.json` pins each with its own
+integrity value and `npm ci` selects only `copilot-linux-x64` on this runner. `QA_AGENT_MODEL` may
+pin a model through the `AGENT_QA_MODEL` repository variable and is left unset by default.
+
+The published Actions guide installs the CLI with an unpinned `npm install -g @github/copilot` on an
+ephemeral GitHub-hosted runner. This repository does not: a global install would mutate state shared
+with development on this self-hosted runner, and an unpinned install is the `latest` substitution the
+pin policy below forbids. `setup-runner.sh install` performs the pinned `npm ci` into `$QA_ROOT/toolchain`
+instead, and a mismatched or unavailable pin is expected to fail preflight. It uses the matching MCP Playwright `1.63.0-alpha-2026-08-31` Chromium
 separately from the application E2E Playwright `1.62.1`. Host tooling is Node `24.12.0`, uv `0.12.6`,
 pnpm `10.15.0`, and Python `>=3.11,<3.13`.
 

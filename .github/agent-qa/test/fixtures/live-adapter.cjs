@@ -76,7 +76,7 @@ function artifact(run, pr, status) {
     },
     tested_head_sha: pr.head.sha, controller_sha: CONTROL_SHA,
     started_at: '2026-09-07T00:00:01Z', finished_at: '2026-09-07T00:00:59Z',
-    tools: { node: '24.12.0', agent: { name: 'copilot', version: '0.0.354' }, playwright_mcp: '0.0.80', chromium: 'fixture' },
+    tools: { node: '24.12.0', agent: { name: 'copilot', version: '1.0.83' }, playwright_mcp: '0.0.80', chromium: 'fixture' },
     status, reason: 'none',
     deterministic_results: [{ name: 'fixture', status: 'passed', harness_started: true, app_started: true, duration_ms: 5 }],
     scenarios, findings,

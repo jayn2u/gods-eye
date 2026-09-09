@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 
 const EXPECTED = Object.freeze({
   runner: '2.337.0',
-  copilot: '0.0.354',
+  copilot: '1.0.83',
   playwright_mcp: '0.0.80',
   node: '24.12.0',
   uv: '0.12.6',

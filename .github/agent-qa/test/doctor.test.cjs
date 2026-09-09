@@ -36,7 +36,7 @@ function fixture(t) {
 
   const copilot = path.join(temp, 'copilot');
   executable(copilot, `
-if [[ "\${1:-}" == '--version' ]]; then echo 'copilot 0.0.354'; exit; fi
+if [[ "\${1:-}" == '--version' ]]; then echo 'copilot 1.0.83'; exit; fi
 exit 1`);
   const uv = path.join(temp, 'uv');
   executable(uv, "echo 'uv 0.12.6'");

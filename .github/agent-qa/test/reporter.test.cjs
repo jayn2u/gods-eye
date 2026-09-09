@@ -133,7 +133,7 @@ function report(run = FIXTURE.run, status = 'no_findings') {
     controller_sha: 'c'.repeat(40),
     started_at: '2026-09-07T00:00:01Z',
     finished_at: '2026-09-07T00:01:00Z',
-    tools: { node: '24.12.0', agent: { name: 'copilot', version: '0.0.354' }, playwright_mcp: '0.0.80', chromium: '1.0' },
+    tools: { node: '24.12.0', agent: { name: 'copilot', version: '1.0.83' }, playwright_mcp: '0.0.80', chromium: '1.0' },
     status: 'no_findings',
     reason: 'none',
     deterministic_results: [{
