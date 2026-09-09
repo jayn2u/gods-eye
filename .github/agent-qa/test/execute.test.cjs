@@ -53,7 +53,7 @@ async function temporary(t) {
 
 function doctor(ok = true, failed = []) {
   const checks = [
-    { name: 'tool_versions', ok: true, node: process.versions.node, codex: '0.153.3', playwright_mcp: '0.0.80' },
+    { name: 'tool_versions', ok: true, node: process.versions.node, copilot: '0.0.354', playwright_mcp: '0.0.80' },
     { name: 'subscription_auth', ok: !failed.includes('subscription_auth') },
     { name: 'browser', ok: !failed.includes('browser') },
     { name: 'auth_lock', ok: !failed.includes('auth_lock') },

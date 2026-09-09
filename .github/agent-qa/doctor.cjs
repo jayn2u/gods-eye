@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 
 const EXPECTED = Object.freeze({
   runner: '2.337.0',
-  codex: '0.153.3',
+  copilot: '0.0.354',
   playwright_mcp: '0.0.80',
   node: '24.12.0',
   uv: '0.12.6',
@@ -75,15 +75,6 @@ function probePort() {
   });
 }
 
-function readAuthMode(authFile) {
-  try {
-    const value = parseJson(fs.readFileSync(authFile, 'utf8'));
-    return typeof value.auth_mode === 'string' ? value.auth_mode : null;
-  } catch {
-    return null;
-  }
-}
-
 function parseJson(text) {
   try {
     return JSON.parse(text.replace(/^\uFEFF/, ''));
@@ -98,8 +89,6 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const checkout = path.resolve(env.QA_DEVELOPER_CHECKOUT || process.cwd());
   const runnerDir = path.join(qaRoot, 'runner');
   const toolchainDir = path.join(qaRoot, 'toolchain');
-  const codexHome = path.join(qaRoot, 'codex-home');
-  const authFile = path.join(codexHome, 'auth.json');
   const lockFile = path.join(qaRoot, 'auth.lock');
   const repo = env.QA_REPOSITORY || 'jayn2u/gods-eye';
   const checks = [];
@@ -109,19 +98,17 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   try { realQaRoot = fs.realpathSync(qaRoot); } catch {}
   try { realCheckout = fs.realpathSync(checkout); } catch {}
   const pathSafe = path.isAbsolute(qaRoot) && !inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout)
-    && path.resolve(codexHome) !== path.resolve(path.join(home, '.codex'));
+    && path.resolve(qaRoot) !== path.resolve(path.join(home, '.copilot'));
   add(checks, 'paths', pathSafe, { outside_developer_checkout: pathSafe });
 
   const rootMode = modeOf(qaRoot);
-  const codexMode = modeOf(codexHome);
-  const authModeBits = modeOf(authFile);
-  const ownershipOk = [qaRoot, runnerDir, toolchainDir, codexHome, authFile, lockFile]
+  const toolchainMode = modeOf(toolchainDir);
+  const ownershipOk = [qaRoot, runnerDir, toolchainDir, lockFile]
     .every((target) => ownedByCurrentUser(target));
   add(checks, 'ownership', ownershipOk, { current_user: ownershipOk });
-  add(checks, 'permissions', rootMode === '0700' && codexMode === '0700' && authModeBits === '0600', {
+  add(checks, 'permissions', rootMode === '0700' && toolchainMode === '0700', {
     qa_root_mode: rootMode,
-    codex_home_mode: codexMode,
-    auth_file_mode: authModeBits,
+    toolchain_mode: toolchainMode,
   });
 
   const runnerVersion = (() => {
@@ -133,14 +120,14 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   });
 
   const bins = {
-    codex: env.QA_CODEX_BIN || path.join(toolchainDir, 'node_modules/.bin/codex'),
+    copilot: env.QA_COPILOT_BIN || path.join(toolchainDir, 'node_modules/.bin/copilot'),
     playwright_mcp: env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchainDir, 'node_modules/.bin/playwright-mcp'),
     uv: env.QA_UV_BIN || 'uv',
     pnpm: env.QA_PNPM_BIN || 'pnpm',
   };
   const versions = { node: process.versions.node };
   let versionCommandsOk = true;
-  for (const [name, args] of [['codex', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
+  for (const [name, args] of [['copilot', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
     const result = command(bins[name], args, { env });
     versionCommandsOk &&= result.ok;
     versions[name] = versionFrom(`${result.stdout}\n${result.stderr}`);
@@ -194,20 +181,18 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const lingerEnabled = lingerResult.ok && lingerResult.stdout.trim() === 'yes';
   add(checks, 'user_linger', lingerEnabled, { enabled: lingerEnabled });
 
-  const apiVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY'];
-  const apiEnvironment = apiVariables.some((name) => Boolean(env[name]));
-  const storedAuthMode = readAuthMode(authFile);
-  const loginEnv = { ...env, CODEX_HOME: codexHome };
-  for (const name of apiVariables) delete loginEnv[name];
-  const loginStatus = command(bins.codex, ['login', 'status'], { env: loginEnv });
-  const subscriptionStatus = loginStatus.ok && /logged in using chatgpt/i.test(`${loginStatus.stdout}\n${loginStatus.stderr}`);
-  const subscriptionAuth = !apiEnvironment && storedAuthMode === 'chatgpt' && subscriptionStatus;
-  add(checks, 'subscription_auth', subscriptionAuth, {
-    auth_file_present: fs.existsSync(authFile),
-    auth_file_mode: authModeBits,
-    mode: storedAuthMode === 'chatgpt' ? 'chatgpt' : storedAuthMode === null ? 'missing' : 'rejected',
-    login_status_verified: subscriptionStatus,
-    api_environment_present: apiEnvironment,
+  // Copilot CLI authenticates from COPILOT_GITHUB_TOKEN and exposes no read-only login-status
+  // command, so readiness is the presence of a non-empty repository-scoped token plus the absence of
+  // competing provider credentials. A token that is present is not proof that Copilot will answer;
+  // the first run reports auth_required if it does not.
+  const foreignVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY'];
+  const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
+  const token = env.QA_COPILOT_TOKEN || '';
+  const tokenPresent = token.length >= 20;
+  add(checks, 'subscription_auth', tokenPresent && !foreignEnvironment, {
+    token_present: tokenPresent,
+    token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : 'missing',
+    foreign_provider_environment: foreignEnvironment,
   });
 
   const flockBin = env.QA_FLOCK_BIN || 'flock';

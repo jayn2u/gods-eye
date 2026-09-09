@@ -157,7 +157,7 @@ async function executeAdmittedRequest(t, request) {
       ok: true,
       phase: 'status',
       checks: [
-        { name: 'tool_versions', ok: true, node: process.versions.node, codex: '0.153.3', playwright_mcp: '0.0.80' },
+        { name: 'tool_versions', ok: true, node: process.versions.node, copilot: '0.0.354', playwright_mcp: '0.0.80' },
         { name: 'subscription_auth', ok: true },
         { name: 'browser', ok: true },
         { name: 'auth_lock', ok: true },

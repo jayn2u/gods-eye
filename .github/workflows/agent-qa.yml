@@ -160,7 +160,7 @@ jobs:
             core.setOutput('status', decision.status);
             core.info(`Agent QA recheck: ${decision.status}/${decision.reason}`);
 
-      - name: Run bounded subscription Agent QA
+      - name: Run bounded Copilot browser QA
         if: steps.recheck.outputs.status == 'admitted'
         env:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
@@ -169,10 +169,15 @@ jobs:
           CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
           EVIDENCE_PATH: ${{ steps.paths.outputs.evidence }}
           JOB_START: ${{ steps.clock.outputs.started_at }}
+          # Copilot CLI authenticates from this token only. GITHUB_TOKEN and GH_TOKEN stay empty so
+          # the agent cannot reach the repository API even though it now holds a Copilot credential.
+          QA_COPILOT_TOKEN: ${{ secrets.AGENT_QA_COPILOT_TOKEN }}
+          QA_AGENT_MODEL: ${{ vars.AGENT_QA_MODEL }}
           GITHUB_TOKEN: ""
           GH_TOKEN: ""
           OPENAI_API_KEY: ""
           ANTHROPIC_API_KEY: ""
+          CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
         shell: bash
         run: |
