@@ -434,21 +434,31 @@ async function runExecution(options, adapters = {}) {
       }
     }
     parsed = parseBrowserJournal(journal, { origin: runtime.origin, screenshotsRoot });
-    if (fs.existsSync(agent.privateResult)) agentResult = validateAgentResult(readBoundedJson(agent.privateResult));
-    if (options.signal?.aborted) cancelled = true;
-    else if (agent.processError) reason = mapFailure(agent.processError, parsed.errorText);
-    else if (!agentResult || !parsed.complete) reason ??= 'invalid_output';
-    if (!cancelled && (agent.processError || !parsed.complete)) {
-      // Without this the only signal is a one-word reason, which cannot distinguish an agent that
-      // refused to start from one that worked but was never observed by the journal.
+    // Emitted before anything that can throw: a rejected result document used to jump straight to the
+    // catch block and the run reported a one-word reason with no trace of what the agent did.
+    if (!options.signal?.aborted && (agent.processError || !parsed.complete)) {
       for (const [label, file] of [['stderr', agent.stderrPath], ['stdout', agent.stdoutPath]]) {
         try {
           const tail = fs.readFileSync(file, 'utf8').slice(-2000);
-          if (tail.trim()) process.stderr.write(`Agent QA agent ${label} (${reason}): ${sanitizeText(tail)}\n`);
+          if (tail.trim()) process.stderr.write(`Agent QA agent ${label}: ${sanitizeText(tail)}\n`);
         } catch { /* an unreadable log must not replace the classified reason */ }
       }
-      process.stderr.write(`Agent QA journal entries: ${journal.length}\n`);
+      process.stderr.write(`Agent QA journal entries: ${journal.length}; proven scenarios: ${
+        [...parsed.proof.entries()].filter(([, item]) => item.receipt && item.screenshot).length
+      }\n`);
     }
+    if (fs.existsSync(agent.privateResult)) {
+      try {
+        agentResult = validateAgentResult(readBoundedJson(agent.privateResult));
+      } catch (error) {
+        // A malformed document is missing output, not an infrastructure fault.
+        reason = 'invalid_output';
+        process.stderr.write(`Agent QA agent result rejected: ${sanitizeText(error.message)}\n`);
+      }
+    }
+    if (options.signal?.aborted) cancelled = true;
+    else if (agent.processError) reason = mapFailure(agent.processError, parsed.errorText);
+    else if (!agentResult || !parsed.complete) reason ??= 'invalid_output';
   } catch (error) {
     if (options.signal?.aborted || error.code === 'CANCELLED') cancelled = true;
     else if (!stale && !reason) reason = error.code === 'BASELINE_SETUP_FAILED' ? 'setup_failed' : mapFailure(error, parsed.errorText);
