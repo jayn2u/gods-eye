@@ -7,11 +7,21 @@ but it never grants merge permission or bypasses the repository review process.
 
 ## Eligibility and activation
 
-The controller considers only an open, non-draft pull request whose base branch matches
-`^release/[^/]+$`. The pull-request author must currently have repository write-equivalent
-permission. A workflow actor, `author_association`, a title, or a body cannot substitute for that
-permission check. Pull requests to `develop`, nested release branch names, closed pull requests,
-and drafts do not start browser work.
+The controller considers only an open, non-draft pull request that is also *requested*: either its
+base branch matches `^release/[^/]+$`, or the pull request currently carries the `agent-qa` label.
+The label is the opt-in path for ordinary `develop` pull requests; only a collaborator with triage
+or higher permission can apply it, and the controller reads the label set from a fresh API response
+rather than from the event payload. The pull-request author must independently have repository
+write-equivalent permission. A label, a workflow actor, `author_association`, a title, or a body
+cannot substitute for that permission check. Unlabelled pull requests to `develop`, unlabelled
+nested release branch names, closed pull requests, and drafts do not start browser work.
+
+A labelled pull request keeps its opt-in across pushes: each `synchronize` event supersedes the
+previous generation for that pull request while the label remains. Removing the label invalidates
+the pull request the same way a draft conversion or a retarget does, and the reporter updates the
+existing advisory comment to `not_applicable`. Remove the label when a pull request no longer needs
+QA on every push; the global one-job-at-a-time queue is shared with every other eligible pull
+request.
 
 The trusted `Agent QA` and `Agent QA report` workflows become active only after their reviewed
 change reaches the default `develop` branch through the normal team process. Do not directly push

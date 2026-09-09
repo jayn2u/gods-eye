@@ -7,6 +7,7 @@ const AGENT_QA_WORKFLOW = 'agent-qa.yml';
 const AGENT_QA_WORKFLOW_NAME = 'Agent QA';
 const AGENT_QA_WORKFLOW_PATH = `.github/workflows/${AGENT_QA_WORKFLOW}`;
 const RELEASE_BASE_PATTERN = /^release\/[^/]+$/;
+const QA_LABEL = 'agent-qa';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const RUN_NAME_PATTERN = /^Agent QA PR #([1-9][0-9]*) head ([0-9a-f]{40})$/;
 const PAGE_SIZE = 100;
@@ -148,6 +149,17 @@ function repositoryRejection(repository) {
   return null;
 }
 
+function hasQaLabel(pullRequest) {
+  return Array.isArray(pullRequest.labels)
+    && pullRequest.labels.some((label) => label !== null
+      && typeof label === 'object'
+      && label.name === QA_LABEL);
+}
+
+function requestsAgentQa(pullRequest) {
+  return RELEASE_BASE_PATTERN.test(pullRequest.base.ref) || hasQaLabel(pullRequest);
+}
+
 function pullRequestRejection(pullRequest, pullNumber, expectedIdentity) {
   if (!pullRequest || pullRequest.number !== pullNumber) {
     return 'pull_request_malformed';
@@ -158,8 +170,11 @@ function pullRequestRejection(pullRequest, pullNumber, expectedIdentity) {
   if (pullRequest.draft !== false) {
     return 'pull_request_draft';
   }
-  if (!pullRequest.base || !RELEASE_BASE_PATTERN.test(pullRequest.base.ref)) {
-    return 'base_not_release';
+  if (!pullRequest.base || typeof pullRequest.base.ref !== 'string') {
+    return 'pull_request_malformed';
+  }
+  if (!requestsAgentQa(pullRequest)) {
+    return 'qa_not_requested';
   }
   if (!isSha(pullRequest.base.sha)) {
     return 'pull_request_malformed';
@@ -432,6 +447,7 @@ module.exports = {
   AGENT_QA_WORKFLOW_PATH,
   ControllerError,
   EXPECTED_REPOSITORY,
+  QA_LABEL,
   RELEASE_BASE_PATTERN,
   admitPullRequest,
   compareGenerations,

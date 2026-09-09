@@ -244,6 +244,7 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   const trigger = qa.true.pull_request_target;
   assert.deepEqual(trigger.types, [
     'opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'converted_to_draft', 'closed',
+    'labeled', 'unlabeled',
   ]);
   assert.equal(Object.hasOwn(trigger, 'branches'), false);
   assert.equal(qa['run-name'], 'Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}');
@@ -429,7 +430,11 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
   const observed = [];
   for (const [name, mutate, reason] of [
     ['draft', (state) => { state.pull_request.draft = true; }, 'pull_request_draft'],
-    ['develop', (state) => { state.pull_request.base.ref = 'develop'; }, 'base_not_release'],
+    ['develop', (state) => { state.pull_request.base.ref = 'develop'; }, 'qa_not_requested'],
+    ['develop with an unrelated label', (state) => {
+      state.pull_request.base.ref = 'develop';
+      state.pull_request.labels = [{ name: 'documentation' }];
+    }, 'qa_not_requested'],
     ['permission', (state) => { state.permission.permission = 'read'; }, 'permission_insufficient'],
   ]) {
     const state = structuredClone(events);
