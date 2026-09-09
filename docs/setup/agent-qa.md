@@ -97,10 +97,20 @@ Each eligible head receives an advisory summary comment. A report can be `no_fin
 `runner_failed`, `browser_unavailable`, `timeout`, and `setup_failed` describe QA infrastructure;
 they are not product findings or merge gates.
 
-Dependency downloads are cached under `$QA_ROOT/cache` and shared across runs; only the Python
-environment is per-run. A per-run cache made every run refetch the whole dependency set, which
-exhausted the internal deadline before the browser agent started. The cache survives runs and is not
-cleaned with them; delete it by hand if a corrupt download has to be discarded.
+Dependency downloads are cached under `$QA_ROOT/cache` and shared across runs, and the resolved
+Python environment is reused from `$QA_ROOT/cache/envs/py-<lock digest>`. The digest covers the
+candidate's `uv.lock` and `pyproject.toml`, which with `--frozen` fully determine the environment, so
+a changed lock rebuilds it and unrelated source changes do not. A per-run cache made every run refetch the whole dependency set, which
+exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
+not cleaned with them; delete them by hand if a corrupt download has to be discarded.
+
+Building an environment for a lock the runner has not seen can exceed the internal deadline on a slow
+link. Warm it outside a job before the first run against a new lock:
+
+```bash
+UV_PROJECT_ENVIRONMENT="$QA_ROOT/cache/envs/py-$(cat uv.lock pyproject.toml | sha256sum | cut -c1-32)" \
+  UV_CACHE_DIR="$QA_ROOT/cache/uv" uv sync --frozen --no-dev
+```
 
 QA runs one job globally at a time. A newer event for the same pull request cancels its superseded
 generation; another pull request stays queued. The GitHub job has a 15-minute running limit, with
