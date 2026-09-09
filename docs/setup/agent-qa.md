@@ -104,6 +104,11 @@ a changed lock rebuilds it and unrelated source changes do not. A per-run cache 
 exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
 not cleaned with them; delete them by hand if a corrupt download has to be discarded.
 
+Sharing state means inheriting what a killed run left behind. A deadline that lands mid-download
+leaves partial package state in the pnpm store, and every later install then fails on it. The harness
+discards the store once and retries the install, so this recovers without an operator; a cancellation
+or a deadline is never treated that way. The retry appears in the job log as `pnpm-install-retry`.
+
 Building an environment for a lock the runner has not seen can exceed the internal deadline on a slow
 link. Warm it outside a job before the first run against a new lock:
 
