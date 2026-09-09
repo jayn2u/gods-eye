@@ -37,6 +37,23 @@ die() {
   exit 1
 }
 
+NODE_VERSION="24.12.0"
+NODE_BIN_DIR=""
+
+# The unit must not inherit an ambient PATH: resolve the interpreter that satisfies the pin now, and
+# record its directory so the service always runs the same Node the operator verified.
+resolve_pinned_node() {
+  local candidate
+  candidate="${QA_NODE_BIN:-$(command -v node || true)}"
+  [[ -n "${candidate}" ]] || die "node is not on PATH; install Node ${NODE_VERSION} first"
+  candidate="$(realpath -m -- "${candidate}")"
+  local found
+  found="$("${candidate}" --version 2>/dev/null || true)"
+  [[ "${found}" == "v${NODE_VERSION}" ]] \
+    || die "node ${NODE_VERSION} is required for the runner unit but ${candidate} reports ${found:-nothing}"
+  NODE_BIN_DIR="$(dirname -- "${candidate}")"
+}
+
 require_safe_root() {
   [[ "$(id -un)" == "${QA_EXPECTED_USER:-jayn2u}" ]] || die "this runner must be provisioned as the approved current user jayn2u"
   [[ "${QA_ROOT}" = /* ]] || die "QA_ROOT must be absolute"
@@ -76,9 +93,10 @@ write_unit() {
   local unit_path="${SYSTEMD_DIR}/${SERVICE_NAME}"
   mkdir -p "${SYSTEMD_DIR}"
   chmod 700 "${SYSTEMD_DIR}"
-  local escaped_root escaped_runner
+  local escaped_root escaped_runner escaped_path
   escaped_root="$(escape_systemd_environment "${QA_ROOT}")"
   escaped_runner="$(escape_systemd_path "${QA_ROOT}/runner")"
+  escaped_path="$(escape_systemd_environment "${NODE_BIN_DIR}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
   local temp_unit
   temp_unit="$(mktemp "${QA_ROOT}/.unit.XXXXXX")"
   cat >"${temp_unit}" <<EOF
@@ -89,6 +107,7 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${escaped_runner}
+Environment="PATH=${escaped_path}"
 Environment="PLAYWRIGHT_BROWSERS_PATH=${escaped_root}/toolchain/browsers"
 Environment="QA_COPILOT_BIN=${escaped_root}/toolchain/node_modules/.bin/copilot"
 Environment="QA_PLAYWRIGHT_MCP_BIN=${escaped_root}/toolchain/node_modules/.bin/playwright-mcp"
@@ -167,6 +186,7 @@ install_all() {
   chmod 700 "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
   : >"${QA_ROOT}/auth.lock"
   chmod 600 "${QA_ROOT}/auth.lock"
+  resolve_pinned_node
   install_runner
   install_toolchain
   write_unit
@@ -244,7 +264,10 @@ doctor() {
 start_runner() {
   doctor --json --phase start >/dev/null || die "runner prerequisites are not ready; run status"
   "${SYSTEMCTL_BIN}" --user daemon-reload
-  "${SYSTEMCTL_BIN}" --user enable --now "${SERVICE_NAME}"
+  "${SYSTEMCTL_BIN}" --user enable "${SERVICE_NAME}"
+  # A rewritten unit stays inert until the service restarts, so an install followed by start must not
+  # leave the previous generation's environment running.
+  "${SYSTEMCTL_BIN}" --user restart "${SERVICE_NAME}"
   printf 'Started %s.\n' "${SERVICE_NAME}"
 }
 
