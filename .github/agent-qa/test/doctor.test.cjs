@@ -159,6 +159,56 @@ test('the agent token never appears in the preflight report', (t) => {
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(SECRET));
 });
 
+test('inside a job the runner workspace under QA_ROOT is not treated as a developer checkout', (t) => {
+  const f = fixture(t);
+  const workspace = path.join(f.qaRoot, 'runs', 'gods-eye', 'gods-eye');
+  fs.mkdirSync(workspace, { recursive: true });
+  const env = { ...f.env };
+  delete env.QA_DEVELOPER_CHECKOUT;
+  const result = spawnSync(process.execPath, [doctor, '--json'], { env, encoding: 'utf8', cwd: workspace });
+  const report = JSON.parse(result.stdout);
+  const paths = report.checks.find((item) => item.name === 'paths');
+  assert.equal(paths.ok, true);
+  assert.equal(paths.developer_checkout, 'not-applicable');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('a declared developer checkout containing QA_ROOT still fails', (t) => {
+  const f = fixture(t);
+  const result = run({ ...f.env, QA_DEVELOPER_CHECKOUT: path.dirname(f.qaRoot) });
+  assert.notEqual(result.status, 0);
+  const paths = result.report.checks.find((item) => item.name === 'paths');
+  assert.equal(paths.ok, false);
+  assert.equal(paths.developer_checkout, 'declared');
+});
+
+test('only harness-controlled tools are version-pinned; the build toolchain needs presence', async (t) => {
+  await t.test('a drifting pnpm is accepted and recorded', (subtest) => {
+    const f = fixture(subtest);
+    executable(f.env.QA_PNPM_BIN, "echo '11.24.0'");
+    const result = run(f.env);
+    assert.equal(result.status, 0, result.stderr);
+    const versions = check(result.report, 'tool_versions');
+    assert.equal(versions.ok, true);
+    assert.equal(versions.pnpm, '11.24.0');
+    assert.equal(versions.pinned, 'node,copilot,playwright_mcp');
+  });
+  await t.test('an absent pnpm is still rejected', (subtest) => {
+    const f = fixture(subtest);
+    executable(f.env.QA_PNPM_BIN, 'exit 1');
+    const result = run(f.env);
+    assert.notEqual(result.status, 0);
+    assert.equal(check(result.report, 'tool_versions').ok, false);
+  });
+  await t.test('a drifting pinned agent is rejected', (subtest) => {
+    const f = fixture(subtest);
+    executable(f.env.QA_COPILOT_BIN, `if [[ "\${1:-}" == '--version' ]]; then echo 'GitHub Copilot CLI 1.0.84.'; exit; fi; exit 1`);
+    const result = run(f.env);
+    assert.notEqual(result.status, 0);
+    assert.equal(check(result.report, 'tool_versions').ok, false);
+  });
+});
+
 test('an occupied auth lock fails readiness', (t) => {
   const f = fixture(t);
   executable(f.flock, 'exit 1');
