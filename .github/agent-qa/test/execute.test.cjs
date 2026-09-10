@@ -124,7 +124,9 @@ function successAdapters(overrides = {}) {
           // The receipt condition itself must never be handed to the agent.
           assert.equal(prompt.includes(scenario.receipt), false);
         }
-        assert.match(environment.lockFile, /auth\.lock$/);
+        // The agent is invoked directly: no lock wrapper stands between the supervisor and it.
+        assert.equal(Object.hasOwn(environment, 'lockFile'), false);
+        assert.equal(Object.hasOwn(environment, 'flockBin'), false);
         const journalPath = paths.journal;
         const stdoutPath = path.join(path.dirname(paths.privateResult), 'copilot.stdout.log');
         const stderrPath = path.join(path.dirname(paths.privateResult), 'copilot.stderr.log');

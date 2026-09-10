@@ -185,8 +185,10 @@ test('register uses the exact repository, name, and label once without exposing 
     '{"sentinel":"STATUS_SECRET_CANARY"}', { mode: 0o600 });
   fs.writeFileSync(path.join(f.qaRoot, 'register-refreshed-sentinel'), 'refreshed');
   const status = spawnSync('bash', [setup, 'status'], { env: f.env, encoding: 'utf8' });
-  assert.equal(status.status, 0);
-  assert.equal(JSON.parse(status.stdout).ok, true);
+  assert.equal(status.status, 0, `${status.stdout}${status.stderr}`);
+  const report = JSON.parse(status.stdout);
+  // Name the failed prerequisite: a bare false says nothing about which one broke.
+  assert.equal(report.ok, true, report.checks.filter(({ ok }) => !ok).map(({ name }) => name).join(', '));
   assert.equal(fs.readFileSync(path.join(f.qaRoot, 'register-refreshed-sentinel'), 'utf8'), 'refreshed');
   assert.doesNotMatch(`${status.stdout}${status.stderr}`, /STATUS_SECRET_CANARY/);
 });
