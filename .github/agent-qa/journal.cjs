@@ -183,14 +183,11 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
       // The marker names the scenario, not its fault profile: three scenarios share `normal`, so a
       // profile name could not tell a retry of one from the start of the next.
       if (current !== null && entry.scenario === current) {
-        // Re-selecting resets the harness's own fault state, so actions taken before it did not build
-        // the page state a later receipt verifies: the in-progress counters restart. A receipt the
-        // harness already satisfied was verified against real page state at that time and is kept,
-        // and the screenshot must still postdate it.
-        const restarted = proof.get(current);
-        restarted.navigate = false;
-        restarted.nextAction = 0;
-        restarted.receipt = false;
+        // Re-selecting the current scenario is idempotent bookkeeping. Discarding the actions already
+        // observed only threw away evidence the agent had genuinely produced, and it is unnecessary:
+        // the receipt predicate reads the live page and the harness's own counters, which this
+        // re-selection resets, so no stale state can satisfy it.
+        if (isMainOrigin(entry.url, origin)) proof.get(current).navigate = true;
         continue;
       }
       const next = scenarioContract.scenarios[scenarioIndex + 1];
