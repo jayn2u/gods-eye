@@ -256,8 +256,14 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   assert.equal(qa.jobs.admission['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.correlate['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.publish['runs-on'], 'ubuntu-24.04');
+  assert.equal(reporter.jobs['publish-evidence']['runs-on'], 'ubuntu-24.04');
   assert.deepEqual(qa.jobs.qa.permissions, { actions: 'read', contents: 'read', 'pull-requests': 'read' });
   assert.deepEqual(reporter.jobs.publish.permissions, { actions: 'read', contents: 'read', 'pull-requests': 'write' });
+  // The only job that may write to the repository must hold no pull-request access, so a defect in
+  // one publication path cannot reach the other.
+  assert.deepEqual(reporter.jobs['publish-evidence'].permissions, { actions: 'read', contents: 'write' });
+  assert.equal(Object.hasOwn(reporter.jobs['publish-evidence'].permissions, 'pull-requests'), false);
+  assert.equal(Object.hasOwn(reporter.jobs['publish-evidence'], 'concurrency'), false);
   assert.deepEqual(qa.jobs.qa.concurrency, {
     group: 'gods-eye-agent-qa-global', 'cancel-in-progress': false, queue: 'max',
   });
@@ -268,12 +274,12 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   });
   const allJobs = [...Object.values(qa.jobs), ...Object.values(reporter.jobs)];
   assert.equal(allJobs.filter((job) => Array.isArray(job['runs-on'])).length, 1);
-  assert.equal(allJobs.flatMap((job) => stepUses(job, checkout)).length, 5);
-  assert.equal(allJobs.flatMap((job) => stepUses(job, githubScript)).length, 4);
+  assert.equal(allJobs.flatMap((job) => stepUses(job, checkout)).length, 6);
+  assert.equal(allJobs.flatMap((job) => stepUses(job, githubScript)).length, 5);
   assert.equal(stepUses(qa.jobs.qa, uploadArtifact).length, 1);
   const trustedCheckouts = allJobs.flatMap((job) => stepUses(job, checkout))
     .filter((step) => step.name !== 'Fetch the candidate through the base repository PR ref');
-  assert.equal(trustedCheckouts.length, 4);
+  assert.equal(trustedCheckouts.length, 5);
   for (const step of trustedCheckouts) {
     assert.equal(step.with.ref, '${{ github.workflow_sha }}');
     assert.equal(step.with['persist-credentials'], false);

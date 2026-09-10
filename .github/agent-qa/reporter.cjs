@@ -11,6 +11,7 @@ const {
   validateEvidenceManifest,
   validateReport,
 } = require('./contracts.cjs');
+const { renderScenarioTable } = require('./summary.cjs');
 const {
   AGENT_QA_WORKFLOW_PATH,
   EXPECTED_REPOSITORY,
@@ -225,7 +226,14 @@ function inspectArtifactZip(archive, expectedIdentity) {
       throw new ReporterError('unexpected_artifact_entry', 'artifact contains a file outside its validated manifest');
     }
     validateEvidenceManifest(extractionRoot, report.evidence);
-    return Object.freeze({ report, files: Object.freeze([...contentsByName.keys()].sort()) });
+    // The bytes are kept as well as the names: the evidence publisher pushes the accepted
+    // screenshots, and re-downloading the artifact in a second job would only widen the window in
+    // which the two could disagree about what was validated.
+    return Object.freeze({
+      report,
+      files: Object.freeze([...contentsByName.keys()].sort()),
+      contents: contentsByName,
+    });
   } finally {
     rmSync(extractionRoot, { recursive: true, force: true });
   }
@@ -253,7 +261,27 @@ function verifiedArtifactUrl(run, artifact) {
   return artifact ? `https://github.com/${EXPECTED_REPOSITORY}/actions/runs/${run.id}/artifacts/${artifact.id}` : null;
 }
 
-function renderComment({ identity, run, status, reason, report, artifact, notApplicableReason }) {
+/**
+ * Screenshots live on the evidence branch inside this private repository, so GitHub serves them to a
+ * viewer who can already read the repository and to nobody else. A reader without that access sees
+ * the alt text, which is why each image is also introduced by name.
+ */
+function renderScreenshotSection(evidenceFiles) {
+  const files = (Array.isArray(evidenceFiles) ? evidenceFiles : [])
+    .filter((file) => typeof file?.scenario_id === 'string' && typeof file?.url === 'string'
+      && file.url.startsWith(`https://github.com/${EXPECTED_REPOSITORY}/blob/`))
+    .slice(0, 12);
+  if (files.length === 0) return null;
+  const lines = [`<details><summary>Screenshots (${files.length})</summary>`, ''];
+  for (const file of files) {
+    const id = escapeText(file.scenario_id, 80);
+    lines.push(`**${id}**`, '', `![${id}](${file.url})`, '');
+  }
+  lines.push('</details>');
+  return lines.join('\n');
+}
+
+function renderComment({ identity, run, status, reason, report, artifact, notApplicableReason, evidenceFiles }) {
   const lines = [
     COMMENT_MARKER,
     '## Agent QA (advisory)',
@@ -279,6 +307,13 @@ function renderComment({ identity, run, status, reason, report, artifact, notApp
       lines.push(`- **${escapeText(finding.severity, 20)} — ${escapeText(finding.title, 200)}:** ${escapeText(finding.description, 800)}`);
     }
   }
+  // A successful run used to say only that it found nothing, which left a reviewer no way to see
+  // what was actually exercised without downloading the artifact. The table and the screenshots come
+  // from the same validated report, so nothing here is the agent's unverified narration.
+  const table = renderScenarioTable(report);
+  if (table) lines.push('', table);
+  const images = renderScreenshotSection(evidenceFiles);
+  if (images) lines.push('', images);
   lines.push('', '_Agent QA is advisory and does not establish identity or real-gallery quality._');
   let body = lines.join('\n');
   if (Buffer.byteLength(body) > MAX_COMMENT_BYTES) {
@@ -402,7 +437,40 @@ async function mutateComment(github, pullNumber, comment, body) {
   return response.data.id;
 }
 
-async function publishWorkflowRun({ github, workflowRun, repository = EXPECTED_REPOSITORY }) {
+/**
+ * Read the accepted screenshots out of the validated artifact for a completed QA run.
+ *
+ * This runs in its own job, which holds `contents: write` and nothing else, so the job that can push
+ * to the evidence branch is never the job that can write to the pull request. Returns null whenever
+ * there is nothing safe to publish; that is a normal outcome and never fails the report.
+ */
+async function prepareEvidencePublication({ github, workflowRun, repository = EXPECTED_REPOSITORY }) {
+  const { run, identity } = await fetchAuthoritativeRun(github, workflowRun, repository);
+  const artifact = await listExactArtifact(github, run, identity);
+  if (!artifact) return null;
+  const inspected = inspectArtifactZip(await downloadArtifact(github, artifact));
+  expectedRequestFromReport(inspected.report, run, identity);
+  validateReport(inspected.report, inspected.report.request);
+  const screenshots = [];
+  for (const entry of inspected.report.evidence) {
+    if (entry.kind !== 'screenshot') continue;
+    const match = /^screenshots\/([a-z0-9][a-z0-9-]{0,63})\.png$/u.exec(entry.path);
+    const contents = inspected.contents.get(entry.path);
+    if (!match || !Buffer.isBuffer(contents)) continue;
+    screenshots.push({ scenarioId: match[1], contents });
+  }
+  if (screenshots.length === 0) return null;
+  return Object.freeze({
+    prNumber: identity.prNumber,
+    runId: run.id,
+    runAttempt: run.run_attempt,
+    screenshots,
+  });
+}
+
+async function publishWorkflowRun({
+  github, workflowRun, repository = EXPECTED_REPOSITORY, evidenceFiles = [],
+}) {
   let authoritative;
   try {
     authoritative = await fetchAuthoritativeRun(github, workflowRun, repository);
@@ -507,6 +575,7 @@ async function publishWorkflowRun({ github, workflowRun, repository = EXPECTED_R
 
   const body = renderComment({
     identity: safeIdentity, run, status: publicationStatus, reason: publicationReason, report, artifact,
+    evidenceFiles,
   });
   let commentId;
   try {
@@ -529,6 +598,7 @@ module.exports = Object.freeze({
   inspectArtifactZip,
   parseRunName,
   parseWorkflowRunIdentity,
+  prepareEvidencePublication,
   publishWorkflowRun,
   renderComment,
 });

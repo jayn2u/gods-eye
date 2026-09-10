@@ -226,6 +226,27 @@ jobs:
           printf 'ready=true\n' >> "$GITHUB_OUTPUT"
           printf 'path=%s\n' "$upload_root" >> "$GITHUB_OUTPUT"
 
+      # The comment can only carry a summary. The run page is where an operator lands from it, so the
+      # same validated report is rendered here in full, including the phase timings that were
+      # previously recoverable only by reading stderr.
+      - name: Write the reviewer job summary
+        if: always() && steps.stage.outputs.ready == 'true'
+        env:
+          CONTROL_ROOT: ${{ github.workspace }}/trusted-control/.github/agent-qa
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
+          EVIDENCE_ROOT: ${{ steps.paths.outputs.evidence }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        shell: bash
+        run: |
+          node >> "$GITHUB_STEP_SUMMARY" <<'NODE'
+          const path = require('node:path');
+          const { readBoundedJson, validateReport } = require(path.join(process.env.CONTROL_ROOT, 'contracts.cjs'));
+          const { renderJobSummary } = require(path.join(process.env.CONTROL_ROOT, 'summary.cjs'));
+          const report = readBoundedJson(path.join(process.env.EVIDENCE_ROOT, 'report.json'));
+          validateReport(report, report.request);
+          process.stdout.write(`${renderJobSummary({ report, runUrl: process.env.RUN_URL })}\n`);
+          NODE
+
       - name: Upload validated public evidence
         if: always() && steps.stage.outputs.ready == 'true'
         # actions/upload-artifact v4
