@@ -415,10 +415,15 @@ async function runExecution(options, adapters = {}) {
   let cleanupError;
   let privateOutputDeleted = false;
   let privatePaths = [];
+  // Kept as structured records as well as the log string: the job summary reads them to show where a
+  // run spent its deadline, which used to be recoverable only by reading stderr.
+  const phaseRecords = [];
   const phases = [];
   let phaseStart = performance.now();
   const markPhase = (name) => {
-    phases.push(`${name}=${Math.round((performance.now() - phaseStart) / 1000)}s`);
+    const seconds = Math.round((performance.now() - phaseStart) / 1000);
+    phaseRecords.push({ name, seconds });
+    phases.push(`${name}=${seconds}s`);
     phaseStart = performance.now();
   };
   try {
@@ -581,6 +586,7 @@ async function runExecution(options, adapters = {}) {
     status: outcome.status, reason: outcome.reason, deterministic_results: deterministic,
     scenarios: agent.scenarios, findings: agent.findings, tool_calls: parsed.toolCalls, evidence,
     ...(parsed.usage ? { usage: parsed.usage } : {}),
+    ...(phaseRecords.length ? { phases: phaseRecords } : {}),
     cleanup: {
       attempted: true,
       completed: !cleanupError && privateOutputDeleted && (cleanupReceipt?.allProcessesStopped ?? true),

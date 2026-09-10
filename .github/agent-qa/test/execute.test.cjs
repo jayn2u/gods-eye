@@ -249,6 +249,9 @@ test('A complete adapter-backed execution emits a validated no-findings public a
   assert.equal(result.report.reason, 'none');
   assert.deepEqual(result.order, ['doctor', 'runtime', 'baseline', 'agent', 'cleanup']);
   validateReport(result.report, request);
+  // The job summary reads these; before they were recorded the timings existed only in stderr.
+  assert.deepEqual(result.report.phases.map(({ name }) => name), ['doctor', 'runtime', 'baseline', 'agent']);
+  assert.equal(result.report.phases.every(({ seconds }) => Number.isSafeInteger(seconds) && seconds >= 0), true);
   validateEvidenceManifest(result.evidence, result.report.evidence);
   assert.equal(fs.existsSync(path.join(result.evidence, '.private-execution')), false);
   assert.equal(fs.existsSync(path.join(result.evidence, 'screenshots', 'untrusted-extra.txt')), false);

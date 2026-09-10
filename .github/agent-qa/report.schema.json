@@ -248,6 +248,29 @@
         }
       }
     },
+    "phases": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "seconds"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z_]{0,30}$"
+          },
+          "seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400
+          }
+        }
+      }
+    },
     "cleanup": {
       "type": "object",
       "additionalProperties": false,
