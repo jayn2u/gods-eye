@@ -120,6 +120,12 @@ test('narration cannot substitute for an observed action', async (t) => {
     ['a receipt the harness did not satisfy', (entries) => {
       entries.find((entry) => entry.kind === 'receipt').satisfied = false;
     }],
+    ['a receipt whose actions were never completed', (entries) => {
+      const action = entries.findIndex((entry) => entry.kind === 'action');
+      entries.splice(action, 1);
+      let seq = 0;
+      for (const entry of entries) { seq += 1; entry.seq = seq; }
+    }],
     ['a receipt token for another scenario', (entries) => {
       entries.find((entry) => entry.kind === 'receipt').token = 'qa-receipt:blank-input';
     }],
@@ -239,6 +245,46 @@ test('an action before any scenario is selected still invalidates the run', () =
   });
   let seq = 0;
   for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  assert.equal(parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots }).complete, false);
+});
+
+test('a refused receipt leaves its scenario unproven without discarding the others', () => {
+  const entries = faithfulJournal();
+  const refused = entries.find((entry) => entry.kind === 'receipt' && entry.scenario === 'unprepared-model');
+  refused.satisfied = false;
+  refused.state = { profile: 'unprepared-model', searchRequests: 1 };
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, false, 'the refused scenario is not proven');
+  assert.equal(parsed.proof.get('unprepared-model').receipt, false);
+  assert.equal(parsed.proof.get('unprepared-model').receiptAttempts, 1);
+  assert.deepEqual(parsed.proof.get('unprepared-model').lastReceiptState, { profile: 'unprepared-model', searchRequests: 1 });
+  // The harness refusing a claim is an observation, not a forgery, so other scenarios survive it.
+  for (const other of SCENARIO_IDS.filter((id) => id !== 'unprepared-model')) {
+    assert.equal(parsed.proof.get(other).receipt, true, other);
+    assert.ok(parsed.proof.get(other).screenshot, other);
+  }
+});
+
+test('a retry after a refused receipt can still prove the scenario', () => {
+  const entries = faithfulJournal();
+  const index = entries.findIndex((entry) => entry.kind === 'receipt' && entry.scenario === 'blank-input');
+  const refused = { ...entries[index], satisfied: false, state: { profile: 'normal' } };
+  entries.splice(index, 0, refused);
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, true);
+  assert.equal(parsed.proof.get('blank-input').receiptAttempts, 2);
+});
+
+test('a receipt token borrowed from another scenario is still a forgery', () => {
+  const entries = faithfulJournal();
+  const receipt = entries.find((entry) => entry.kind === 'receipt');
+  receipt.token = 'qa-receipt:blank-input';
+  receipt.satisfied = false;
   const { screenshots } = withScreenshots(entries);
   assert.equal(parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots }).complete, false);
 });

@@ -148,6 +148,7 @@ function screenshotProof(screenshotsRoot, scenarioId, receiptAt) {
 function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
   const proof = new Map(SCENARIO_IDS.map((id) => [id, {
     navigate: false, nextAction: 0, receipt: false, receiptAt: NaN, screenshot: null,
+    receiptAttempts: 0, lastReceiptState: null,
   }]));
   const toolCalls = [];
   let scenarioIndex = -1;
@@ -226,11 +227,19 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
     if (entry.kind === 'receipt') {
       const requirements = scenarioActionRequirements(scenario);
       const at = Date.parse(entry.at);
-      if (entry.scenario !== current
-        || entry.token !== `qa-receipt:${current}`
-        || entry.satisfied !== true
-        || !Number.isFinite(at)
-        || scenarioProof.nextAction !== requirements.length) {
+      if (entry.scenario !== current || entry.token !== `qa-receipt:${current}` || !Number.isFinite(at)) {
+        // A receipt for another scenario or with a borrowed token is a forged claim.
+        invalid = true;
+        continue;
+      }
+      scenarioProof.receiptAttempts += 1;
+      if (entry.satisfied !== true) {
+        // The harness itself refused this claim. That is an observation, not a forgery: the agent may
+        // retry, and the scenario simply stays unproven until a satisfied receipt arrives.
+        scenarioProof.lastReceiptState = entry.state ?? null;
+        continue;
+      }
+      if (scenarioProof.nextAction !== requirements.length) {
         invalid = true;
         continue;
       }
