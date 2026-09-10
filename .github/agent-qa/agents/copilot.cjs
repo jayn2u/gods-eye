@@ -141,9 +141,12 @@ async function runCopilot({ runtime, paths, prompt, environment, sanitizedChildE
   });
   let processError;
   try {
+    // Invoked directly, with no lock wrapper. Copilot authenticates from an environment token, so
+    // there is no shared credential file to serialize, and QA already runs one job at a time. The
+    // wrapper only added a process layer between the supervisor and the agent, which is how an
+    // orphaned agent group survived a timed-out run and then held that lock against every later run.
     await runtime.supervisor.runToDeadline(
-      'copilot', environment.flockBin,
-      [environment.lockFile, invocation.command, ...invocation.args],
+      'copilot', invocation.command, invocation.args,
       {
         cwd: paths.workDir,
         env: childEnvironment,

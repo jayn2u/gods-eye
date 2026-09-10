@@ -14,7 +14,6 @@ SYSTEMD_DIR="${QA_SYSTEMD_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user}
 GH_BIN="${QA_GH_BIN:-gh}"
 SYSTEMCTL_BIN="${QA_SYSTEMCTL_BIN:-systemctl}"
 LOGINCTL_BIN="${QA_LOGINCTL_BIN:-loginctl}"
-FLOCK_BIN="${QA_FLOCK_BIN:-flock}"
 NPM_BIN="${QA_NPM_BIN:-npm}"
 
 usage() {
@@ -204,8 +203,6 @@ install_all() {
   require_safe_root
   mkdir -p "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
   chmod 700 "${QA_ROOT}" "${QA_ROOT}/runner" "${QA_ROOT}/toolchain" "${QA_ROOT}/runs"
-  : >"${QA_ROOT}/auth.lock"
-  chmod 600 "${QA_ROOT}/auth.lock"
   resolve_host_tools
   install_runner
   install_toolchain
@@ -277,7 +274,7 @@ register_runner() {
 
 doctor() {
   QA_ROOT="${QA_ROOT}" QA_REPOSITORY="${REPOSITORY}" QA_DEVELOPER_CHECKOUT="${DEVELOPER_CHECKOUT}" \
-    QA_GH_BIN="${GH_BIN}" QA_SYSTEMCTL_BIN="${SYSTEMCTL_BIN}" QA_LOGINCTL_BIN="${LOGINCTL_BIN}" QA_FLOCK_BIN="${FLOCK_BIN}" \
+    QA_GH_BIN="${GH_BIN}" QA_SYSTEMCTL_BIN="${SYSTEMCTL_BIN}" QA_LOGINCTL_BIN="${LOGINCTL_BIN}" \
     node "${SCRIPT_DIR}/doctor.cjs" "$@"
 }
 

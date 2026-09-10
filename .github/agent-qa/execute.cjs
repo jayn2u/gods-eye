@@ -467,8 +467,6 @@ async function runExecution(options, adapters = {}) {
         origin: runtime.origin, screenshotsRoot, privateResult, workDir,
       },
       environment: {
-        flockBin: process.env.QA_FLOCK_BIN || 'flock',
-        lockFile: path.join(stateRoot, 'auth.lock'),
         copilotToken: (process.env.QA_COPILOT_TOKEN || '').trim(),
       },
       sanitizedChildEnvironment,

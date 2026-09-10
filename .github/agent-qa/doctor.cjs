@@ -93,7 +93,6 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const checkout = declaredCheckout ? path.resolve(declaredCheckout) : '';
   const runnerDir = path.join(qaRoot, 'runner');
   const toolchainDir = path.join(qaRoot, 'toolchain');
-  const lockFile = path.join(qaRoot, 'auth.lock');
   const repo = env.QA_REPOSITORY || 'jayn2u/gods-eye';
   const checks = [];
 
@@ -112,7 +111,7 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
 
   const rootMode = modeOf(qaRoot);
   const toolchainMode = modeOf(toolchainDir);
-  const ownershipOk = [qaRoot, runnerDir, toolchainDir, lockFile]
+  const ownershipOk = [qaRoot, runnerDir, toolchainDir]
     .every((target) => ownedByCurrentUser(target));
   add(checks, 'ownership', ownershipOk, { current_user: ownershipOk });
   add(checks, 'permissions', rootMode === '0700' && toolchainMode === '0700', {
@@ -213,10 +212,6 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
     required: inWorkflow,
     foreign_provider_environment: foreignEnvironment,
   });
-
-  const flockBin = env.QA_FLOCK_BIN || 'flock';
-  const lockResult = command(flockBin, ['-n', lockFile, 'true'], { env });
-  add(checks, 'auth_lock', lockResult.ok, { available: lockResult.ok });
 
   const ok = checks.every((check) => check.ok || (phase === 'start' && check.name === 'runner_service'));
   return { schema_version: 1, ok, phase, checks };

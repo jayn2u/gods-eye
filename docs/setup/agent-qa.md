@@ -104,6 +104,11 @@ a changed lock rebuilds it and unrelated source changes do not. A per-run cache 
 exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
 not cleaned with them; delete them by hand if a corrupt download has to be discarded.
 
+A run that ends on its deadline can leave the agent's process group orphaned; the browser agent is
+now invoked directly rather than through a lock wrapper, so the supervisor terminates the agent's own
+group and no lock survives to block later runs. If a report says `setup_failed`, the job log names the
+failed prerequisite.
+
 Sharing state means inheriting what a killed run left behind. A deadline that lands mid-download
 leaves partial package state in the pnpm store, and every later install then fails on it. The harness
 discards the store once and retries the install, so this recovers without an operator; a cancellation

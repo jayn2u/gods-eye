@@ -32,7 +32,6 @@ function fixture(t) {
   fs.writeFileSync(path.join(runner, '.runner-version'), '2.337.0\n');
   fs.writeFileSync(path.join(runner, '.runner'),
     '{"agentName":"gods-eye-agent-qa","gitHubUrl":"https://github.com/jayn2u/gods-eye"}');
-  fs.writeFileSync(path.join(qaRoot, 'auth.lock'), '', { mode: 0o600 });
 
   const copilot = path.join(temp, 'copilot');
   // Mirrors the real CLI: the version carries a trailing period and an update notice follows it.
@@ -54,8 +53,6 @@ if [[ "$1" == 'repo' ]]; then echo '{"nameWithOwner":"jayn2u/gods-eye","isPrivat
   executable(systemctl, "echo active");
   const loginctl = path.join(temp, 'loginctl');
   executable(loginctl, "echo yes");
-  const flock = path.join(temp, 'flock');
-  executable(flock, 'exit 0');
 
   const env = {
     ...process.env,
@@ -69,7 +66,6 @@ if [[ "$1" == 'repo' ]]; then echo '{"nameWithOwner":"jayn2u/gods-eye","isPrivat
     QA_GH_BIN: gh,
     QA_SYSTEMCTL_BIN: systemctl,
     QA_LOGINCTL_BIN: loginctl,
-    QA_FLOCK_BIN: flock,
     QA_COPILOT_TOKEN: SECRET,
     GITHUB_ACTIONS: 'true',
   };
@@ -77,7 +73,7 @@ if [[ "$1" == 'repo' ]]; then echo '{"nameWithOwner":"jayn2u/gods-eye","isPrivat
   delete env.AZURE_OPENAI_API_KEY;
   delete env.CODEX_API_KEY;
   delete env.ANTHROPIC_API_KEY;
-  return { temp, qaRoot, browser, flock, env };
+  return { temp, qaRoot, browser, env };
 }
 
 function run(env, extraArgs = []) {
@@ -227,14 +223,6 @@ test('only harness-controlled tools are version-pinned; the build toolchain need
     assert.notEqual(result.status, 0);
     assert.equal(check(result.report, 'tool_versions').ok, false);
   });
-});
-
-test('an occupied auth lock fails readiness', (t) => {
-  const f = fixture(t);
-  executable(f.flock, 'exit 1');
-  const result = run(f.env);
-  assert.notEqual(result.status, 0);
-  assert.equal(check(result.report, 'auth_lock').available, false);
 });
 
 test('an unavailable Chromium probe fails readiness', (t) => {
