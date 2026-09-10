@@ -90,6 +90,47 @@ Because Copilot CLI resolves MCP configuration from `$HOME/.copilot`, lets a pro
 empty working directory outside the candidate checkout, and refuses to start if a stray MCP config is
 present there.
 
+## Where a reviewer reads the result
+
+Four surfaces carry the same validated `report.json`, in decreasing summary and increasing detail.
+
+**The pull-request comment.** One bot comment per pull request, rewritten in place on every push. It
+carries the status, the tested head, links to the run and the evidence artifact, a row per scenario,
+the findings, and the screenshots. The scenario table's `Browser calls` column is counted from the
+trusted journal and its `Proof` column reflects a screenshot the harness accepted, so neither number
+is the agent's own claim.
+
+**The job summary.** The QA job renders the full report on its run page: tool and model versions,
+per-phase timings, the deterministic baseline result, the scenario table, the findings, and a
+collapsible block per scenario holding the agent's narrated steps beside the journal's call count and
+the evidence that was actually accepted. This is the surface the comment's run link lands on.
+
+**The evidence artifact.** `agent-qa-<pr>-<run>-<attempt>`, retained 14 days, holding `report.json`
+and the accepted screenshots. Only files listed in the report's evidence manifest, matched by size
+and sha256, are staged for upload, and screenshots for unproven scenarios are deleted before staging.
+
+**The job log.** For a run that did not complete, stderr names what each unproven scenario was
+missing — origin, how many of its declared actions were observed, receipt attempts, screenshot — and
+prints the harness's own state snapshot for a refused receipt.
+
+### Screenshots in the pull request
+
+Accepted screenshots are pushed to the orphan branch `agent-qa-evidence` under
+`pr-<number>/<run id>-<attempt>/<scenario>.png` and referenced from the comment. Older generations of
+the same pull request are removed in the same commit, so the branch holds one directory per pull
+request rather than one per push; other pull requests' paths are never touched. The branch shares no
+history with any source branch, and deleting it is safe — the next publication recreates it.
+
+This is the one part of Agent QA that writes to the repository, so it is a job of its own:
+`publish-evidence` holds `contents: write` and no pull-request access, while `publish` holds
+`pull-requests: write` and no repository write. Both run only control code checked out at
+`github.workflow_sha`; candidate code runs in neither. A failure to publish screenshots degrades to a
+comment without images and never withholds the report.
+
+Because this repository is private, GitHub serves those images only to a viewer who can already read
+the repository. A reader without that access sees the alt text, which is why each image is also
+introduced by scenario name.
+
 ## Results, deadlines, and recovery
 
 Each eligible head receives an advisory summary comment. A report can be `no_findings`,
@@ -107,7 +148,9 @@ not cleaned with them; delete them by hand if a corrupt download has to be disca
 A run that ends on its deadline can leave the agent's process group orphaned; the browser agent is
 now invoked directly rather than through a lock wrapper, so the supervisor terminates the agent's own
 group and no lock survives to block later runs. If a report says `setup_failed`, the job log names the
-failed prerequisite.
+failed prerequisite. The report's `phases` field records how many seconds each stage took, and the
+job summary prints it, so a run that spent its deadline in dependency resolution rather than in the
+agent is visible without reading the log.
 
 Sharing state means inheriting what a killed run left behind. A deadline that lands mid-download
 leaves partial package state in the pnpm store, and every later install then fails on it. The harness
