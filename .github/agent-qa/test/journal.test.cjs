@@ -192,22 +192,35 @@ test('a retry is attributed to the same scenario, not read as the next one', () 
   assert.equal(parsed.proof.get('model-provenance').proven, true, 'later scenarios keep their own evidence');
 });
 
-test('re-selecting a scenario restarts its in-progress actions but keeps a receipt already satisfied', () => {
+test('re-selecting a scenario keeps the actions it already observed', () => {
   const entries = faithfulJournal();
   const second = entries.findIndex((entry, index) =>
     index > entries.findIndex((item) => item.kind === 'profile') && entry.kind === 'profile');
-  // Re-selecting after the scenario was already proven must not unprove it: the harness verified that
-  // receipt against real page state at the time, and the screenshot still has to postdate it.
+  // The agent re-selects a scenario it has already carried out. Discarding that evidence lost work the
+  // agent genuinely did, and the receipt predicate already guards against stale state because the
+  // re-selection resets the harness counters it reads.
   entries.splice(second, 0, { ...entries[0] });
   let seq = 0;
   for (const entry of entries) { seq += 1; entry.seq = seq; }
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
-  // A stray re-selection must not unprove a scenario the harness already verified.
-  assert.equal(parsed.proof.get('search-detail-return').proven, true);
-  assert.equal(parsed.proof.get('search-detail-return').receipt, false, 'the attempt gate reopened');
-  assert.equal(parsed.proof.get('search-detail-return').nextAction, 0, 'the action counter restarted');
-  assert.equal(parsed.complete, true, 'earned proof survives a re-selection');
+  assert.equal(parsed.complete, true);
+  const item = parsed.proof.get('search-detail-return');
+  assert.equal(item.proven, true);
+  assert.equal(item.nextAction, scenarioActionRequirements(scenario('search-detail-return')).length);
+});
+
+test('a receipt still requires this scenario own declared actions', () => {
+  const entries = faithfulJournal();
+  // Remove one action from a scenario: its receipt must not be accepted on another scenario's work.
+  const index = entries.findIndex((entry) => entry.kind === 'action' && entry.action === 'click');
+  entries.splice(index, 1);
+  let seq = 0;
+  for (const entry of entries) { seq += 1; entry.seq = seq; }
+  const { screenshots } = withScreenshots(entries);
+  const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
+  assert.equal(parsed.complete, false);
+  assert.equal(parsed.proof.get('search-detail-return').proven, false);
 });
 
 test('a marker naming a scenario out of declared order is refused', () => {
