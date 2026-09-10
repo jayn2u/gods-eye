@@ -102,7 +102,13 @@ function scenarioActionRequirements(scenario) {
       typeInto(scenario.replacement_description),
       clickNamed('activate Search gallery for the replacement', /search gallery/iu),
     ];
-    case 'unprepared-model': return [selectModel(MODEL_IDS.b32)];
+    case 'unprepared-model': return [requirement(
+      'select any prepared model while the unprepared one stays disabled',
+      (entry) => entry.action === 'select'
+        && entry.target?.id === 'model-id'
+        && entry.value !== MODEL_IDS.l14336
+        && Object.values(MODEL_IDS).includes(entry.value),
+    )];
     case 'recover-409': return [
       selectModel(MODEL_IDS.l14336),
       typeInto(scenario.description),
@@ -147,7 +153,10 @@ function screenshotProof(screenshotsRoot, scenarioId, receiptAt) {
  */
 function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
   const proof = new Map(SCENARIO_IDS.map((id) => [id, {
-    navigate: false, nextAction: 0, receipt: false, receiptAt: NaN, screenshot: null,
+    // `navigate`, `nextAction` and `receipt` describe the current attempt; `proven` and `provenAt`
+    // are what the scenario has already earned and survive a later re-selection.
+    navigate: false, nextAction: 0, receipt: false,
+    proven: false, provenAt: NaN, screenshot: null,
     receiptAttempts: 0, lastReceiptState: null,
   }]));
   const toolCalls = [];
@@ -174,8 +183,14 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
       // The marker names the scenario, not its fault profile: three scenarios share `normal`, so a
       // profile name could not tell a retry of one from the start of the next.
       if (current !== null && entry.scenario === current) {
-        // A retry restarts that scenario's proof; it still has to perform every action again.
-        proof.set(current, { navigate: false, nextAction: 0, receipt: false, receiptAt: NaN, screenshot: null });
+        // Re-selecting resets the harness's own fault state, so actions taken before it did not build
+        // the page state a later receipt verifies: the in-progress counters restart. A receipt the
+        // harness already satisfied was verified against real page state at that time and is kept,
+        // and the screenshot must still postdate it.
+        const restarted = proof.get(current);
+        restarted.navigate = false;
+        restarted.nextAction = 0;
+        restarted.receipt = false;
         continue;
       }
       const next = scenarioContract.scenarios[scenarioIndex + 1];
@@ -244,7 +259,9 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
         continue;
       }
       scenarioProof.receipt = true;
-      scenarioProof.receiptAt = at;
+      scenarioProof.proven = true;
+      // The first proof is what a screenshot must postdate; re-proving must not invalidate one.
+      if (!Number.isFinite(scenarioProof.provenAt)) scenarioProof.provenAt = at;
       continue;
     }
 
@@ -256,8 +273,8 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
 
   for (const scenario of scenarioContract.scenarios) {
     const scenarioProof = proof.get(scenario.id);
-    if (!scenarioProof.receipt) continue;
-    const relative = screenshotProof(screenshotsRoot, scenario.id, scenarioProof.receiptAt);
+    if (!scenarioProof.proven) continue;
+    const relative = screenshotProof(screenshotsRoot, scenario.id, scenarioProof.provenAt);
     if (!relative) continue;
     scenarioProof.screenshot = relative;
     toolCalls.push({
@@ -265,12 +282,11 @@ function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
     });
   }
 
+  // A satisfied receipt already required this scenario's origin and every declared action, so proof
+  // plus a screenshot that postdates it is the whole condition.
   const complete = !invalid && scenarioContract.scenarios.every((scenario) => {
     const item = proof.get(scenario.id);
-    return item.navigate
-      && item.nextAction === scenarioActionRequirements(scenario).length
-      && item.receipt
-      && item.screenshot;
+    return item.proven && item.screenshot;
   });
   return { complete, errorText: errorText.trim(), proof, toolCalls: toolCalls.slice(0, MAX_ACTIONS) };
 }

@@ -48,6 +48,13 @@ function observableFor(item, label) {
       : JSON.parse(label.slice('enter '.length, label.lastIndexOf(' in the description')));
     return { action: 'type', target: { tag: 'TEXTAREA', id: 'query', type: '', ariaLabel: '', text: '' }, value };
   }
+  if (label.startsWith('select any prepared model')) {
+    return {
+      action: 'select',
+      target: { tag: 'SELECT', id: 'model-id', type: '', ariaLabel: '', text: '' },
+      value: 'openai/clip-vit-base-patch32',
+    };
+  }
   if (label.startsWith('select ')) {
     return {
       action: 'select',
@@ -71,7 +78,8 @@ function withScreenshots(entries, { skip = [], staleBefore = [] } = {}) {
     if (skip.includes(id)) continue;
     const file = path.join(screenshots, `${id}.png`);
     fs.writeFileSync(file, PNG);
-    const receipt = entries.find((entry) => entry.kind === 'receipt' && entry.scenario === id);
+    // The last satisfied receipt is the one a faithful screenshot must postdate.
+    const receipt = entries.filter((entry) => entry.kind === 'receipt' && entry.scenario === id && entry.satisfied !== false).pop();
     const receiptAt = receipt ? Date.parse(receipt.at) : Date.now();
     // A faithful screenshot is written after its receipt; a stale one predates it.
     const mtime = staleBefore.includes(id) ? receiptAt - 60_000 : receiptAt + 1_000;
@@ -87,7 +95,7 @@ test('a faithful journal proves every scenario', () => {
   assert.equal(parsed.complete, true);
   for (const id of SCENARIO_IDS) {
     const item = parsed.proof.get(id);
-    assert.equal(item.receipt, true, id);
+    assert.equal(item.proven, true, id);
     assert.equal(item.screenshot, `screenshots/${id}.png`, id);
     assert.equal(item.nextAction, scenarioActionRequirements(scenario(id)).length, id);
   }
@@ -169,36 +177,37 @@ test('narration cannot substitute for an observed action', async (t) => {
   }
 });
 
-test('a retry restarts a scenario instead of being read as the next one', () => {
+test('a retry is attributed to the same scenario, not read as the next one', () => {
   const entries = faithfulJournal();
-  // Three scenarios share the `normal` profile, so this is the case a profile-named marker could
-  // not distinguish: repeating the first scenario used to shift every later scenario's evidence.
   const first = entries.findIndex((entry) => entry.kind === 'profile');
-  const secondProfile = entries.findIndex((entry, index) => index > first && entry.kind === 'profile');
-  const repeated = { ...entries[first] };
-  entries.splice(secondProfile, 0, repeated);
-  const replay = entries.slice(first, secondProfile).filter((entry) => entry.kind !== 'profile');
-  entries.splice(secondProfile + 1, 0, ...replay.map((entry) => ({ ...entry })));
+  const second = entries.findIndex((entry, index) => index > first && entry.kind === 'profile');
+  const replay = entries.slice(first, second).filter((entry) => entry.kind !== 'profile').map((entry) => ({ ...entry }));
+  entries.splice(second, 0, { ...entries[first] }, ...replay);
   let seq = 0;
   for (const entry of entries) { seq += 1; entry.seq = seq; }
 
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
   assert.equal(parsed.complete, true, 'a completed retry still proves every scenario');
-  assert.equal(parsed.proof.get('model-provenance').receipt, true, 'later scenarios keep their own evidence');
+  assert.equal(parsed.proof.get('model-provenance').proven, true, 'later scenarios keep their own evidence');
 });
 
-test('a retry that does not repeat the actions loses that scenario', () => {
+test('re-selecting a scenario restarts its in-progress actions but keeps a receipt already satisfied', () => {
   const entries = faithfulJournal();
-  const secondProfile = entries.findIndex((entry, index) =>
+  const second = entries.findIndex((entry, index) =>
     index > entries.findIndex((item) => item.kind === 'profile') && entry.kind === 'profile');
-  entries.splice(secondProfile, 0, { ...entries[0] });
+  // Re-selecting after the scenario was already proven must not unprove it: the harness verified that
+  // receipt against real page state at the time, and the screenshot still has to postdate it.
+  entries.splice(second, 0, { ...entries[0] });
   let seq = 0;
   for (const entry of entries) { seq += 1; entry.seq = seq; }
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
-  assert.equal(parsed.complete, false);
-  assert.equal(parsed.proof.get('search-detail-return').receipt, false);
+  // A stray re-selection must not unprove a scenario the harness already verified.
+  assert.equal(parsed.proof.get('search-detail-return').proven, true);
+  assert.equal(parsed.proof.get('search-detail-return').receipt, false, 'the attempt gate reopened');
+  assert.equal(parsed.proof.get('search-detail-return').nextAction, 0, 'the action counter restarted');
+  assert.equal(parsed.complete, true, 'earned proof survives a re-selection');
 });
 
 test('a marker naming a scenario out of declared order is refused', () => {
@@ -220,7 +229,7 @@ test('loading the application before the first scenario is selected is not fatal
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
   assert.equal(parsed.complete, true, 'the marker page counts as that scenario origin proof');
-  assert.equal(parsed.proof.get('search-detail-return').navigate, true);
+  assert.equal(parsed.proof.get('search-detail-return').proven, true);
 });
 
 test('a marker issued from a foreign origin proves nothing', () => {
@@ -234,7 +243,7 @@ test('a marker issued from a foreign origin proves nothing', () => {
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
   assert.equal(parsed.complete, false);
-  assert.equal(parsed.proof.get('search-detail-return').navigate, false);
+  assert.equal(parsed.proof.get('search-detail-return').proven, false);
 });
 
 test('an action before any scenario is selected still invalidates the run', () => {
@@ -257,12 +266,12 @@ test('a refused receipt leaves its scenario unproven without discarding the othe
   const { screenshots } = withScreenshots(entries);
   const parsed = parseBrowserJournal(entries, { origin: ORIGIN, screenshotsRoot: screenshots });
   assert.equal(parsed.complete, false, 'the refused scenario is not proven');
-  assert.equal(parsed.proof.get('unprepared-model').receipt, false);
+  assert.equal(parsed.proof.get('unprepared-model').proven, false);
   assert.equal(parsed.proof.get('unprepared-model').receiptAttempts, 1);
   assert.deepEqual(parsed.proof.get('unprepared-model').lastReceiptState, { profile: 'unprepared-model', searchRequests: 1 });
   // The harness refusing a claim is an observation, not a forgery, so other scenarios survive it.
   for (const other of SCENARIO_IDS.filter((id) => id !== 'unprepared-model')) {
-    assert.equal(parsed.proof.get(other).receipt, true, other);
+    assert.equal(parsed.proof.get(other).proven, true, other);
     assert.ok(parsed.proof.get(other).screenshot, other);
   }
 });

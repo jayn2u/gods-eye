@@ -495,16 +495,16 @@ async function runExecution(options, adapters = {}) {
         } catch { /* an unreadable log must not replace the classified reason */ }
       }
       process.stderr.write(`Agent QA journal entries: ${journal.length}; proven scenarios: ${
-        [...parsed.proof.entries()].filter(([, item]) => item.receipt && item.screenshot).length
+        [...parsed.proof.entries()].filter(([, item]) => item.proven && item.screenshot).length
       }; phases: ${phases.join(' ')}\n`);
       // Name what each unproven scenario is missing. A refused receipt carries the harness's own state
       // snapshot, which is the only way to see why the expected page state did not hold.
       for (const [id, item] of parsed.proof.entries()) {
-        if (item.receipt && item.screenshot) continue;
+        if (item.proven && item.screenshot) continue;
         const missing = [
           item.navigate ? null : 'origin',
           item.nextAction === scenarioActionRequirements(scenariosById.get(id)).length ? null : `actions ${item.nextAction}/${scenarioActionRequirements(scenariosById.get(id)).length}`,
-          item.receipt ? null : `receipt (attempts ${item.receiptAttempts})`,
+          item.proven ? null : `receipt (attempts ${item.receiptAttempts})`,
           item.screenshot ? null : 'screenshot',
         ].filter(Boolean).join(', ');
         const state = item.lastReceiptState ? ` refused with ${sanitizeText(JSON.stringify(item.lastReceiptState))}` : '';

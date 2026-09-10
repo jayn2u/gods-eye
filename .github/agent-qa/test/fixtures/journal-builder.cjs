@@ -13,6 +13,13 @@ function observableFor(scenario, label) {
       value: JSON.parse(quoted),
     };
   }
+  if (label.startsWith('select any prepared model')) {
+    return {
+      action: 'select',
+      target: { tag: 'SELECT', id: 'model-id', type: '', ariaLabel: '', text: '' },
+      value: 'openai/clip-vit-base-patch32',
+    };
+  }
   if (label.startsWith('select ')) {
     return {
       action: 'select',
