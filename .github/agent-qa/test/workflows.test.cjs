@@ -249,7 +249,10 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
     'cancel-in-progress': true,
   });
   assert.deepEqual(qa.jobs.qa['runs-on'], ['self-hosted', 'linux', 'x64', 'gods-eye-agent-qa']);
-  assert.equal(qa.jobs.qa['timeout-minutes'], 15);
+  // The job cap must stay above the internal deadline so the harness, not GitHub, ends a run and a
+  // report is still written.
+  assert.equal(qa.jobs.qa['timeout-minutes'], 30);
+  assert.ok(qa.jobs.qa['timeout-minutes'] * 60_000 > require('../execute.cjs').INTERNAL_DEADLINE_MS);
   assert.equal(qa.jobs.admission['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.correlate['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.publish['runs-on'], 'ubuntu-24.04');

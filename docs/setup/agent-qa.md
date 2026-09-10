@@ -118,8 +118,11 @@ UV_PROJECT_ENVIRONMENT="$QA_ROOT/cache/envs/py-$(cat uv.lock pyproject.toml | sh
 ```
 
 QA runs one job globally at a time. A newer event for the same pull request cancels its superseded
-generation; another pull request stays queued. The GitHub job has a 15-minute running limit, with
-an internal 12-minute work deadline reserved before scoped cleanup and upload. Queue time is not
+generation; another pull request stays queued. The GitHub job has a 30-minute running limit, with
+an internal 25-minute work deadline reserved before scoped cleanup and upload. The budget covers
+agent variance rather than its best case: two consecutive runs of the same code and the same six
+scenarios took 230 and 546 seconds. A `timeout` is therefore a statement about that run's agent, not
+about the candidate, and the phase line separates it from dependency installation. Queue time is not
 running time: an offline runner can leave a job queued until GitHub reaches a terminal state.
 
 The public artifact is named for its pull request, run, and attempt, and is retained for 14 days.
