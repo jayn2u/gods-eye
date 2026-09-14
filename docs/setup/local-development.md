@@ -29,19 +29,9 @@ uv run ruff format --check .
 pnpm test:web
 pnpm build:web
 pnpm test:e2e
-docker compose -f compose.yaml -f compose.smoke.yaml config
 ```
 
-The Playwright suite runs the real API/web flow with the deterministic CUHK-PEDES fixture. The
-opt-in Launcher/Compose smoke builds the same two containers, starts from a test-only Prepared Demo
-state, and verifies web plus API readiness:
-
-```bash
-RUN_LAUNCHER_COMPOSE_SMOKE=1 uv run pytest \
-  service/tests/test_quickstart_contract.py -m integration
-```
-
-This smoke path is test-only and does not claim that fixture assets constitute a real Full Demo.
+The Playwright suite runs the real API/web flow with the deterministic CUHK-PEDES fixture.
 
 The repository's separate advisory browser-QA runner is documented in
-[Agent QA operator guide](agent-qa.md). It does not use this Compose smoke path.
+[Agent QA operator guide](agent-qa.md).

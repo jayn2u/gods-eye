@@ -211,9 +211,7 @@ systemctl --user stop gods-eye-agent-qa-runner.service
 ```
 
 Rollback disables only the Agent QA workflows or this service. It leaves the existing Python suite
-and the non-pull-request Compose smoke unchanged. If repository protection later requires a Compose
-context, treat that as an external prerequisite and resolve it through the normal review process;
-do not silently change protection or re-enable PR Compose smoke.
+unchanged.
 
 ## Pinned inputs and review
 

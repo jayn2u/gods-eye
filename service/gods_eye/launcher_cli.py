@@ -92,12 +92,6 @@ def _prepare(layout: RuntimeLayout, args: argparse.Namespace) -> int:
     model_ids = list(dict.fromkeys(args.model_ids or [DEFAULT_MODEL_ID]))
     try:
         with mutation_lock(layout, "prepare"):
-            if os.getenv("GODS_EYE_USE_FIXTURES") == "true":
-                from .fixture_preparation import prepare_fixture
-
-                layout.initialize()
-                prepare_fixture(layout.root, layout.state_path, model_ids=model_ids)
-                return EXIT_OK
             result = prepare_datasets(
                 layout, accept_data_terms=args.accept_data_terms, assume_yes=args.yes
             )
