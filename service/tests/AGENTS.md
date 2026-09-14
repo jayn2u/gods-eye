@@ -43,13 +43,11 @@ every test requires the same external dependency. Preserve the local skip gates:
   compatible device/offline settings are still required.
 - `RUN_DATASET_SOURCE_CHECK=1` enables registered public-source checks in `test_datasets.py`.
 - `RUN_PREPARATION_BUILD_SMOKE=1` enables the real Launcher service-image build test.
-- `RUN_LAUNCHER_COMPOSE_SMOKE=1` enables fixture-backed Launcher/Compose tests.
 - `RUN_STALE_LAUNCHER_SMOKE=1` enables stale-image replacement coverage.
 - `RUN_PORTABLE_INDEX_SMOKE=1` enables portable prepared-index coverage.
 
 Docker tests also skip when the Docker CLI is absent; FAISS round-trip coverage skips when
-`faiss` is not installed. The fixture Compose path uses `compose.smoke.yaml`, CPU, offline
-mode, and no dataset/model downloads. Do not silently turn a deterministic test into a
+`faiss` is not installed. Do not silently turn a deterministic test into a
 networked or GPU-dependent test.
 
 ## Completion check
