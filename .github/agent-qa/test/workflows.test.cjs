@@ -164,15 +164,18 @@ async function executeAdmittedRequest(t, request) {
         { name: 'auth_lock', ok: true },
       ],
     }),
-    startRuntime: async () => ({
-      origin: 'http://127.0.0.1:41731',
-      supervisor: {
-        runRoot: root,
-        runToDeadline: async () => ({ code: 0, signal: null }),
-        handOff: async () => ({ manifestPath: path.join(root, 'processes.json'), runRoot: root }),
-      },
-      stop: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
-    }),
+    startRuntime: async ({ evidence }) => {
+      const runRoot = path.join(evidence, 'runtime-fixture');
+      return {
+        origin: 'http://127.0.0.1:41731',
+        supervisor: {
+          runRoot,
+          runToDeadline: async () => ({ code: 0, signal: null }),
+          handOff: async () => ({ manifestPath: path.join(runRoot, 'processes.json'), runRoot }),
+        },
+        stop: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
+      };
+    },
     stopHandedOffRuntime: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
     runBaseline: async () => ({
       name: 'candidate-playwright', status: 'passed', harness_started: true, app_started: true, duration_ms: 12,
@@ -315,7 +318,8 @@ test('only the agent step holds the Copilot token', () => {
   const prepare = steps.find((s) => s.id === 'prepare');
   const agent = steps.find((s) => s.id === 'agent');
   const finalize = steps.find((s) => s.id === 'finalize');
-  assert.equal(agent['timeout-minutes'], 22);
+  // The internal deadline starts at job start; this later step limit is only a backstop.
+  assert.equal(agent['timeout-minutes'], 25);
   for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
     assert.equal(agent.env[key], '');
   }
@@ -330,6 +334,64 @@ test('only the agent step holds the Copilot token', () => {
   assert.equal(prepare.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.match(prepare.run, /execute\.cjs" prepare/u);
   assert.match(prepare.run, /--job-start "\$JOB_START"/u);
+});
+
+test('prepare publishes its state path after an interrupted command and preserves its exit status', () => {
+  const prepare = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps.find((s) => s.id === 'prepare');
+  assert.match(prepare.run, /if node .*execute\.cjs" prepare/u);
+  assert.match(prepare.run, /prepare_status=\$\?/u);
+  assert.match(prepare.run, /\.private-execution\/state\.json/u);
+  assert.match(prepare.run, /printf 'state=%s\\n'/u);
+  assert.match(prepare.run, /exit "\$prepare_status"/u);
+});
+
+test('prepare exports a JSON or fallback state path while preserving a failed command status', (t) => {
+  const prepare = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps.find((s) => s.id === 'prepare');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gods-eye-prepare-step-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runnerTemp = path.join(root, 'runner-temp');
+  const evidence = path.join(root, 'evidence');
+  const statePath = path.join(evidence, '.private-execution', 'state.json');
+  const outputPath = path.join(root, 'github-output');
+  const mockBin = path.join(root, 'bin');
+  fs.mkdirSync(runnerTemp);
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.mkdirSync(mockBin);
+  const mockNode = path.join(mockBin, 'node');
+  fs.writeFileSync(mockNode, [
+    '#!/usr/bin/env bash',
+    'if [ "$1" = "-e" ]; then printf "%s" "$EXPECTED_STATE_PATH"; exit 0; fi',
+    'if [ "$2" = "prepare" ]; then',
+    '  : > "$EXPECTED_STATE_PATH"',
+    '  if [ "$EMIT_PREPARE_JSON" = "true" ]; then printf \'{"state":"%s"}\\n\' "$EXPECTED_STATE_PATH"; fi',
+    '  exit 143',
+    'fi',
+    'exit 99',
+    '',
+  ].join('\n'));
+  fs.chmodSync(mockNode, 0o700);
+
+  for (const emitJson of [false, true]) {
+    fs.writeFileSync(outputPath, '');
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', prepare.run], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH ?? ''}`,
+        GITHUB_WORKSPACE: root,
+        RUNNER_TEMP: runnerTemp,
+        REQUEST_PATH: path.join(root, 'request.json'),
+        CANDIDATE_PATH: path.join(root, 'candidate'),
+        EVIDENCE_PATH: evidence,
+        JOB_START: '2026-09-25T00:00:00Z',
+        GITHUB_OUTPUT: outputPath,
+        EXPECTED_STATE_PATH: statePath,
+        EMIT_PREPARE_JSON: String(emitJson),
+      },
+    });
+    assert.equal(result.status, 143, result.stderr);
+    assert.equal(fs.readFileSync(outputPath, 'utf8'), `state=${statePath}\n`);
+  }
 });
 
 test('prepare, agent, finalize run in order and finalize always runs after an admitted recheck', () => {

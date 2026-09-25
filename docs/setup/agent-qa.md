@@ -80,7 +80,8 @@ that user's access. Do not expand eligibility to untrusted contributors.
 The `Copilot Agent QA` job passes the execution-state file path to later steps as `STATE_PATH`.
 `prepare` runs the doctor with `phase: prepare`, starts the fixture runtime, runs the deterministic
 baseline, and writes the prompt. It does not receive `QA_COPILOT_TOKEN`. The agent step is the only
-step that receives `QA_COPILOT_TOKEN`, and its time limit is 22 minutes.
+step that receives `QA_COPILOT_TOKEN`. Its 25-minute GitHub step limit is a backstop behind the
+harness's 25-minute internal deadline, which starts at job start.
 
 `finalize` runs under `always()`. It verifies the Browser Journal, writes the report, and stops the
 handed-off runtime using its manifest. A run interrupted between steps is cleaned up by `finalize`;
@@ -164,13 +165,15 @@ a changed lock rebuilds it and unrelated source changes do not. A per-run cache 
 exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
 not cleaned with them; delete them by hand if a corrupt download has to be discarded.
 
-A run that reaches the agent step's 22-minute limit still enters `finalize` before the job ends. The
-browser agent is invoked directly rather than through a lock wrapper, so the supervisor terminates
-the agent's own process group and no lock survives to block later runs. The runner's orphan-process
-cleanup handles anything still left at job end. If a report says `setup_failed`, the job log names
-the failed prerequisite. The report's `phases` field records how many seconds each stage took,
-including `finalize`, and the job summary prints it, so a run that spent its deadline in dependency
-resolution rather than in the agent is visible without reading the log.
+A run that reaches the agent step's 25-minute GitHub backstop still enters `finalize` before the job
+ends. The internal deadline starts at job start, so it ends work before this later step limit and
+leaves time for cleanup. The browser agent is invoked directly rather than through a lock wrapper,
+so the supervisor terminates the agent's own process group and no lock survives to block later runs.
+The runner's orphan-process cleanup handles anything still left at job end. If a report says
+`setup_failed`, the job log names the failed prerequisite. The report's `phases` field records how
+many seconds each stage took, including `finalize`, and the job summary prints it, so a run that
+spent its deadline in dependency resolution rather than in the agent is visible without reading the
+log.
 
 Sharing state means inheriting what a killed run left behind. A deadline that lands mid-download
 leaves partial package state in the pnpm store, and every later install then fails on it. The harness

@@ -19,7 +19,7 @@
 - Concurrency groups: per-PR `gods-eye-copilot-agent-qa-pr-<n>`; global runner queue stays `gods-eye-agent-qa-global` (shared by every agent); report `gods-eye-copilot-agent-qa-report-pr-<n>`.
 - Runner label `gods-eye-agent-qa`, service `gods-eye-agent-qa-runner.service`, `QA_ROOT`, and the pinned action SHAs are unchanged.
 - `QA_COPILOT_TOKEN` is present only in the agent step's `env`; `prepare` and `finalize` never see it.
-- Job limit 30 min, internal deadline 25 min from `JOB_START`; the agent step gets `timeout-minutes: 22` so `finalize` always has time.
+- Job limit 30 min, internal deadline 25 min from `JOB_START`; the agent step gets `timeout-minutes: 25` as a backstop only (final-review ruling: the internal deadline must always fire first; `finalize` keeps its time within the 30-minute job).
 - Run helper tests with `npm test --prefix .github/agent-qa` (after `npm ci --prefix .github/agent-qa`). The Python suite (`uv run --extra indexing pytest -q`) must stay green but is not touched.
 - Never push directly to `develop`; the new workflows go live only after merge.
 
@@ -881,7 +881,7 @@ git commit -m "feat(agent-qa)!: run Copilot Agent QA as prepare, agent, and fina
   - Title: "Advisory Agent QA operator guide" stays; intro says Agent QA runs per agent and currently has one agent, Copilot.
   - **Eligibility and activation**: only the `copilot-agent-qa` label admits; no base restriction; `agent-qa` does nothing and is deprecated; release PRs are not automatic. Removing the label or converting to draft or retargeting invalidates and sets the comment to `not_applicable`.
   - Rename every `Agent QA` / `Agent QA report` workflow reference to `Copilot Agent QA` / `Copilot Agent QA Report`; the comment marker, artifact name `copilot-agent-qa-<pr>-<run>-<attempt>`, and branch `copilot-agent-qa-evidence`.
-  - New subsection **Step layout**: `prepare` (doctor with `phase: prepare`, runtime, baseline, prompt; no agent credential), agent step (only holder of `QA_COPILOT_TOKEN`, 22-minute step limit), `finalize` (`always()`; verifies the journal, writes the report, stops the handed-off runtime from its manifest). A run killed between steps is cleaned up by `finalize`, and anything still left at job end by the runner's orphan-process cleanup.
+  - New subsection **Step layout**: `prepare` (doctor with `phase: prepare`, runtime, baseline, prompt; no agent credential), agent step (only holder of `QA_COPILOT_TOKEN`, 25-minute GitHub step limit as a backstop behind the job-start-based internal deadline), `finalize` (`always()`; verifies the journal, writes the report, stops the handed-off runtime from its manifest). A run killed between steps is cleaned up by `finalize`, and anything still left at job end by the runner's orphan-process cleanup.
   - `phases` now include `finalize`.
   - Migration note: the old `agent-qa-evidence` branch and old `<!-- gods-eye-agent-qa:v1 -->` comments are no longer updated; the branch can be deleted.
   - Link ADR 0004.

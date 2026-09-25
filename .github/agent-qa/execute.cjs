@@ -18,8 +18,8 @@ const { agentTokenReadiness, runDoctor } = require('./doctor.cjs');
 const { parseBrowserJournal, readJournal, scenarioActionRequirements } = require('./journal.cjs');
 const { runCopilot } = require('./agents/copilot.cjs');
 const {
-  ProcessSupervisor, RuntimeError, remainingMilliseconds, sanitizedChildEnvironment,
-  startRuntime, stopHandedOffRuntime,
+  ProcessSupervisor, RuntimeError, reclaimStaleManifest, remainingMilliseconds,
+  sanitizedChildEnvironment, startRuntime, stopHandedOffRuntime,
 } = require('./runtime.cjs');
 const { profileFor } = require('./agents/profiles.cjs');
 
@@ -477,11 +477,20 @@ function readExecutionState(statePath) {
     if (error.code === 'INVALID_STATE') throw error;
     throw new ExecutionError('INVALID_STATE', 'Execution private root is unavailable');
   }
-  if (state.runtime && (typeof state.runtime.manifest_path !== 'string'
-      || !path.isAbsolute(state.runtime.manifest_path)
-      || typeof state.runtime.run_root !== 'string'
-      || !path.isAbsolute(state.runtime.run_root))) {
-    throw new ExecutionError('INVALID_STATE', 'Execution runtime paths are malformed');
+  if (state.runtime !== null) {
+    if (!state.runtime || typeof state.runtime !== 'object'
+        || typeof state.runtime.manifest_path !== 'string'
+        || !path.isAbsolute(state.runtime.manifest_path)
+        || typeof state.runtime.run_root !== 'string'
+        || !path.isAbsolute(state.runtime.run_root)) {
+      throw new ExecutionError('INVALID_STATE', 'Execution runtime paths are malformed');
+    }
+    const runtimeRoot = path.resolve(path.join(state.private_root, 'runtime'));
+    const runRoot = path.resolve(state.runtime.run_root);
+    if (runRoot === runtimeRoot || !within(runtimeRoot, runRoot)
+        || state.runtime.manifest_path !== path.join(runRoot, 'processes.json')) {
+      throw new ExecutionError('INVALID_STATE', 'Execution runtime paths do not match the private runtime root');
+    }
   }
   return state;
 }
@@ -868,6 +877,7 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
     if (isCancelled) reason = null;
     else if (state.reason) reason = state.reason;
     else if (outcomeMissing && state.runtime) reason = 'runner_failed';
+    else if (outcome?.process_error?.code === 'CANCELLED') reason = 'timeout';
     else if (outcome?.process_error?.code === 'AUTH_REQUIRED') reason = 'auth_required';
     else if (outcome?.process_error) reason = mapFailure(outcome.process_error, parsed.errorText);
     else if (!agentResult || !parsed.complete) reason ??= 'invalid_output';
@@ -886,6 +896,18 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
         cleanupError ??= error;
         return null;
       });
+    }
+    const agentSupervisorRoot = path.join(state.private_root, 'agent-supervisor');
+    const agentManifestPath = path.join(agentSupervisorRoot, 'processes.json');
+    if (fs.existsSync(agentManifestPath)) {
+      try {
+        const processResults = await reclaimStaleManifest({ manifestPath: agentManifestPath, runRoot: agentSupervisorRoot });
+        if (processResults.some(({ outcome }) => outcome !== 'stopped' && outcome !== 'identity_mismatch')) {
+          cleanupError ??= new Error('Agent process group cleanup did not complete');
+        }
+      } catch (error) {
+        cleanupError ??= error;
+      }
     }
     for (const target of privatePaths) {
       await removePrivatePath(state.private_root, target).catch((error) => { cleanupError ??= error; });

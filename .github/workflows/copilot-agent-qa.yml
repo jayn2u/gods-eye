@@ -175,15 +175,31 @@ jobs:
           GH_TOKEN: ""
         shell: bash
         run: |
-          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" prepare \
+          if node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" prepare \
             --request "$REQUEST_PATH" --candidate "$CANDIDATE_PATH" \
             --evidence "$EVIDENCE_PATH" --job-start "$JOB_START" > "$RUNNER_TEMP/agent-qa-prepare.json"
-          printf 'state=%s\n' "$(node -p 'require(process.argv[1]).state' "$RUNNER_TEMP/agent-qa-prepare.json")" >> "$GITHUB_OUTPUT"
+          then
+            prepare_status=0
+          else
+            prepare_status=$?
+          fi
+          state_path=''
+          if [ -s "$RUNNER_TEMP/agent-qa-prepare.json" ]; then
+            state_path="$(node -e 'const result = require(process.argv[1]); if (typeof result.state === "string") process.stdout.write(result.state)' \
+              "$RUNNER_TEMP/agent-qa-prepare.json" 2>/dev/null || true)"
+          fi
+          if [ -z "$state_path" ] && [ -f "$EVIDENCE_PATH/.private-execution/state.json" ]; then
+            state_path="$EVIDENCE_PATH/.private-execution/state.json"
+          fi
+          if [ -n "$state_path" ]; then
+            printf 'state=%s\n' "$state_path" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$prepare_status"
 
       - name: Run bounded Copilot browser QA
         id: agent
         if: steps.prepare.outputs.state != ''
-        timeout-minutes: 22
+        timeout-minutes: 25
         env:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
           NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules

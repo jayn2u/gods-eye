@@ -22,6 +22,7 @@ const {
 const { parseBrowserJournal } = require('../journal.cjs');
 const { faithfulJournalEntries } = require('./fixtures/journal-builder.cjs');
 const { SCENARIO_IDS, validateEvidenceManifest, validateReport } = require('../contracts.cjs');
+const { ProcessSupervisor, identityMatches, monotonicDeadlineAfter } = require('../runtime.cjs');
 
 const qaRoot = path.resolve(__dirname, '..');
 const fixtureRoot = path.join(__dirname, 'fixtures', 'execution');
@@ -96,15 +97,16 @@ function fixtureAdapters(overrides = {}) {
         order.push('doctor');
         return overrides.doctor ?? doctor(overrides.doctorOk ?? true, overrides.failedCheck ? [overrides.failedCheck] : []);
       },
-      startRuntime: async () => {
+      startRuntime: async ({ evidence }) => {
         order.push('runtime');
         if (overrides.startError) throw overrides.startError;
+        const runRoot = path.join(evidence, 'runtime-fixture');
         return {
           origin,
           supervisor: {
-            runRoot: '/unused-by-adapter',
+            runRoot,
             runToDeadline: async () => ({ code: 0, signal: null }),
-            handOff: async () => ({ manifestPath: '/unused-by-adapter/manifest.json', runRoot: '/unused-by-adapter' }),
+            handOff: async () => ({ manifestPath: path.join(runRoot, 'processes.json'), runRoot }),
           },
           stop: async () => {
             order.push('cleanup');
@@ -241,6 +243,71 @@ test('finalize still writes a report and stops the runtime when the agent step n
   assert.equal(b.runtimeStopped(), true);
 });
 
+test('an interrupted agent step reports timeout when the job itself was not cancelled', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await runAgentStep({ statePath, signal: controller.signal }, b.adapters);
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+
+  const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'timeout');
+  assert.equal(validateReport(report, request), report);
+});
+
+test('an interrupted agent step remains cancelled when the job was cancelled', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await runAgentStep({ statePath, signal: controller.signal }, b.adapters);
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+
+  const { report } = await finalizeExecution({ statePath, cancelled: true }, b.adapters);
+  assert.equal(report.status, 'cancelled');
+  assert.equal(report.reason, 'none');
+  assert.equal(validateReport(report, request), report);
+});
+
+test('finalize reclaims a leftover agent process group before deleting private state', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const runRoot = path.join(state.private_root, 'agent-supervisor');
+  const supervisor = await new ProcessSupervisor({ runRoot, deadline: monotonicDeadlineAfter(60_000) }).initialize();
+  const sleeper = await supervisor.spawn('sleeper', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    cwd: b.root,
+    env: { HOME: process.env.HOME, PATH: process.env.PATH },
+  });
+  await supervisor.handOff();
+  t.after(() => {
+    if (identityMatches(sleeper.identity)) {
+      try { process.kill(-sleeper.identity.pgid, 'SIGKILL'); } catch { /* best-effort test cleanup */ }
+    }
+  });
+  assert.equal(identityMatches(sleeper.identity), true);
+
+  const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.reason, 'runner_failed');
+  assert.equal(identityMatches(sleeper.identity), false);
+  assert.equal(fs.existsSync(state.private_root), false);
+});
+
+test('agent process cleanup failures still produce a runner_failed report', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const agentSupervisorRoot = path.join(state.private_root, 'agent-supervisor');
+  await fsp.mkdir(agentSupervisorRoot);
+  await fsp.writeFile(path.join(agentSupervisorRoot, 'processes.json'), '{invalid');
+
+  const { report, reportPath } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'runner_failed');
+  assert.equal(fs.existsSync(reportPath), true);
+  assert.equal(validateReport(report, request), report);
+});
+
 test('a cancelled job finalizes as cancelled', async (t) => {
   const b = await fixtureBundle(t);
   const { statePath } = await prepareExecution(b.options, b.adapters);
@@ -303,6 +370,22 @@ test('finalize rejects a state that redirects its private root outside evidence'
   const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
   state.private_root = otherRoot;
   await fsp.writeFile(statePath, JSON.stringify(state));
+  await assert.rejects(finalizeExecution({ statePath }, b.adapters), { code: 'INVALID_STATE' });
+  assert.equal(fs.existsSync(sentinel), true);
+});
+
+test('finalize rejects a runtime run root outside the private runtime directory', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const otherRunRoot = path.join(b.root, 'must-not-clean');
+  await fsp.mkdir(otherRunRoot);
+  const sentinel = path.join(otherRunRoot, 'sentinel.txt');
+  await fsp.writeFile(sentinel, 'preserve');
+  const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  state.runtime.run_root = otherRunRoot;
+  state.runtime.manifest_path = path.join(otherRunRoot, 'processes.json');
+  await fsp.writeFile(statePath, JSON.stringify(state));
+
   await assert.rejects(finalizeExecution({ statePath }, b.adapters), { code: 'INVALID_STATE' });
   assert.equal(fs.existsSync(sentinel), true);
 });
