@@ -14,10 +14,14 @@ const {
   SCENARIO_IDS, deriveReportOutcome, readBoundedJson, validateAgentResult,
   validateEvidenceFile, validateEvidenceManifest, validateReport, validateRequest,
 } = require('./contracts.cjs');
-const { runDoctor } = require('./doctor.cjs');
+const { agentTokenReadiness, runDoctor } = require('./doctor.cjs');
 const { parseBrowserJournal, readJournal, scenarioActionRequirements } = require('./journal.cjs');
 const { runCopilot } = require('./agents/copilot.cjs');
-const { RuntimeError, remainingMilliseconds, sanitizedChildEnvironment, startRuntime } = require('./runtime.cjs');
+const {
+  ProcessSupervisor, RuntimeError, remainingMilliseconds, sanitizedChildEnvironment,
+  startRuntime, stopHandedOffRuntime,
+} = require('./runtime.cjs');
+const { profileFor } = require('./agents/profiles.cjs');
 
 // Two consecutive runs of the same code took 230s and 546s for the same six scenarios, so the budget
 // has to cover agent variance rather than its best case. The runner is self-hosted, so the extra
@@ -40,30 +44,52 @@ class ExecutionError extends Error {
 }
 
 function usage() {
-  return 'Usage: node execute.cjs run --request <json> --candidate <absolute-path> --evidence <absolute-path> --job-start <timestamp>\n';
+  return [
+    'Usage:',
+    '  node execute.cjs prepare --request <absolute-path> --candidate <absolute-path> --evidence <absolute-path> --job-start <timestamp>',
+    '  node execute.cjs agent --state <absolute-path>',
+    '  node execute.cjs finalize --state <absolute-path> [--cancelled]',
+    '',
+  ].join('\n');
 }
 
 function parseCli(argv) {
   const [command, ...rest] = argv;
-  if (command !== 'run' || rest.length !== 8) throw new ExecutionError('USAGE', usage().trim());
+  const flagsByCommand = {
+    prepare: ['--request', '--candidate', '--evidence', '--job-start'],
+    agent: ['--state'],
+    finalize: ['--state'],
+  };
+  const allowed = flagsByCommand[command];
+  if (!allowed) throw new ExecutionError('USAGE', usage().trim());
   const values = {};
-  for (let index = 0; index < rest.length; index += 2) {
+  let cancelled = false;
+  for (let index = 0; index < rest.length;) {
     const flag = rest[index];
-    if (!['--request', '--candidate', '--evidence', '--job-start'].includes(flag) || !rest[index + 1] || values[flag]) {
+    if (command === 'finalize' && flag === '--cancelled' && !cancelled) {
+      cancelled = true;
+      index += 1;
+      continue;
+    }
+    if (!allowed.includes(flag) || !rest[index + 1] || values[flag]) {
       throw new ExecutionError('USAGE', usage().trim());
     }
     values[flag] = rest[index + 1];
+    index += 2;
   }
-  for (const flag of ['--request', '--candidate', '--evidence']) {
+  if (allowed.some((flag) => !values[flag])) throw new ExecutionError('USAGE', usage().trim());
+  const pathFlags = command === 'prepare' ? ['--request', '--candidate', '--evidence'] : ['--state'];
+  for (const flag of pathFlags) {
     if (!path.isAbsolute(values[flag])) throw new ExecutionError('INVALID_PATH', `${flag} must be an absolute path`);
   }
-  return {
+  if (command === 'prepare') return {
     command,
     request: path.resolve(values['--request']),
     candidate: path.resolve(values['--candidate']),
     evidence: path.resolve(values['--evidence']),
     jobStart: values['--job-start'],
   };
+  return { command, statePath: path.resolve(values['--state']), cancelled };
 }
 
 function deadlineFromJobStart(jobStart, clocks = {}) {
@@ -75,6 +101,12 @@ function deadlineFromJobStart(jobStart, clocks = {}) {
     throw new ExecutionError('INVALID_JOB_START', '--job-start must be a current or past RFC 3339 timestamp');
   }
   return monotonicNow + Math.max(0, INTERNAL_DEADLINE_MS - Math.max(0, wallNow - started));
+}
+
+function deadlineFromEpoch(epochMs, clocks = {}) {
+  const now = clocks.now ?? Date.now;
+  const monotonic = clocks.monotonic ?? (() => performance.now());
+  return monotonic() + Math.max(1, epochMs - now());
 }
 
 function within(root, target) {
@@ -215,9 +247,8 @@ function agentPrompt(origin, screenshotsRoot, request, diff) {
 }
 
 /**
- * Codex constrained the final document with --output-schema. Copilot has no such flag, so the shape
- * has to be stated in the prompt. It is rendered from the schema the validator uses, so the two
- * cannot drift apart.
+ * Not every agent CLI can constrain its final document with a schema flag, so the shape is stated in
+ * the prompt and rendered from the schema the validator uses.
  */
 function resultContract() {
   const schema = require('./agent-result.schema.json');
@@ -253,6 +284,7 @@ function resultContract() {
 }
 function mapFailure(error, text = '') {
   const combined = `${error?.message ?? ''} ${error?.details ?? ''} ${text}`;
+  if (error?.code === 'AUTH_REQUIRED') return 'auth_required';
   if (error?.code === 'CANCELLED') return 'cancelled';
   if (error?.code === 'DEADLINE_EXCEEDED' || /timed?\s*out|deadline/iu.test(combined)) return 'timeout';
   if (/rate.?limit|too many requests|\b429\b|quota/iu.test(combined)) return 'rate_limited';
@@ -261,14 +293,15 @@ function mapFailure(error, text = '') {
   return 'invalid_output';
 }
 
-function toolsFromDoctor(doctor, chromium = 'unavailable') {
+function toolsFromDoctor(doctor, chromium = 'unavailable', agent = 'copilot', env = process.env) {
   const versions = doctor?.checks?.find((check) => check.name === 'tool_versions') ?? {};
-  const model = process.env.QA_AGENT_MODEL;
+  const profile = profileFor(agent);
+  const model = env.QA_AGENT_MODEL;
   return {
     node: versions.node ?? process.versions.node,
     agent: {
-      name: 'copilot',
-      version: versions.copilot ?? 'unavailable',
+      name: profile.agent,
+      version: versions[profile.agent] ?? 'unavailable',
       ...(model ? { model } : {}),
     },
     playwright_mcp: versions.playwright_mcp ?? 'unavailable',
@@ -375,12 +408,15 @@ async function pruneScreenshotOutput(screenshotsRoot, proof) {
   }
 }
 
-async function runExecution(options, adapters = {}) {
-  const deps = {
+function executionDependencies(adapters) {
+  return {
+    env: adapters.env ?? process.env,
     runDoctor: adapters.runDoctor ?? runDoctor,
     startRuntime: adapters.startRuntime ?? startRuntime,
+    stopHandedOffRuntime: adapters.stopHandedOffRuntime ?? stopHandedOffRuntime,
     runBaseline: adapters.runBaseline ?? defaultRunBaseline,
     runAgent: adapters.runAgent ?? runCopilot,
+    ProcessSupervisor: adapters.ProcessSupervisor ?? ProcessSupervisor,
     snapshotTrackedFiles: adapters.snapshotTrackedFiles ?? snapshotTrackedFiles,
     candidateHead: adapters.candidateHead ?? candidateHead,
     candidateTrackedClean: adapters.candidateTrackedClean ?? candidateTrackedClean,
@@ -388,58 +424,128 @@ async function runExecution(options, adapters = {}) {
     chromiumVersion: adapters.chromiumVersion ?? chromiumVersion,
     clocks: adapters.clocks,
   };
-  const request = validateRequest(readBoundedJson(options.request));
+}
+
+function initialDeterministicResult() {
+  return [{ name: 'candidate-playwright', status: 'not_run', harness_started: false, app_started: false, duration_ms: 0 }];
+}
+
+function phaseTracker(records) {
+  let phaseStart = performance.now();
+  return {
+    mark(name) {
+      const seconds = Math.round((performance.now() - phaseStart) / 1000);
+      records.push({ name, seconds });
+      phaseStart = performance.now();
+    },
+  };
+}
+
+function phaseSummary(...groups) {
+  return groups.flat().map(({ name, seconds }) => `${name}=${seconds}s`).join(' ');
+}
+
+function absoluteStatePath(value) {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) {
+    throw new ExecutionError('INVALID_PATH', '--state must be an absolute path');
+  }
+  return path.resolve(value);
+}
+
+function readExecutionState(statePath) {
+  const state = readBoundedJson(absoluteStatePath(statePath), { maxBytes: MAX_EVENT_BYTES });
+  if (state?.schema_version !== 1 || typeof state.private_root !== 'string'
+      || !path.isAbsolute(state.private_root)) {
+    throw new ExecutionError('INVALID_STATE', 'Execution state is malformed');
+  }
+  for (const field of ['request_path', 'candidate', 'evidence', 'screenshots_root']) {
+    if (typeof state[field] !== 'string' || !path.isAbsolute(state[field])) {
+      throw new ExecutionError('INVALID_STATE', 'Execution state is malformed');
+    }
+  }
+  if (state.runtime && (typeof state.runtime.manifest_path !== 'string'
+      || !path.isAbsolute(state.runtime.manifest_path)
+      || typeof state.runtime.run_root !== 'string'
+      || !path.isAbsolute(state.runtime.run_root))) {
+    throw new ExecutionError('INVALID_STATE', 'Execution runtime paths are malformed');
+  }
+  return state;
+}
+
+async function writeExecutionState(statePath, state) {
+  await fsp.mkdir(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  await fsp.chmod(path.dirname(statePath), 0o700);
+  await writeJsonAtomic(statePath, state);
+  await fsp.chmod(statePath, 0o600);
+}
+
+function serializeProcessError(error) {
+  return {
+    code: String(error?.code ?? error?.name ?? 'PROCESS_FAILED'),
+    message: sanitizeText(error?.message ?? error, 'Agent process failed'),
+    details: error?.details == null ? null : sanitizeText(error.details),
+  };
+}
+
+async function prepareExecution(options, adapters = {}) {
+  const deps = executionDependencies(adapters);
+  const requestPath = path.resolve(options.request);
+  const request = validateRequest(readBoundedJson(requestPath));
   const roots = await prepareRoots(options.candidate, options.evidence);
-  const deadline = deadlineFromJobStart(options.jobStart, deps.clocks);
-  const startedAt = new Date().toISOString();
-  const reportPath = path.join(roots.evidence, 'report.json');
   const privateRoot = path.join(roots.evidence, '.private-execution');
   const screenshotsRoot = path.join(roots.evidence, 'screenshots');
-  await fsp.mkdir(privateRoot, { mode: 0o700 });
-  await fsp.mkdir(screenshotsRoot, { mode: 0o700 });
+  const statePath = path.join(privateRoot, 'state.json');
+  await fsp.mkdir(privateRoot, { recursive: true, mode: 0o700 });
+  await fsp.chmod(privateRoot, 0o700);
+  await fsp.mkdir(screenshotsRoot, { recursive: true, mode: 0o700 });
+  await fsp.chmod(screenshotsRoot, 0o700);
 
+  const stateRoot = path.resolve(deps.env.QA_ROOT || path.join(deps.env.HOME || os.homedir(), '.local/share/gods-eye-agent-qa'));
+  const toolchain = path.join(stateRoot, 'toolchain');
+  const startedAt = new Date().toISOString();
+  const requestedStart = Date.parse(options.jobStart);
+  const state = {
+    schema_version: 1,
+    request_path: requestPath,
+    candidate: roots.candidate,
+    evidence: roots.evidence,
+    deadline_epoch_ms: Number.isFinite(requestedStart) ? requestedStart + INTERNAL_DEADLINE_MS : 0,
+    started_at: startedAt,
+    private_root: privateRoot,
+    screenshots_root: screenshotsRoot,
+    before: {},
+    tools: {
+      node: process.versions.node,
+      agent: { name: request.agent, version: 'unavailable' },
+      playwright_mcp: 'unavailable',
+      chromium: 'unavailable',
+    },
+    deterministic: initialDeterministicResult(),
+    phases: [],
+    reason: null,
+    stale: false,
+    runtime: null,
+    prompt_path: null,
+    agent_paths: null,
+  };
+  const tracker = phaseTracker(state.phases);
   let runtime;
-  let before;
+  let handedOff = false;
   let doctor;
-  let tools = {
-    node: process.versions.node, agent: { name: 'copilot', version: 'unavailable' },
-    playwright_mcp: 'unavailable', chromium: 'unavailable',
-  };
-  let deterministic = [{ name: 'candidate-playwright', status: 'not_run', harness_started: false, app_started: false, duration_ms: 0 }];
-  let parsed = { complete: false, errorText: '', proof: new Map(SCENARIO_IDS.map((id) => [id, { screenshot: null }])), toolCalls: [] };
-  let agentResult;
-  let reason;
-  let cancelled = false;
-  let stale = false;
-  let cleanupReceipt;
-  let cleanupError;
-  let privateOutputDeleted = false;
-  let privatePaths = [];
-  // Kept as structured records as well as the log string: the job summary reads them to show where a
-  // run spent its deadline, which used to be recoverable only by reading stderr.
-  const phaseRecords = [];
-  const phases = [];
-  let phaseStart = performance.now();
-  const markPhase = (name) => {
-    const seconds = Math.round((performance.now() - phaseStart) / 1000);
-    phaseRecords.push({ name, seconds });
-    phases.push(`${name}=${seconds}s`);
-    phaseStart = performance.now();
-  };
   try {
+    const deadline = deadlineFromJobStart(options.jobStart, deps.clocks);
     if (remainingMilliseconds(deadline) === 0) throw new RuntimeError('DEADLINE_EXCEEDED', 'Internal deadline expired before doctor');
+    if (options.signal?.aborted) throw new RuntimeError('CANCELLED', 'Execution was cancelled before doctor');
     if (deps.candidateHead(roots.candidate) !== request.head.sha || !deps.candidateTrackedClean(roots.candidate)) {
-      stale = true;
+      state.stale = true;
       throw new ExecutionError('STALE_CANDIDATE', 'Candidate is not a clean checkout of the admitted head');
     }
-    before = deps.snapshotTrackedFiles(roots.candidate);
-    doctor = await deps.runDoctor({ env: process.env, phase: 'status' });
-    markPhase('doctor');
-    const stateRoot = path.resolve(process.env.QA_ROOT || path.join(process.env.HOME || os.homedir(), '.local/share/gods-eye-agent-qa'));
-    const toolchain = path.join(stateRoot, 'toolchain');
-    tools = toolsFromDoctor(doctor, deps.chromiumVersion(toolchain));
+    state.before = deps.snapshotTrackedFiles(roots.candidate);
+    doctor = await deps.runDoctor({ env: deps.env, phase: 'prepare' });
+    tracker.mark('doctor');
+    state.tools = toolsFromDoctor(doctor, deps.chromiumVersion(toolchain), request.agent, deps.env);
     if (!doctor.ok) {
-      reason = doctorReason(doctor);
+      state.reason = doctorReason(doctor);
       // The doctor emits only non-secret readiness metadata, so naming the failed checks in the job
       // log is safe and is the only way an operator can tell which prerequisite broke.
       const failed = doctor.checks.filter((check) => !check.ok).map((check) => check.name).join(', ');
@@ -447,146 +553,369 @@ async function runExecution(options, adapters = {}) {
       throw new ExecutionError('DOCTOR_FAILED', 'Runner doctor rejected execution');
     }
     runtime = await deps.startRuntime({
-      candidate: roots.candidate, evidence: path.join(privateRoot, 'runtime'), deadline,
+      candidate: roots.candidate,
+      evidence: path.join(privateRoot, 'runtime'),
+      deadline,
       // Shared across runs: a per-run cache made every run refetch every dependency.
       cacheRoot: path.join(stateRoot, 'cache'),
       signal: options.signal,
     });
-    markPhase('runtime');
-    deterministic = [await deps.runBaseline({
-      candidate: roots.candidate, evidence: path.join(privateRoot, 'baseline'), runtime, deadline,
+    tracker.mark('runtime');
+    state.deterministic = [await deps.runBaseline({
+      candidate: roots.candidate,
+      evidence: path.join(privateRoot, 'baseline'),
+      runtime,
+      deadline,
     })];
-    markPhase('baseline');
-    const workDir = path.join(privateRoot, 'work');
-    await fsp.mkdir(workDir, { mode: 0o700 });
-    const privateResult = path.join(privateRoot, 'agent-result.json');
-    const prompt = agentPrompt(runtime.origin, screenshotsRoot, request, deps.boundedDiffContext(roots.candidate, request));
-    const agent = await deps.runAgent({
-      runtime, prompt, deadline,
-      paths: {
-        copilotBin: process.env.QA_COPILOT_BIN || path.join(toolchain, 'node_modules', '.bin', 'copilot'),
-        mcpBin: process.env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchain, 'node_modules', '.bin', 'playwright-mcp'),
-        agentHome: path.join(privateRoot, 'agent-home'), browsers: path.join(toolchain, 'browsers'),
-        initPage: path.join(qaRoot, 'browser-init.ts'), journal: path.join(privateRoot, 'browser-journal.jsonl'),
-        model: process.env.QA_AGENT_MODEL || '',
-        origin: runtime.origin, screenshotsRoot, privateResult, workDir,
-      },
-      environment: {
-        copilotToken: (process.env.QA_COPILOT_TOKEN || '').trim(),
-      },
-      sanitizedChildEnvironment,
-    });
-    markPhase('agent');
-    privatePaths = [agent.journalPath, agent.stdoutPath, agent.stderrPath, agent.configPath, agent.privateResult]
-      .filter(Boolean);
-    let journal = [];
-    try {
-      journal = readJournal(agent.journalPath);
-    } catch (error) {
-      if (!agent.processError) {
-        // Missing evidence is invalid output; only the agent's own failure classifies the run.
-        reason = 'invalid_output';
-        process.stderr.write(`Agent QA browser journal unusable: ${sanitizeText(error.message)}\n`);
-      }
+    tracker.mark('baseline');
+
+    const agentPaths = {
+      work_dir: path.join(privateRoot, 'work'),
+      agent_home: path.join(privateRoot, 'agent-home'),
+      journal: path.join(privateRoot, 'browser-journal.jsonl'),
+      private_result: path.join(privateRoot, 'agent-result.json'),
+    };
+    await fsp.mkdir(agentPaths.work_dir, { mode: 0o700 });
+    const prompt = agentPrompt(
+      runtime.origin,
+      screenshotsRoot,
+      request,
+      deps.boundedDiffContext(roots.candidate, request),
+    );
+    const promptPath = path.join(privateRoot, 'prompt.txt');
+    await fsp.writeFile(promptPath, prompt, { mode: 0o600 });
+    await fsp.chmod(promptPath, 0o600);
+    const handoff = await runtime.supervisor.handOff();
+    handedOff = true;
+    state.runtime = {
+      origin: runtime.origin,
+      manifest_path: path.resolve(handoff.manifestPath),
+      run_root: path.resolve(handoff.runRoot),
+    };
+    state.prompt_path = promptPath;
+    state.agent_paths = agentPaths;
+  } catch (error) {
+    if (error?.code === 'STALE_CANDIDATE') state.stale = true;
+    if (options.signal?.aborted || error?.code === 'CANCELLED') {
+      state.reason = 'cancelled';
+    } else if (!state.reason) {
+      state.reason = error?.code === 'BASELINE_SETUP_FAILED' ? 'setup_failed' : mapFailure(error);
     }
-    parsed = parseBrowserJournal(journal, { origin: runtime.origin, screenshotsRoot });
-    // Emitted before anything that can throw: a rejected result document used to jump straight to the
-    // catch block and the run reported a one-word reason with no trace of what the agent did.
-    if (!options.signal?.aborted && (agent.processError || !parsed.complete)) {
-      for (const [label, file] of [['stderr', agent.stderrPath], ['stdout', agent.stdoutPath]]) {
+    const cancelled = options.signal?.aborted || error?.code === 'CANCELLED';
+    if (!cancelled) {
+      process.stderr.write(`Agent QA failed during ${sanitizeText(error.code ?? error.name)}; phases: ${
+        phaseSummary(state.phases) || 'none'
+      }\n`);
+    }
+    if (runtime && !handedOff) {
+      await runtime.stop('start_failed').catch((stopError) => {
+        state.reason = 'runner_failed';
+        state.cleanup_error = sanitizeText(stopError.message);
+      });
+    }
+  }
+  try {
+    await writeExecutionState(statePath, state);
+  } catch (error) {
+    if (state.runtime) {
+      await deps.stopHandedOffRuntime({
+        manifestPath: state.runtime.manifest_path,
+        runRoot: state.runtime.run_root,
+        reason: 'prepare_state_failed',
+      }).catch(() => {});
+    }
+    await fsp.rm(privateRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+  return { statePath, state };
+}
+
+async function runAgentStep({ statePath, signal }, adapters = {}) {
+  const deps = executionDependencies(adapters);
+  const state = readExecutionState(statePath);
+  const request = validateRequest(readBoundedJson(state.request_path));
+  const profile = profileFor(request.agent);
+  const outcomePath = path.join(state.private_root, 'agent-outcome.json');
+  const agentPaths = state.agent_paths;
+  const outcome = {
+    process_error: null,
+    journal_path: agentPaths?.journal ?? null,
+    stdout_path: agentPaths ? path.join(state.private_root, 'agent-supervisor', 'logs', 'copilot.stdout.log') : null,
+    stderr_path: agentPaths ? path.join(state.private_root, 'agent-supervisor', 'logs', 'copilot.stderr.log') : null,
+    config_path: agentPaths ? path.join(agentPaths.agent_home, '.copilot', 'mcp-config.json') : null,
+    private_result: agentPaths?.private_result ?? null,
+    phases: [],
+  };
+  const started = performance.now();
+  let supervisor;
+  let supervisorInitialized = false;
+  let interrupted = Boolean(signal?.aborted);
+  const cancellation = new AbortController();
+  const abort = () => {
+    interrupted = true;
+    cancellation.abort(new RuntimeError('CANCELLED', 'Agent execution was cancelled'));
+    if (supervisorInitialized) void supervisor.stop('cancelled').catch(() => {});
+  };
+  const onInterrupt = () => abort();
+  const onTerminate = () => abort();
+  process.once('SIGINT', onInterrupt);
+  process.once('SIGTERM', onTerminate);
+  const onSignalAbort = () => abort();
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', onSignalAbort, { once: true });
+  try {
+    if (!state.runtime) {
+      outcome.process_error = { code: 'NOT_PREPARED', message: 'Agent runtime was not prepared', details: null };
+    } else {
+      const token = typeof deps.env.QA_COPILOT_TOKEN === 'string' ? deps.env.QA_COPILOT_TOKEN : '';
+      if (interrupted) {
+        outcome.process_error = { code: 'CANCELLED', message: 'Agent execution was cancelled', details: null };
+      } else if (!agentTokenReadiness(token).present) {
+        outcome.process_error = { code: 'AUTH_REQUIRED', message: 'Agent token missing or malformed', details: null };
+      } else if (profile.agent !== 'copilot') {
+        outcome.process_error = { code: 'UNKNOWN_AGENT', message: 'Agent profile has no runner adapter', details: null };
+      } else {
+        const deadline = deadlineFromEpoch(state.deadline_epoch_ms, deps.clocks);
+        const runRoot = path.join(state.private_root, 'agent-supervisor');
+        supervisor = new deps.ProcessSupervisor({ runRoot, deadline });
+        await supervisor.initialize();
+        supervisorInitialized = true;
+        if (interrupted) throw new RuntimeError('CANCELLED', 'Agent execution was cancelled');
+        const toolchain = path.join(
+          path.resolve(deps.env.QA_ROOT || path.join(deps.env.HOME || os.homedir(), '.local/share/gods-eye-agent-qa')),
+          'toolchain',
+        );
+        const paths = {
+          copilotBin: deps.env.QA_COPILOT_BIN || path.join(toolchain, 'node_modules', '.bin', 'copilot'),
+          mcpBin: deps.env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchain, 'node_modules', '.bin', 'playwright-mcp'),
+          agentHome: agentPaths.agent_home,
+          browsers: path.join(toolchain, 'browsers'),
+          initPage: path.join(qaRoot, 'browser-init.ts'),
+          journal: agentPaths.journal,
+          model: deps.env.QA_AGENT_MODEL || '',
+          origin: state.runtime.origin,
+          screenshotsRoot: state.screenshots_root,
+          privateResult: agentPaths.private_result,
+          workDir: agentPaths.work_dir,
+        };
         try {
-          const tail = fs.readFileSync(file, 'utf8').slice(-2000);
-          if (tail.trim()) process.stderr.write(`Agent QA agent ${label}: ${sanitizeText(tail)}\n`);
-        } catch { /* an unreadable log must not replace the classified reason */ }
-      }
-      process.stderr.write(`Agent QA journal entries: ${journal.length}; proven scenarios: ${
-        [...parsed.proof.entries()].filter(([, item]) => item.proven && item.screenshot).length
-      }; phases: ${phases.join(' ')}\n`);
-      // Name what each unproven scenario is missing. A refused receipt carries the harness's own state
-      // snapshot, which is the only way to see why the expected page state did not hold.
-      for (const [id, item] of parsed.proof.entries()) {
-        if (item.proven && item.screenshot) continue;
-        const missing = [
-          item.navigate ? null : 'origin',
-          item.nextAction === scenarioActionRequirements(scenariosById.get(id)).length ? null : `actions ${item.nextAction}/${scenarioActionRequirements(scenariosById.get(id)).length}`,
-          item.proven ? null : `receipt (attempts ${item.receiptAttempts})`,
-          item.screenshot ? null : 'screenshot',
-        ].filter(Boolean).join(', ');
-        const state = item.lastReceiptState ? ` refused with ${sanitizeText(JSON.stringify(item.lastReceiptState))}` : '';
-        process.stderr.write(`Agent QA unproven ${id}: missing ${missing}.${state}\n`);
+          const agent = await deps.runAgent({
+            runtime: { supervisor, origin: state.runtime.origin },
+            paths,
+            prompt: await fsp.readFile(state.prompt_path, 'utf8'),
+            deadline,
+            environment: { copilotToken: token.trim() },
+            sanitizedChildEnvironment,
+            signal: cancellation.signal,
+          });
+          outcome.process_error = agent.processError ? serializeProcessError(agent.processError) : null;
+          outcome.journal_path = agent.journalPath ?? outcome.journal_path;
+          outcome.stdout_path = agent.stdoutPath ?? outcome.stdout_path;
+          outcome.stderr_path = agent.stderrPath ?? outcome.stderr_path;
+          outcome.config_path = agent.configPath ?? outcome.config_path;
+          outcome.private_result = agent.privateResult ?? outcome.private_result;
+        } catch (error) {
+          outcome.process_error = serializeProcessError(error);
+        }
       }
     }
-    if (fs.existsSync(agent.privateResult)) {
+  } catch (error) {
+    outcome.process_error ??= serializeProcessError(error);
+  } finally {
+    signal?.removeEventListener('abort', onSignalAbort);
+    process.removeListener('SIGINT', onInterrupt);
+    process.removeListener('SIGTERM', onTerminate);
+    if (supervisorInitialized) {
+      await supervisor.stop(interrupted ? 'cancelled' : 'agent_complete').catch((error) => {
+        outcome.process_error ??= serializeProcessError(error);
+      });
+    }
+    outcome.phases = [{ name: 'agent', seconds: Math.round((performance.now() - started) / 1000) }];
+  }
+  await writeExecutionState(outcomePath, outcome);
+  return outcome;
+}
+
+async function finalizeExecution({ statePath, cancelled = false, signal }, adapters = {}) {
+  const deps = executionDependencies(adapters);
+  const started = performance.now();
+  const state = readExecutionState(statePath);
+  let request;
+  let requestError;
+  try { request = validateRequest(readBoundedJson(state.request_path)); } catch (error) { requestError = error; }
+  const reportPath = path.join(state.evidence, 'report.json');
+  const outcomePath = path.join(state.private_root, 'agent-outcome.json');
+  let outcome;
+  let outcomeReadError;
+  if (fs.existsSync(outcomePath)) {
+    try { outcome = readBoundedJson(outcomePath, { maxBytes: MAX_EVENT_BYTES }); } catch (error) { outcomeReadError = error; }
+  }
+  const outcomeMissing = !fs.existsSync(outcomePath);
+  const isCancelled = Boolean(cancelled || signal?.aborted || state.reason === 'cancelled');
+  let parsed = {
+    complete: false,
+    errorText: '',
+    proof: new Map(SCENARIO_IDS.map((id) => [id, { screenshot: null }])),
+    toolCalls: [],
+  };
+  let agentResult;
+  let reason = null;
+  let cleanupReceipt;
+  let cleanupError = state.cleanup_error ? new Error(state.cleanup_error) : null;
+  let privateOutputDeleted = false;
+  const privatePaths = [
+    state.prompt_path,
+    outcome?.journal_path,
+    outcome?.stdout_path,
+    outcome?.stderr_path,
+    outcome?.config_path,
+    outcome?.private_result,
+  ].filter(Boolean);
+  const deterministic = state.deterministic ?? initialDeterministicResult();
+  const outcomePhases = outcome?.phases ?? [];
+  const phaseRecords = [...(state.phases ?? []), ...outcomePhases];
+  const phases = phaseSummary(state.phases ?? [], outcomePhases);
+  const screenshotsRoot = state.screenshots_root;
+  const journalPath = outcome?.journal_path ?? state.agent_paths?.journal;
+  let journal = [];
+  try {
+    if (state.runtime) {
       try {
-        agentResult = validateAgentResult(readBoundedJson(agent.privateResult));
+        if (!journalPath) throw new Error('Agent QA browser journal path is missing');
+        journal = readJournal(journalPath);
       } catch (error) {
-        // A malformed document is missing output, not an infrastructure fault.
-        reason = 'invalid_output';
-        process.stderr.write(`Agent QA agent result rejected: ${sanitizeText(error.message)}\n`);
+        if (!outcome?.process_error) {
+          reason = 'invalid_output';
+          process.stderr.write(`Agent QA browser journal unusable: ${sanitizeText(error.message)}\n`);
+        }
+      }
+      parsed = parseBrowserJournal(journal, {
+        origin: state.runtime.origin,
+        screenshotsRoot,
+      });
+      if (!isCancelled && (outcome?.process_error || !parsed.complete)) {
+        for (const [label, file] of [['stderr', outcome?.stderr_path], ['stdout', outcome?.stdout_path]]) {
+          if (!file) continue;
+          try {
+            const tail = fs.readFileSync(file, 'utf8').slice(-2000);
+            if (tail.trim()) process.stderr.write(`Agent QA agent ${label}: ${sanitizeText(tail)}\n`);
+          } catch { /* an unreadable log must not replace the classified reason */ }
+        }
+        process.stderr.write(`Agent QA journal entries: ${journal.length}; proven scenarios: ${
+          [...parsed.proof.entries()].filter(([, item]) => item.proven && item.screenshot).length
+        }; phases: ${phases}\n`);
+        // Name what each unproven scenario is missing. A refused receipt carries the harness's own state
+        // snapshot, which is the only way to see why the expected page state did not hold.
+        for (const [id, item] of parsed.proof.entries()) {
+          if (item.proven && item.screenshot) continue;
+          const requirements = scenarioActionRequirements(scenariosById.get(id));
+          const missing = [
+            item.navigate ? null : 'origin',
+            item.nextAction === requirements.length ? null : `actions ${item.nextAction}/${requirements.length}`,
+            item.proven ? null : `receipt (attempts ${item.receiptAttempts})`,
+            item.screenshot ? null : 'screenshot',
+          ].filter(Boolean).join(', ');
+          const receiptState = item.lastReceiptState ? ` refused with ${sanitizeText(JSON.stringify(item.lastReceiptState))}` : '';
+          process.stderr.write(`Agent QA unproven ${id}: missing ${missing}.${receiptState}\n`);
+        }
+      }
+      if (outcome?.private_result && fs.existsSync(outcome.private_result)) {
+        try {
+          agentResult = validateAgentResult(readBoundedJson(outcome.private_result));
+        } catch (error) {
+          reason = 'invalid_output';
+          process.stderr.write(`Agent QA agent result rejected: ${sanitizeText(error.message)}\n`);
+        }
       }
     }
-    if (options.signal?.aborted) cancelled = true;
-    else if (agent.processError) reason = mapFailure(agent.processError, parsed.errorText);
+    if (outcomeReadError) {
+      reason = 'invalid_output';
+      process.stderr.write(`Agent QA agent outcome rejected: ${sanitizeText(outcomeReadError.message)}\n`);
+    }
+    if (isCancelled) reason = null;
+    else if (state.reason) reason = state.reason;
+    else if (outcomeMissing && state.runtime) reason = 'runner_failed';
+    else if (outcome?.process_error?.code === 'AUTH_REQUIRED') reason = 'auth_required';
+    else if (outcome?.process_error) reason = mapFailure(outcome.process_error, parsed.errorText);
     else if (!agentResult || !parsed.complete) reason ??= 'invalid_output';
   } catch (error) {
-    if (options.signal?.aborted || error.code === 'CANCELLED') cancelled = true;
-    else if (!stale && !reason) reason = error.code === 'BASELINE_SETUP_FAILED' ? 'setup_failed' : mapFailure(error, parsed.errorText);
-    // A run that dies before the agent has no agent log to report, so the phase timings are the only
-    // way to see which stage consumed the deadline.
-    if (!cancelled) process.stderr.write(`Agent QA failed during ${sanitizeText(error.code ?? error.name)}; phases: ${phases.join(' ') || 'none'}\n`);
-  } finally {
-    for (const target of privatePaths) {
-      await fsp.rm(target, { force: true }).catch((error) => { cleanupError ??= error; });
+    if (!isCancelled && !state.reason) reason = mapFailure(error, parsed.errorText);
+    if (!isCancelled) {
+      process.stderr.write(`Agent QA failed during ${sanitizeText(error.code ?? error.name)}; phases: ${phases || 'none'}\n`);
     }
-    if (runtime) {
-      cleanupReceipt = await runtime.stop(cancelled ? 'cancelled' : 'execution_complete').catch((error) => {
+  } finally {
+    if (state.runtime) {
+      cleanupReceipt = await deps.stopHandedOffRuntime({
+        manifestPath: state.runtime.manifest_path,
+        runRoot: state.runtime.run_root,
+        reason: isCancelled ? 'cancelled' : 'execution_complete',
+      }).catch((error) => {
         cleanupError ??= error;
         return null;
       });
     }
-    await fsp.rm(privateRoot, { recursive: true, force: true }).then(() => {
+    for (const target of privatePaths) {
+      await fsp.rm(target, { force: true }).catch((error) => { cleanupError ??= error; });
+    }
+    await fsp.rm(state.private_root, { recursive: true, force: true }).then(() => {
       privateOutputDeleted = true;
     }).catch((error) => { cleanupError ??= error; });
     await pruneScreenshotOutput(screenshotsRoot, parsed.proof).catch((error) => { cleanupError ??= error; });
   }
 
+  if (requestError) throw requestError;
+
   let changed = false;
-  if (before) {
+  if (state.before) {
     try {
-      changed = JSON.stringify(before) !== JSON.stringify(deps.snapshotTrackedFiles(roots.candidate))
-        || !deps.candidateTrackedClean(roots.candidate);
+      changed = JSON.stringify(state.before) !== JSON.stringify(deps.snapshotTrackedFiles(state.candidate))
+        || !deps.candidateTrackedClean(state.candidate);
     } catch { changed = true; }
   }
+  let wasCancelled = isCancelled;
+  let stale = Boolean(state.stale);
   if (changed) {
     reason = 'source_changed';
-    cancelled = false;
+    wasCancelled = false;
     stale = false;
   } else if (cleanupError) {
     reason = 'runner_failed';
-    cancelled = false;
+    wasCancelled = false;
     stale = false;
   }
-  const evidence = evidenceManifest(roots.evidence, parsed.proof);
-  validateEvidenceManifest(roots.evidence, evidence);
+  const evidence = evidenceManifest(state.evidence, parsed.proof);
+  validateEvidenceManifest(state.evidence, evidence);
   const agent = agentResult ? publicAgentResult(agentResult, parsed) : {
     summary: 'The browser agent did not produce a complete validated result.',
     scenarios: incompleteScenarios(),
     findings: [],
   };
-  const outcome = deriveReportOutcome({
-    cancelled, stale, infrastructureReason: reason,
+  const reportOutcome = deriveReportOutcome({
+    cancelled: wasCancelled,
+    stale,
+    infrastructureReason: reason,
     evidenceComplete: parsed.complete,
     agentResult: agentResult && parsed.complete ? agent : null,
     deterministicResults: deterministic,
   });
   const stopped = cleanupReceipt?.processes?.filter((item) => item.outcome === 'stopped').length ?? 0;
   const report = {
-    schema_version: 1, request, tested_head_sha: request.head.sha, controller_sha: request.controller_sha,
-    started_at: startedAt, finished_at: new Date().toISOString(), tools,
-    status: outcome.status, reason: outcome.reason, deterministic_results: deterministic,
-    scenarios: agent.scenarios, findings: agent.findings, tool_calls: parsed.toolCalls, evidence,
+    schema_version: 1,
+    request,
+    tested_head_sha: request.head.sha,
+    controller_sha: request.controller_sha,
+    started_at: state.started_at,
+    finished_at: new Date().toISOString(),
+    tools: state.tools,
+    status: reportOutcome.status,
+    reason: reportOutcome.reason,
+    deterministic_results: deterministic,
+    scenarios: agent.scenarios,
+    findings: agent.findings,
+    tool_calls: parsed.toolCalls,
+    evidence,
     ...(parsed.usage ? { usage: parsed.usage } : {}),
-    ...(phaseRecords.length ? { phases: phaseRecords } : {}),
+    phases: [...phaseRecords, { name: 'finalize', seconds: Math.round((performance.now() - started) / 1000) }],
     cleanup: {
       attempted: true,
       completed: !cleanupError && privateOutputDeleted && (cleanupReceipt?.allProcessesStopped ?? true),
@@ -599,6 +928,16 @@ async function runExecution(options, adapters = {}) {
   return { report, reportPath };
 }
 
+async function runExecution(options, adapters = {}) {
+  const { statePath } = await prepareExecution(options, adapters);
+  await runAgentStep({ statePath, signal: options.signal }, adapters);
+  return finalizeExecution({
+    statePath,
+    cancelled: Boolean(options.signal?.aborted),
+    signal: options.signal,
+  }, adapters);
+}
+
 async function main() {
   const options = parseCli(process.argv.slice(2));
   const controller = new AbortController();
@@ -608,8 +947,24 @@ async function main() {
   process.once('SIGINT', onInt);
   process.once('SIGTERM', onTerm);
   try {
-    const result = await runExecution({ ...options, signal: controller.signal });
-    process.stdout.write(`${JSON.stringify({ status: result.report.status, reason: result.report.reason, report: result.reportPath })}\n`);
+    if (options.command === 'prepare') {
+      const result = await prepareExecution({ ...options, signal: controller.signal });
+      process.stdout.write(`${JSON.stringify({ state: result.statePath, ready: Boolean(result.state.runtime) })}\n`);
+    } else if (options.command === 'agent') {
+      await runAgentStep({ statePath: options.statePath, signal: controller.signal });
+      process.stdout.write(`${JSON.stringify({ outcome: path.join(path.dirname(options.statePath), 'agent-outcome.json') })}\n`);
+    } else {
+      const result = await finalizeExecution({
+        statePath: options.statePath,
+        cancelled: options.cancelled,
+        signal: controller.signal,
+      });
+      process.stdout.write(`${JSON.stringify({
+        status: result.report.status,
+        reason: result.report.reason,
+        report: result.reportPath,
+      })}\n`);
+    }
   } finally {
     process.removeListener('SIGINT', onInt);
     process.removeListener('SIGTERM', onTerm);
@@ -618,8 +973,19 @@ async function main() {
 }
 
 module.exports = Object.freeze({
-  ALLOWED_TOOLS, ExecutionError, INTERNAL_DEADLINE_MS, agentPrompt, deadlineFromJobStart, resultContract,
-  parseCli, runExecution, snapshotTrackedFiles,
+  ALLOWED_TOOLS,
+  ExecutionError,
+  INTERNAL_DEADLINE_MS,
+  agentPrompt,
+  deadlineFromEpoch,
+  deadlineFromJobStart,
+  finalizeExecution,
+  parseCli,
+  prepareExecution,
+  resultContract,
+  runAgentStep,
+  runExecution,
+  snapshotTrackedFiles,
 });
 
 if (require.main === module) {
