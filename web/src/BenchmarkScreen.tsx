@@ -23,9 +23,9 @@ function ProvenanceCell({ model }: { model: ModelBenchmark }) {
     <span>W&B run: <code>{provenanceValue(model, 'wandb_run_id')}</code></span>
     <span>Epoch: {provenanceValue(model, 'epoch')}</span>
     <span>EMA: {provenanceValue(model, 'ema_enabled')}</span>
-    <span className={`verified-badge ${model.verified ? '' : 'unverified'}`} aria-label={model.verified ? 'Verified model' : 'Unverified model'}>
+    {model.group === 'fine-tuned' && <span className={`verified-badge ${model.verified ? '' : 'unverified'}`} aria-label={model.verified ? 'Verified model' : 'Unverified model'}>
       {model.verified ? 'Verified' : 'Unverified'}
-    </span>
+    </span>}
   </div>
 }
 

@@ -887,8 +887,7 @@ dd {
   margin-bottom: 14px;
 }
 
-.comparison-column-heading h3,
-.chart-heading h3 {
+.comparison-column-heading h3 {
   margin: 8px 0 0;
   font: 600 1.05rem/1.2 'Space Grotesk';
 }

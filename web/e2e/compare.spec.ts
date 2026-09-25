@@ -1,9 +1,8 @@
-import { mkdir } from 'node:fs/promises'
 import { expect, test, type Page } from '@playwright/test'
 
 const fixtureBaseline = 'openclip/ViT-B-16@openai:384x128-reid'
 const fixtureFineTuned = 'labclip:cuhk-pedes:0123456789ab'
-const screenshotDirectory = '/mnt/data/gods-eye/.superpowers/sdd/2026-09-25-fine-tuned-checkpoint-comparison/screens'
+const fixtureReference = 'openai/clip-vit-base-patch32'
 
 async function runImprovedBenchmarkQuery(page: Page) {
   await page.getByRole('tab', { name: 'Compare' }).click()
@@ -12,7 +11,9 @@ async function runImprovedBenchmarkQuery(page: Page) {
   await expect(page.getByRole('button', { name: 'Same 1' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Worse 1' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'All 3' })).toBeVisible()
-  await page.getByLabel('Benchmark Query (CUHK-PEDES test caption)').selectOption('bq_improved')
+  const queryPicker = page.getByLabel('Benchmark Query (CUHK-PEDES test caption)')
+  await expect(queryPicker.locator('option')).toHaveCount(3)
+  await queryPicker.selectOption('bq_improved')
   await page.getByRole('button', { name: 'Run comparison' }).click()
   await expect(page.getByText('Baseline #3 → Fine-tuned #1')).toBeVisible()
   await expect(page.getByText('Ground truth first appears at #3')).toBeVisible()
@@ -54,6 +55,67 @@ test('Benchmark Query comparison shows outcomes, ground-truth ranks, and matchin
   await runImprovedBenchmarkQuery(page)
 })
 
+test('filtered Benchmark Query selection follows outcomes after changing the right model', async ({ page }) => {
+  const searchBodies: Record<string, unknown>[] = []
+  await page.route('**/api/benchmark', async route => {
+    const response = await route.fetch()
+    const benchmark = await response.json()
+    const reference = benchmark.models.find((model: { model_id: string }) => model.model_id === fixtureReference)
+    reference.benchmark_query_ranks = { bq_improved: 4, bq_same: 1, bq_worse: 1 }
+    await route.fulfill({
+      status: response.status(),
+      contentType: 'application/json',
+      body: JSON.stringify(benchmark),
+    })
+  })
+  await page.route('**/api/benchmark/search', async route => {
+    searchBodies.push(JSON.parse(route.request().postData() ?? '{}'))
+    await route.continue()
+  })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Compare' }).click()
+  await page.getByRole('radio', { name: 'Benchmark Query' }).check()
+  await expect(page.getByRole('button', { name: 'Improved 1' })).toBeVisible()
+  await page.getByRole('button', { name: 'Improved 1' }).click()
+  const queryPicker = page.getByLabel('Benchmark Query (CUHK-PEDES test caption)')
+  await queryPicker.selectOption('bq_improved')
+  await page.getByLabel('Right model').selectOption(fixtureReference)
+
+  await expect(page.getByRole('button', { name: 'Worse 1' })).toBeVisible()
+  await expect(queryPicker).toHaveValue('bq_same')
+  await page.getByRole('button', { name: 'Run comparison' }).click()
+  await expect(page.getByLabel('Side-by-side comparison results')).toBeVisible()
+  expect(searchBodies).toHaveLength(2)
+  expect(searchBodies).toEqual([
+    expect.objectContaining({ query_id: 'bq_same' }),
+    expect.objectContaining({ query_id: 'bq_same' }),
+  ])
+})
+
+test('Compare shows model catalog refresh errors in its own error area', async ({ page }) => {
+  let comparisonStarted = false
+  await page.route('**/api/models', async route => {
+    if (comparisonStarted) {
+      await route.fulfill({ status: 503, json: { detail: 'catalog refresh failed' } })
+      return
+    }
+    await route.continue()
+  })
+  await page.route('**/api/benchmark/search', async route => {
+    comparisonStarted = true
+    await route.fulfill({ status: 409, json: { detail: 'model registration changed' } })
+  })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Compare' }).click()
+  await page.getByRole('radio', { name: 'Benchmark Query' }).check()
+  await expect(page.getByRole('button', { name: 'Improved 1' })).toBeVisible()
+  await page.getByLabel('Benchmark Query (CUHK-PEDES test caption)').selectOption('bq_improved')
+  await page.getByRole('button', { name: 'Run comparison' }).click()
+  await expect(page.getByRole('alert')).toHaveText('The model catalog is unavailable.')
+})
+
 test('Free text comparison sends the same description to both selected models', async ({ page }) => {
   const bodies: Record<string, unknown>[] = []
   await page.route('**/api/search', async route => {
@@ -82,8 +144,7 @@ test('Free text comparison sends the same description to both selected models', 
   ]))
 })
 
-test('Compare and Benchmark screens render in both themes without page overflow', async ({ page }) => {
-  await mkdir(screenshotDirectory, { recursive: true })
+test('Compare and Benchmark screens render in both themes without page overflow', async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/')
 
@@ -91,13 +152,29 @@ test('Compare and Benchmark screens render in both themes without page overflow'
     await chooseTheme(page, theme)
     await runImprovedBenchmarkQuery(page)
     await expectNoPageOverflow(page)
-    await page.screenshot({ path: `${screenshotDirectory}/compare-${theme}.png`, fullPage: true })
+    if (process.env.GODS_EYE_CAPTURE_COMPARE === '1') {
+      await page.screenshot({ path: testInfo.outputPath(`compare-${theme}.png`), fullPage: true })
+    }
 
     await page.getByRole('tab', { name: 'Benchmark' }).click()
     await expect(page.getByRole('heading', { name: 'Benchmark results' })).toBeVisible()
     await expect(page.locator('.benchmark-table')).toContainText('+39.0 pp')
-    await expect(page.getByRole('img', { name: /Benchmark metrics:/ })).toBeVisible()
+    const chart = page.getByRole('group', { name: /Benchmark metrics:/ })
+    await expect(chart).toBeVisible()
+    await expect(chart).toHaveAttribute('aria-describedby', 'benchmark-chart-description')
+    const bars = page.locator('.benchmark-bar')
+    await expect(bars).toHaveCount(8)
+    await expect(bars.first()).toHaveAttribute('role', 'img')
+    await expect(bars.first()).toHaveAttribute('tabindex', '0')
+    await expect(bars.first()).toHaveAttribute('aria-label', /R@1/)
+    await expect(bars.first().locator('title')).toHaveCount(0)
+    const rows = page.locator('.benchmark-table tbody tr')
+    await expect(rows.filter({ hasText: 'Reference (HF 224 center-crop)' }).first().getByText('Verified', { exact: true })).toHaveCount(0)
+    await expect(rows.filter({ hasText: 'Paired baseline' }).getByText('Verified', { exact: true })).toHaveCount(0)
+    await expect(rows.filter({ hasText: 'Fine-tuned' }).getByText('Verified', { exact: true })).toHaveCount(1)
     await expectNoPageOverflow(page)
-    await page.screenshot({ path: `${screenshotDirectory}/benchmark-${theme}.png`, fullPage: true })
+    if (process.env.GODS_EYE_CAPTURE_COMPARE === '1') {
+      await page.screenshot({ path: testInfo.outputPath(`benchmark-${theme}.png`), fullPage: true })
+    }
   }
 })

@@ -80,7 +80,7 @@ function App() {
   const [benchmarkError, setBenchmarkError] = React.useState('')
   const [selectedBenchmarkModelId, setSelectedBenchmarkModelId] = React.useState<string | null>(null)
 
-  async function checkModels() {
+  async function checkModels(onCatalogError?: (message: string) => void): Promise<string | null> {
     try {
       const nextCatalog = await fetchModels()
       setCatalog(nextCatalog)
@@ -90,9 +90,13 @@ function App() {
         const defaultModel = searchModels.find(model => model.model_id === nextCatalog.default_model_id && model.ready)
         return defaultModel?.model_id ?? searchModels.find(model => model.ready)?.model_id ?? nextCatalog.default_model_id
       })
+      return null
     } catch (caught) {
       setCatalog(null)
-      setError(caught instanceof Error ? caught.message : 'The model catalog is unavailable.')
+      const message = caught instanceof Error ? caught.message : 'The model catalog is unavailable.'
+      if (onCatalogError) onCatalogError(message)
+      else setError(message)
+      return message
     }
   }
 
@@ -195,10 +199,11 @@ function App() {
     setComparisonTopK(value)
   }
 
-  async function runComparison() {
+  async function runComparison(queryIdOverride?: string) {
     const leftModel = catalog?.models.find(model => model.model_id === comparePair.left && model.ready)
     const rightModel = catalog?.models.find(model => model.model_id === comparePair.right && model.ready)
-    const selectedQuery = benchmarkQueries.find(item => item.id === selectedBenchmarkQueryId)
+    const requestedQueryId = queryIdOverride ?? selectedBenchmarkQueryId
+    const selectedQuery = benchmarkQueries.find(item => item.id === requestedQueryId)
     const textQuery = comparisonQueryText.trim()
     if (!leftModel || !rightModel) {
       setComparisonError('Choose two prepared models to compare.')
@@ -235,9 +240,12 @@ function App() {
     } catch (caught) {
       if (controller.signal.aborted || requestId !== comparisonSequence.current) return
       controller.abort()
-      if (caught instanceof SearchApiError && caught.status === 409) await checkModels()
+      let refreshError: string | null = null
+      if (caught instanceof SearchApiError && caught.status === 409) {
+        refreshError = await checkModels(message => { refreshError = message })
+      }
       if (requestId === comparisonSequence.current) {
-        setComparisonError(caught instanceof Error ? caught.message : 'Comparison could not be completed.')
+        setComparisonError(refreshError ?? (caught instanceof Error ? caught.message : 'Comparison could not be completed.'))
       }
     } finally {
       if (requestId === comparisonSequence.current) {
@@ -367,7 +375,7 @@ function App() {
         onSelectedQuery={updateBenchmarkQuery}
         onQueryFilter={updateQueryFilter}
         onTopK={updateComparisonTopK}
-        onCompare={() => void runComparison()}
+        onCompare={queryId => void runComparison(queryId)}
       />
       </>}
     </div>

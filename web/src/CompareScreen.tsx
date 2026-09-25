@@ -28,6 +28,27 @@ const OUTCOMES: readonly { outcome: Outcome; label: string }[] = [
   { outcome: 'worse', label: 'Worse' },
 ]
 
+function ModelSelect(props: {
+  side: Side
+  modelId: string | null
+  models: readonly ModelAvailability[]
+  onModel: (side: Side, modelId: string) => void
+}) {
+  const label = props.side === 'left' ? 'Left model' : 'Right model'
+  const id = `compare-${props.side}-model`
+
+  return <label className="select-label" htmlFor={id}>{label}
+    <select id={id} value={props.modelId ?? ''} onChange={event => props.onModel(props.side, event.target.value)}>
+      {MODEL_GROUPS.map(group => {
+        const models = props.models.filter(model => model.group === group.group)
+        return models.length ? <optgroup key={group.group} label={group.label}>
+          {models.map(model => <option key={model.model_id} value={model.model_id}>{model.label}</option>)}
+        </optgroup> : null
+      })}
+    </select>
+  </label>
+}
+
 function resultIsBenchmark(result: SearchResultSet): result is BenchmarkSearchResponse {
   return 'first_match_rank' in result
 }
@@ -60,7 +81,7 @@ export function CompareScreen(props: {
   onSelectedQuery: (queryId: string) => void
   onQueryFilter: (filter: QueryFilter) => void
   onTopK: (topK: number) => void
-  onCompare: () => void
+  onCompare: (queryId: string) => void
 }) {
   const readyModels = props.models.filter(model => model.ready)
   const leftModel = readyModels.find(model => model.model_id === props.leftModelId) ?? null
@@ -71,7 +92,6 @@ export function CompareScreen(props: {
     { ...leftBenchmark?.benchmark_query_ranks },
     { ...rightBenchmark?.benchmark_query_ranks },
   )
-  const allCount = counts.improved + counts.same + counts.worse
   const queryRanks = props.queries.map(query => ({
     query,
     status: leftBenchmark?.benchmark_query_ranks[query.id] !== undefined
@@ -85,6 +105,9 @@ export function CompareScreen(props: {
   const visibleQueries = queryRanks.filter(item => (
     props.queryFilter === 'all' || item.status === props.queryFilter
   ))
+  const effectiveSelectedQueryId = visibleQueries.some(item => item.query.id === props.selectedQueryId)
+    ? props.selectedQueryId
+    : visibleQueries[0]?.query.id ?? ''
   function chooseQueryFilter(filter: QueryFilter) {
     const nextQueries = queryRanks.filter(item => filter === 'all' || item.status === filter)
     if (!nextQueries.some(item => item.query.id === props.selectedQueryId)) {
@@ -95,33 +118,15 @@ export function CompareScreen(props: {
   const canCompare = leftModel !== null
     && rightModel !== null
     && !props.comparing
-    && (props.source === 'text' ? props.queryText.trim().length > 0 : props.selectedQueryId.length > 0)
+    && (props.source === 'text' ? props.queryText.trim().length > 0 : effectiveSelectedQueryId.length > 0)
 
   return <section className="panel compare-screen" aria-labelledby="compare-title">
     <p className="section-number">05 / COMPARE</p>
     <h2 id="compare-title">Compare model retrieval</h2>
     <p className="lede">Run the same query against two prepared models and compare visually similar results.</p>
     <div className="compare-controls">
-      <label className="select-label" htmlFor="compare-left-model">Left model
-        <select id="compare-left-model" value={props.leftModelId ?? ''} onChange={event => props.onModel('left', event.target.value)}>
-          {MODEL_GROUPS.map(group => {
-            const models = readyModels.filter(model => model.group === group.group)
-            return models.length ? <optgroup key={group.group} label={group.label}>
-              {models.map(model => <option key={model.model_id} value={model.model_id}>{model.label}</option>)}
-            </optgroup> : null
-          })}
-        </select>
-      </label>
-      <label className="select-label" htmlFor="compare-right-model">Right model
-        <select id="compare-right-model" value={props.rightModelId ?? ''} onChange={event => props.onModel('right', event.target.value)}>
-          {MODEL_GROUPS.map(group => {
-            const models = readyModels.filter(model => model.group === group.group)
-            return models.length ? <optgroup key={group.group} label={group.label}>
-              {models.map(model => <option key={model.model_id} value={model.model_id}>{model.label}</option>)}
-            </optgroup> : null
-          })}
-        </select>
-      </label>
+      <ModelSelect side="left" modelId={props.leftModelId} models={readyModels} onModel={props.onModel}/>
+      <ModelSelect side="right" modelId={props.rightModelId} models={readyModels} onModel={props.onModel}/>
       <label className="select-label" htmlFor="compare-top-k">Top results
         <select id="compare-top-k" value={props.topK} onChange={event => props.onTopK(Number(event.target.value))}>
           <option value={12}>12</option><option value={24}>24</option><option value={48}>48</option>
@@ -156,17 +161,17 @@ export function CompareScreen(props: {
           className={`outcome-chip ${props.queryFilter === 'all' ? 'selected' : ''}`}
           aria-pressed={props.queryFilter === 'all'}
           onClick={() => chooseQueryFilter('all')}
-        >All {allCount}</button>
+        >All {props.queries.length}</button>
       </div>
       <label className="select-label" htmlFor="benchmark-query">Benchmark Query (CUHK-PEDES test caption)
-        <select id="benchmark-query" value={props.selectedQueryId} onChange={event => props.onSelectedQuery(event.target.value)}>
+        <select id="benchmark-query" value={effectiveSelectedQueryId} onChange={event => props.onSelectedQuery(event.target.value)}>
           {visibleQueries.map(({ query }) => <option key={query.id} value={query.id}>{query.caption}</option>)}
         </select>
       </label>
     </div>}
 
     <div className="compare-actions">
-      <button className="primary" disabled={!canCompare} onClick={props.onCompare}>
+      <button className="primary" disabled={!canCompare} onClick={() => props.onCompare(effectiveSelectedQueryId)}>
         {props.comparing ? 'Comparing…' : 'Run comparison'}
       </button>
       {props.source === 'benchmark' && <p className="caption-note">This is a dataset test caption; results show visual similarity, not identity.</p>}
@@ -178,7 +183,7 @@ export function CompareScreen(props: {
       rightModel={rightModel}
       benchmarkMode={props.source === 'benchmark'}
       query={props.source === 'benchmark'
-        ? props.queries.find(item => item.id === props.selectedQueryId)?.caption ?? ''
+        ? props.queries.find(item => item.id === effectiveSelectedQueryId)?.caption ?? ''
         : props.queryText}
       topK={props.topK}
     />}

@@ -66,7 +66,6 @@ export function BenchmarkChart(props: {
       onFocus={() => setActiveBar({ x: tooltipX, y: Math.max(4, y - 48), label: tooltip })}
       onBlur={() => setActiveBar(null)}
     >
-      <title>{tooltip}</title>
       <rect
         className="benchmark-bar-hit-area"
         x={x - 2}
@@ -88,8 +87,9 @@ export function BenchmarkChart(props: {
     <svg
       className="benchmark-chart"
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      role="img"
-      aria-labelledby="benchmark-chart-title benchmark-chart-description"
+      role="group"
+      aria-labelledby="benchmark-chart-title"
+      aria-describedby="benchmark-chart-description"
     >
       <title id="benchmark-chart-title">Benchmark metrics: {props.fineTunedLabel} vs {props.baselineLabel}</title>
       <desc id="benchmark-chart-description">Grouped bars compare R@1, R@5, R@10, and mAP on a zero to one hundred percent scale. The table above provides the same metrics in tabular form.</desc>
