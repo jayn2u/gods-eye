@@ -39,6 +39,12 @@ function versionFrom(text) {
   return text.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/)?.[1] || null;
 }
 
+function agentTokenReadiness(token) {
+  // A secret stored from a file or `echo` keeps a trailing newline, which GitHub rejects as bad credentials.
+  const wellFormed = token === token.trim() && !/\s/u.test(token);
+  return { present: token.trim().length >= 20 && wellFormed, wellFormed };
+}
+
 function modeOf(target) {
   try {
     return (fs.statSync(target).mode & 0o777).toString(8).padStart(4, '0');
@@ -199,17 +205,15 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const foreignVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY'];
   const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
   const token = env.QA_COPILOT_TOKEN || '';
-  // A secret stored from a file or `echo` keeps a trailing newline and GitHub rejects it as bad
-  // credentials, which costs a whole job to discover. Refuse a token carrying surrounding whitespace.
-  const tokenWellFormed = token === token.trim() && !/\s/u.test(token);
-  const tokenPresent = token.trim().length >= 20 && tokenWellFormed;
+  const { present: tokenPresent, wellFormed: tokenWellFormed } = agentTokenReadiness(token);
   // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
   // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
-  add(checks, 'subscription_auth', (tokenPresent || !inWorkflow) && !foreignEnvironment, {
+  const prepare = phase === 'prepare';
+  add(checks, 'subscription_auth', (prepare || tokenPresent || !inWorkflow) && !foreignEnvironment, {
     token_present: tokenPresent,
     token_well_formed: token.length === 0 || tokenWellFormed,
-    token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
-    required: inWorkflow,
+    token_source: prepare ? 'agent-step' : tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
+    required: prepare ? false : inWorkflow,
     foreign_provider_environment: foreignEnvironment,
   });
 
@@ -241,7 +245,7 @@ async function main() {
   if (!report.ok) process.exitCode = 1;
 }
 
-module.exports = { EXPECTED, runDoctor, versionFrom };
+module.exports = { EXPECTED, agentTokenReadiness, runDoctor, versionFrom };
 
 if (require.main === module) {
   main().catch(() => {
