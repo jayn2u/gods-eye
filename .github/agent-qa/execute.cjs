@@ -453,7 +453,8 @@ function absoluteStatePath(value) {
 }
 
 function readExecutionState(statePath) {
-  const state = readBoundedJson(absoluteStatePath(statePath), { maxBytes: MAX_EVENT_BYTES });
+  const absolutePath = absoluteStatePath(statePath);
+  const state = readBoundedJson(absolutePath, { maxBytes: MAX_EVENT_BYTES });
   if (state?.schema_version !== 1 || typeof state.private_root !== 'string'
       || !path.isAbsolute(state.private_root)) {
     throw new ExecutionError('INVALID_STATE', 'Execution state is malformed');
@@ -463,6 +464,19 @@ function readExecutionState(statePath) {
       throw new ExecutionError('INVALID_STATE', 'Execution state is malformed');
     }
   }
+  if (state.private_root !== path.join(state.evidence, '.private-execution')
+      || absolutePath !== path.join(state.private_root, 'state.json')
+      || state.screenshots_root !== path.join(state.evidence, 'screenshots')) {
+    throw new ExecutionError('INVALID_STATE', 'Execution state paths do not match the evidence root');
+  }
+  try {
+    if (fs.realpathSync(state.private_root) !== state.private_root) {
+      throw new ExecutionError('INVALID_STATE', 'Execution private root is not a real directory');
+    }
+  } catch (error) {
+    if (error.code === 'INVALID_STATE') throw error;
+    throw new ExecutionError('INVALID_STATE', 'Execution private root is unavailable');
+  }
   if (state.runtime && (typeof state.runtime.manifest_path !== 'string'
       || !path.isAbsolute(state.runtime.manifest_path)
       || typeof state.runtime.run_root !== 'string'
@@ -470,6 +484,23 @@ function readExecutionState(statePath) {
     throw new ExecutionError('INVALID_STATE', 'Execution runtime paths are malformed');
   }
   return state;
+}
+
+function privateChildPath(privateRoot, value) {
+  if (typeof value !== 'string' || !path.isAbsolute(value)) return null;
+  const resolved = path.resolve(value);
+  return resolved !== privateRoot && within(privateRoot, resolved) ? resolved : null;
+}
+
+async function removePrivatePath(privateRoot, value) {
+  const target = privateChildPath(privateRoot, value);
+  if (!target) return;
+  let realTarget;
+  try { realTarget = await fsp.realpath(target); } catch (error) {
+    if (error.code === 'ENOENT') return;
+    throw error;
+  }
+  if (within(privateRoot, realTarget)) await fsp.rm(target, { force: true });
 }
 
 async function writeExecutionState(statePath, state) {
@@ -492,6 +523,7 @@ async function prepareExecution(options, adapters = {}) {
   const requestPath = path.resolve(options.request);
   const request = validateRequest(readBoundedJson(requestPath));
   const roots = await prepareRoots(options.candidate, options.evidence);
+  const deadline = deadlineFromJobStart(options.jobStart, deps.clocks);
   const privateRoot = path.join(roots.evidence, '.private-execution');
   const screenshotsRoot = path.join(roots.evidence, 'screenshots');
   const statePath = path.join(privateRoot, 'state.json');
@@ -503,17 +535,16 @@ async function prepareExecution(options, adapters = {}) {
   const stateRoot = path.resolve(deps.env.QA_ROOT || path.join(deps.env.HOME || os.homedir(), '.local/share/gods-eye-agent-qa'));
   const toolchain = path.join(stateRoot, 'toolchain');
   const startedAt = new Date().toISOString();
-  const requestedStart = Date.parse(options.jobStart);
   const state = {
     schema_version: 1,
     request_path: requestPath,
     candidate: roots.candidate,
     evidence: roots.evidence,
-    deadline_epoch_ms: Number.isFinite(requestedStart) ? requestedStart + INTERNAL_DEADLINE_MS : 0,
+    deadline_epoch_ms: Date.parse(options.jobStart) + INTERNAL_DEADLINE_MS,
     started_at: startedAt,
     private_root: privateRoot,
     screenshots_root: screenshotsRoot,
-    before: {},
+    before: null,
     tools: {
       node: process.versions.node,
       agent: { name: request.agent, version: 'unavailable' },
@@ -533,7 +564,6 @@ async function prepareExecution(options, adapters = {}) {
   let handedOff = false;
   let doctor;
   try {
-    const deadline = deadlineFromJobStart(options.jobStart, deps.clocks);
     if (remainingMilliseconds(deadline) === 0) throw new RuntimeError('DEADLINE_EXCEEDED', 'Internal deadline expired before doctor');
     if (options.signal?.aborted) throw new RuntimeError('CANCELLED', 'Execution was cancelled before doctor');
     if (deps.candidateHead(roots.candidate) !== request.head.sha || !deps.candidateTrackedClean(roots.candidate)) {
@@ -770,13 +800,14 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
     outcome?.stderr_path,
     outcome?.config_path,
     outcome?.private_result,
-  ].filter(Boolean);
+  ].map((target) => privateChildPath(state.private_root, target)).filter(Boolean);
   const deterministic = state.deterministic ?? initialDeterministicResult();
   const outcomePhases = outcome?.phases ?? [];
   const phaseRecords = [...(state.phases ?? []), ...outcomePhases];
   const phases = phaseSummary(state.phases ?? [], outcomePhases);
   const screenshotsRoot = state.screenshots_root;
-  const journalPath = outcome?.journal_path ?? state.agent_paths?.journal;
+  const journalPath = privateChildPath(state.private_root, outcome?.journal_path)
+    ?? privateChildPath(state.private_root, state.agent_paths?.journal);
   let journal = [];
   try {
     if (state.runtime) {
@@ -794,7 +825,8 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
         screenshotsRoot,
       });
       if (!isCancelled && (outcome?.process_error || !parsed.complete)) {
-        for (const [label, file] of [['stderr', outcome?.stderr_path], ['stdout', outcome?.stdout_path]]) {
+        for (const [label, candidate] of [['stderr', outcome?.stderr_path], ['stdout', outcome?.stdout_path]]) {
+          const file = privateChildPath(state.private_root, candidate);
           if (!file) continue;
           try {
             const tail = fs.readFileSync(file, 'utf8').slice(-2000);
@@ -819,9 +851,10 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
           process.stderr.write(`Agent QA unproven ${id}: missing ${missing}.${receiptState}\n`);
         }
       }
-      if (outcome?.private_result && fs.existsSync(outcome.private_result)) {
+      const privateResult = privateChildPath(state.private_root, outcome?.private_result);
+      if (privateResult && fs.existsSync(privateResult)) {
         try {
-          agentResult = validateAgentResult(readBoundedJson(outcome.private_result));
+          agentResult = validateAgentResult(readBoundedJson(privateResult));
         } catch (error) {
           reason = 'invalid_output';
           process.stderr.write(`Agent QA agent result rejected: ${sanitizeText(error.message)}\n`);
@@ -855,7 +888,7 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
       });
     }
     for (const target of privatePaths) {
-      await fsp.rm(target, { force: true }).catch((error) => { cleanupError ??= error; });
+      await removePrivatePath(state.private_root, target).catch((error) => { cleanupError ??= error; });
     }
     await fsp.rm(state.private_root, { recursive: true, force: true }).then(() => {
       privateOutputDeleted = true;
