@@ -93,6 +93,36 @@ test('filtered Benchmark Query selection follows outcomes after changing the rig
   ])
 })
 
+test('Compare uses stored ranks for outcomes and keeps live ranks in each result column', async ({ page }) => {
+  await page.route('**/api/benchmark', async route => {
+    const response = await route.fetch()
+    const benchmark = await response.json()
+    const baseline = benchmark.models.find((model: { model_id: string }) => model.model_id === fixtureBaseline)
+    const fineTuned = benchmark.models.find((model: { model_id: string }) => model.model_id === fixtureFineTuned)
+    delete baseline.benchmark_query_ranks.bq_improved
+    fineTuned.benchmark_query_ranks.bq_improved = 4
+    await route.fulfill({
+      status: response.status(),
+      contentType: 'application/json',
+      body: JSON.stringify(benchmark),
+    })
+  })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/')
+  await page.getByRole('tab', { name: 'Compare' }).click()
+  await page.getByRole('radio', { name: 'Benchmark Query' }).check()
+  const queryPicker = page.getByLabel('Benchmark Query (CUHK-PEDES test caption)')
+  await expect(queryPicker.locator('option')).toHaveCount(3)
+  await queryPicker.selectOption('bq_improved')
+  await page.getByRole('button', { name: 'Run comparison' }).click()
+
+  await expect(page.getByText('Baseline #3 → Fine-tuned #4')).toBeVisible()
+  await expect(page.getByText('Ground truth first appears at #3')).toBeVisible()
+  await expect(page.getByText('Ground truth first appears at #1')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Worse 2' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Improved 0' })).toBeVisible()
+})
+
 test('Compare shows model catalog refresh errors in its own error area', async ({ page }) => {
   let comparisonStarted = false
   await page.route('**/api/models', async route => {

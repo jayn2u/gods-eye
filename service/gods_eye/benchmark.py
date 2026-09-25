@@ -131,6 +131,10 @@ class BenchmarkQuery:
     person_id: str
 
 
+class BenchmarkQueryNotFoundError(LookupError):
+    """Raised when a requested query is not part of the fixed sample."""
+
+
 def sample_benchmark_queries(
     captions: Sequence[TestCaption],
     *,

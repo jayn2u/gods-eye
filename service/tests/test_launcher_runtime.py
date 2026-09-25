@@ -559,6 +559,7 @@ def test_runtime_compose_env_preserves_explicit_roots_and_resolves_relative_valu
     monkeypatch.setenv("GODS_EYE_DATASET_ROOT", "prepared-data/installations")
     monkeypatch.setenv("GODS_EYE_INDEX_ROOT", str(tmp_path / "shared-indexes"))
     monkeypatch.setenv("GODS_EYE_HF_CACHE", "model-cache")
+    monkeypatch.setenv("GODS_EYE_RESIDENT_MODELS", "2")
 
     environment = launcher_runtime._runtime_compose_env(RuntimeLayout(tmp_path))
 
@@ -566,6 +567,7 @@ def test_runtime_compose_env_preserves_explicit_roots_and_resolves_relative_valu
     assert environment["GODS_EYE_DATASET_ROOT"] == str(host_root / "prepared-data/installations")
     assert environment["GODS_EYE_INDEX_ROOT"] == str(tmp_path / "shared-indexes")
     assert environment["GODS_EYE_HF_CACHE"] == str(host_root / "model-cache")
+    assert environment["GODS_EYE_RESIDENT_MODELS"] == "2"
 
 
 def test_start_validates_prepared_assets_under_lock_before_runtime_mutation(monkeypatch, tmp_path):

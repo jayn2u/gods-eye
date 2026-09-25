@@ -166,6 +166,8 @@ class ModelRegistry:
 
         if BASELINE_ID_PATTERN.fullmatch(model_id):
             arch = parse_baseline_id(model_id)
+            if (arch.model_name, arch.pretrained) not in PRETRAINED_SOURCES:
+                raise UnsupportedClipModelError(model_id)
             return self._baseline_spec(arch)
 
         if CHECKPOINT_ID_PATTERN.fullmatch(model_id) and self._checkpoint_root is not None:

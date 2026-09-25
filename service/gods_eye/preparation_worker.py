@@ -13,6 +13,7 @@ from .benchmark import (
     evaluate as evaluate_benchmark,
 )
 from .benchmark import (
+    gallery_person_ids,
     load_test_captions,
     read_benchmark_queries,
     sample_benchmark_queries,
@@ -243,7 +244,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.operation == "build-benchmark-queries":
             manifest = GalleryManifest.read(args.manifest)
             captions = load_test_captions(args.metadata)
-            queries = sample_benchmark_queries(captions)
+            gallery_ids = {
+                person_id
+                for person_ids in gallery_person_ids(manifest)
+                for person_id in person_ids
+            }
+            eligible_captions = tuple(
+                caption for caption in captions if caption.person_id in gallery_ids
+            )
+            queries = sample_benchmark_queries(eligible_captions)
             write_benchmark_queries(
                 args.output,
                 queries,

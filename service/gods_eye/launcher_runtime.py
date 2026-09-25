@@ -282,6 +282,7 @@ def _runtime_compose_env(layout: RuntimeLayout, *, offline: bool | None = None) 
     project_name = _compose_project_name(host_root)
     environment = {
         **_prepared_asset_env(host_root),
+        "GODS_EYE_RESIDENT_MODELS": os.getenv("GODS_EYE_RESIDENT_MODELS", "4"),
         "COMPOSE_PROJECT_NAME": project_name,
         "GODS_EYE_COMPOSE_PROJECT_NAME": project_name,
     }

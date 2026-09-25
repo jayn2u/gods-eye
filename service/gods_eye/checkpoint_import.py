@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Callable, Mapping
@@ -32,6 +33,7 @@ _WANDB_METADATA_KEYS = (
     "pipeline_result_uri",
 )
 _PROVENANCE_KEYS = ("epoch", "global_step", "best_val_score")
+_PROVENANCE_ARG_KEYS = ("ema_enabled", "train_split", "val_split", "eval_split")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,9 @@ def import_checkpoint(
     build_model: Callable[[OpenClipArch], torch.nn.Module] | None = None,
 ) -> ImportResult:
     source_sha256 = _sha256_file(source)
+    reference_metrics_value = (
+        load_reference_metrics(reference_metrics) if reference_metrics is not None else None
+    )
 
     try:
         import torch
@@ -93,7 +98,10 @@ def import_checkpoint(
 
     args_copy = _json_safe_copy(args, "args")
     provenance = _json_safe_copy(
-        {key: checkpoint[key] for key in _PROVENANCE_KEYS if key in checkpoint},
+        {
+            **{key: checkpoint[key] for key in _PROVENANCE_KEYS if key in checkpoint},
+            **{key: args.get(key) for key in _PROVENANCE_ARG_KEYS},
+        },
         "provenance",
     )
     # Keep only training provenance in registration.json; labclip_args.json retains all args.
@@ -107,7 +115,7 @@ def import_checkpoint(
         args_copy=args_copy,
         arch=arch,
         label=label,
-        reference_metrics=reference_metrics,
+        reference_metrics=reference_metrics_value,
         now=now,
         provenance=provenance,
     )
@@ -126,6 +134,25 @@ def load_reference_metrics(path: Path) -> dict:
         raise CheckpointValidationError("Reference metrics split must be 'test'.")
     if value.get("direction") != "text-to-image":
         raise CheckpointValidationError("Reference metrics direction must be 'text-to-image'.")
+    metrics = value.get("metrics")
+    if not isinstance(metrics, dict):
+        raise CheckpointValidationError("Reference metrics field 'metrics' must be an object.")
+    for key in ("top1", "top5", "top10", "mAP", "mINP"):
+        metric = metrics.get(key)
+        if (
+            type(metric) not in {int, float}
+            or (type(metric) is float and not math.isfinite(metric))
+            or not 0 <= metric <= 1
+        ):
+            raise CheckpointValidationError(
+                f"Reference metrics field 'metrics.{key}' must be a finite number in [0, 1]."
+            )
+    for key in ("gallery", "queries"):
+        count = value.get(key)
+        if type(count) is not int or count < 1:
+            raise CheckpointValidationError(
+                f"Reference metrics field '{key}' must be a positive integer."
+            )
     return value
 
 
@@ -144,7 +171,7 @@ def _stage_registration(
     args_copy: dict,
     arch: OpenClipArch,
     label: str | None,
-    reference_metrics: Path | None,
+    reference_metrics: dict | None,
     now: datetime | None,
     provenance: dict,
 ) -> ImportResult:
@@ -180,6 +207,7 @@ def _stage_registration(
                     existing,
                     checkpoint_root=checkpoint_root,
                     label=label,
+                    requested_reference_metrics=reference_metrics,
                 )
 
             wandb_metadata = _read_wandb_metadata(source.with_name("wandb_meta.json"))
@@ -200,11 +228,7 @@ def _stage_registration(
                 verified=(arch.model_name, arch.pretrained) in VERIFIED_ARCHS,
                 registered_at=_registered_at(now),
                 provenance=resolved_provenance,
-                reference_metrics=(
-                    load_reference_metrics(reference_metrics)
-                    if reference_metrics is not None
-                    else None
-                ),
+                reference_metrics=reference_metrics,
             )
 
             staged_dir = staging_root / weights_sha256
@@ -226,6 +250,7 @@ def _stage_registration(
                         concurrent,
                         checkpoint_root=checkpoint_root,
                         label=label,
+                        requested_reference_metrics=reference_metrics,
                     )
                 raise CheckpointValidationError(
                     "Could not publish checkpoint registration."
@@ -253,8 +278,18 @@ def _reuse_registration(
     *,
     checkpoint_root: Path,
     label: str | None,
+    requested_reference_metrics: dict | None = None,
 ) -> ImportResult:
     registration, directory = existing
+    if (
+        requested_reference_metrics is not None
+        and requested_reference_metrics != registration.reference_metrics
+    ):
+        raise CheckpointValidationError(
+            f"Reference metrics for checkpoint {registration.model_id} differ from the stored "
+            "reference_metrics. Benchmark evaluations embed reference metrics immutably; run "
+            f"'./gods-eye checkpoint remove {registration.model_id}' first, then re-import."
+        )
     if label is not None:
         registration = replace(registration, label=label)
         write_registration(checkpoint_root, registration)

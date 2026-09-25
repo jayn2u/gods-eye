@@ -11,6 +11,7 @@ from typing import ClassVar, assert_never
 
 from .benchmark import (
     BenchmarkQuery,
+    BenchmarkQueryNotFoundError,
     Evaluation,
     evaluation_path,
     gallery_person_ids,
@@ -534,7 +535,7 @@ class ModelRuntimeManager:
             None,
         )
         if query is None:
-            raise KeyError(query_id)
+            raise BenchmarkQueryNotFoundError(query_id)
         with self._lock:
             try:
                 embedder = self._resident_embedder(model_id, entry)
@@ -740,7 +741,7 @@ class FixtureModelRuntime:
         spec = self._spec_for(model_id)
         query = next((item for item in self._queries if item.id == query_id), None)
         if query is None:
-            raise KeyError(query_id)
+            raise BenchmarkQueryNotFoundError(query_id)
         if spec.model_id == _FIXTURE_BASELINE_ID:
             first_match_rank = self._baseline_ranks[query_id]
         elif spec.model_id == _FIXTURE_FINETUNED_ID:

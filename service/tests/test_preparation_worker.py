@@ -168,6 +168,41 @@ def test_worker_builds_benchmark_queries_and_writes_evaluation(tmp_path: Path, m
     ]
 
 
+def test_worker_samples_benchmark_queries_only_for_people_in_the_gallery(tmp_path: Path) -> None:
+    manifest, metadata, _, _ = _index_fixture(tmp_path)
+    rows = json.loads(metadata.read_text(encoding="utf-8"))
+    rows.append(
+        {
+            "split": "test",
+            "file_path": "not-in-gallery.jpg",
+            "id": "unrepresented-person",
+            "captions": ["caption whose person is not in the gallery"],
+        }
+    )
+    metadata.write_text(json.dumps(rows), encoding="utf-8")
+    query_path = tmp_path / "indexes" / "benchmark-queries.json"
+
+    assert (
+        main(
+            [
+                "build-benchmark-queries",
+                "--manifest",
+                str(manifest),
+                "--metadata",
+                str(metadata),
+                "--output",
+                str(query_path),
+            ]
+        )
+        == 0
+    )
+
+    queries = read_benchmark_queries(query_path)
+    assert len(queries) == 1
+    assert queries[0].person_id == "person-1"
+    assert queries[0].caption == "a person wearing a blue jacket"
+
+
 def test_worker_returns_existing_oom_exit_code_for_evaluation(tmp_path: Path, monkeypatch) -> None:
     manifest, metadata, active, version_id = _index_fixture(tmp_path)
     cache_dir = tmp_path / ".cache" / "huggingface"

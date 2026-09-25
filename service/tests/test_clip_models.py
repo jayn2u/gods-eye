@@ -103,6 +103,13 @@ def test_baselines_resolve_by_id_but_are_listed_only_when_referenced(tmp_path) -
     assert baseline_id not in {spec.model_id for spec in registry.all()}
 
 
+def test_registry_rejects_baseline_without_a_pinned_pretrained_source(tmp_path) -> None:
+    model_id = "openclip/ViT-L-14@openai:384x128-reid"
+
+    with pytest.raises(UnsupportedClipModelError):
+        ModelRegistry(tmp_path).get(model_id)
+
+
 def test_pinned_source_catalog_contains_only_verified_source() -> None:
     from gods_eye.clip_models import PRETRAINED_SOURCES
 

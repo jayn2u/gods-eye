@@ -97,6 +97,10 @@ def test_import_writes_weights_args_and_registration(tmp_path: Path) -> None:
     assert registration.provenance["epoch"] == 9
     assert registration.provenance["global_step"] == 302
     assert registration.provenance["best_val_score"] == 0.78
+    assert registration.provenance["ema_enabled"] is None
+    assert registration.provenance["train_split"] == "train"
+    assert registration.provenance["val_split"] == "val"
+    assert registration.provenance["eval_split"] == "val"
     assert registration.reference_metrics == REFERENCE_METRICS
     assert registration.label == "FT · best_t2i_eval_compat · val R@1 78.0"
     assert json.loads((result.directory / "labclip_args.json").read_text()) == VALID_ARGS
@@ -136,7 +140,7 @@ def test_reimport_is_idempotent_and_new_label_preserves_registered_at(tmp_path: 
 
 def test_import_captures_sibling_wandb_metadata(tmp_path: Path) -> None:
     source = tmp_path / "best.pt"
-    _save_checkpoint(source)
+    _save_checkpoint(source, args={**VALID_ARGS, "ema_enabled": True})
     wandb = {
         "run_id": "r7abc",
         "project": "lab-clip",
@@ -156,6 +160,10 @@ def test_import_captures_sibling_wandb_metadata(tmp_path: Path) -> None:
     assert result.registration.provenance["wandb"] == {
         key: wandb[key] for key in ("run_id", "project", "entity", "group", "pipeline_result_uri")
     }
+    assert result.registration.provenance["ema_enabled"] is True
+    assert result.registration.provenance["train_split"] == "train"
+    assert result.registration.provenance["val_split"] == "val"
+    assert result.registration.provenance["eval_split"] == "val"
     assert result.registration.label == "FT · r7abc · val R@1 78.0"
 
 
@@ -270,6 +278,103 @@ def test_reference_metrics_require_labclip_test_to_image_protocol(tmp_path: Path
         path.write_text(json.dumps({**REFERENCE_METRICS, key: invalid}), encoding="utf-8")
         with pytest.raises(CheckpointValidationError):
             load_reference_metrics(path)
+
+
+@pytest.mark.parametrize("metric", ["top1", "top5", "top10", "mAP", "mINP"])
+@pytest.mark.parametrize("invalid", [-0.01, 1.01, float("nan"), float("inf"), True, "0.5"])
+def test_reference_metrics_reject_invalid_scores(tmp_path: Path, metric: str, invalid: object) -> None:
+    path = tmp_path / "reference.json"
+    malformed = {**REFERENCE_METRICS, "metrics": {**REFERENCE_METRICS["metrics"], metric: invalid}}
+    path.write_text(json.dumps(malformed), encoding="utf-8")
+
+    with pytest.raises(CheckpointValidationError, match=rf"metrics\.{metric}.*finite number"):
+        load_reference_metrics(path)
+
+
+@pytest.mark.parametrize("metric", ["top1", "top5", "top10", "mAP", "mINP"])
+def test_reference_metrics_require_every_score(tmp_path: Path, metric: str) -> None:
+    path = tmp_path / "reference.json"
+    metrics = dict(REFERENCE_METRICS["metrics"])
+    del metrics[metric]
+    path.write_text(json.dumps({**REFERENCE_METRICS, "metrics": metrics}), encoding="utf-8")
+
+    with pytest.raises(CheckpointValidationError, match=rf"metrics\.{metric}.*finite number"):
+        load_reference_metrics(path)
+
+
+@pytest.mark.parametrize("field", ["gallery", "queries"])
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "10"])
+def test_reference_metrics_require_positive_integer_counts(
+    tmp_path: Path, field: str, invalid: object
+) -> None:
+    path = tmp_path / "reference.json"
+    path.write_text(json.dumps({**REFERENCE_METRICS, field: invalid}), encoding="utf-8")
+
+    with pytest.raises(CheckpointValidationError, match=rf"{field}.*positive integer"):
+        load_reference_metrics(path)
+
+
+def test_import_rejects_malformed_reference_metrics_before_writing(tmp_path: Path) -> None:
+    source = tmp_path / "checkpoint.pt"
+    _save_checkpoint(source)
+    reference_path = tmp_path / "reference.json"
+    reference_path.write_text(
+        json.dumps({**REFERENCE_METRICS, "gallery": 0}), encoding="utf-8"
+    )
+    checkpoint_root = tmp_path / "registrations"
+
+    with pytest.raises(CheckpointValidationError, match="gallery.*positive integer"):
+        import_checkpoint(
+            source,
+            checkpoint_root=checkpoint_root,
+            reference_metrics=reference_path,
+            build_model=_build_model,
+        )
+
+    _assert_no_files(checkpoint_root)
+
+
+def test_reimport_requires_checkpoint_removal_when_reference_metrics_change(tmp_path: Path) -> None:
+    source = tmp_path / "checkpoint.pt"
+    _save_checkpoint(source)
+    reference_path = tmp_path / "reference.json"
+    checkpoint_root = tmp_path / "registrations"
+    reference_path.write_text(json.dumps(REFERENCE_METRICS), encoding="utf-8")
+    first = import_checkpoint(
+        source,
+        checkpoint_root=checkpoint_root,
+        reference_metrics=reference_path,
+        build_model=_build_model,
+    )
+
+    identical = import_checkpoint(
+        source,
+        checkpoint_root=checkpoint_root,
+        reference_metrics=reference_path,
+        build_model=_build_model,
+    )
+    changed_metrics = {
+        **REFERENCE_METRICS,
+        "metrics": {**REFERENCE_METRICS["metrics"], "top1": 0.61},
+    }
+    reference_path.write_text(json.dumps(changed_metrics), encoding="utf-8")
+
+    with pytest.raises(
+        CheckpointValidationError,
+        match=rf"embed reference metrics immutably.*checkpoint remove {first.registration.model_id}",
+    ):
+        import_checkpoint(
+            source,
+            checkpoint_root=checkpoint_root,
+            reference_metrics=reference_path,
+            build_model=_build_model,
+        )
+
+    assert identical.reused is True
+    assert identical.registration.reference_metrics == REFERENCE_METRICS
+    assert json.loads((first.directory / "registration.json").read_text())["reference_metrics"] == (
+        REFERENCE_METRICS
+    )
 
 
 def test_safetensors_write_failure_cleans_temporary_registration(

@@ -38,6 +38,8 @@ with log.open("a") as stream:
         line = " ".join(args)
         if args[:2] == ["image", "inspect"]:
             line += " fingerprint=" + os.environ.get("GODS_EYE_SOURCE_FINGERPRINT", "")
+        if os.getenv("GODS_EYE_FAKE_LOG_HOST_ROOT") == "1":
+            line += " host-root=" + os.environ.get("GODS_EYE_HOST_PROJECT_ROOT", "")
         stream.write(line + "\\n")
     else:
         stream.write(json.dumps({
@@ -213,6 +215,34 @@ def _copy_root_launcher(project_root: Path) -> None:
     helper_directory = project_root / "scripts"
     helper_directory.mkdir()
     shutil.copy2(ROOT / "scripts" / "launcher-args.sh", helper_directory / "launcher-args.sh")
+
+
+def test_root_launcher_preserves_logical_project_root_for_symlinked_checkout(tmp_path: Path) -> None:
+    target_root = tmp_path / "physical-checkout"
+    target_root.mkdir()
+    _copy_root_launcher(target_root)
+    logical_root = tmp_path / "linked-checkout"
+    logical_root.symlink_to(target_root, target_is_directory=True)
+    bin_dir, log = _fake_docker(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_FAKE_DOCKER_LOG": str(log),
+        "GODS_EYE_FAKE_LOG_HOST_ROOT": "1",
+    }
+
+    result = subprocess.run(
+        [str(logical_root / "gods-eye"), "doctor", "--help"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"host-root={logical_root}" in log.read_text()
 
 
 def _rewrite_import_args(

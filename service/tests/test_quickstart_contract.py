@@ -144,6 +144,7 @@ def test_fixture_smoke_compose_override_is_valid_and_loopback_only() -> None:
     configuration = json.loads(result.stdout)
     service = configuration["services"]["service"]
     assert service["environment"]["GODS_EYE_USE_FIXTURES"] == "true"
+    assert service["environment"]["GODS_EYE_RESIDENT_MODELS"] == "4"
     assert not service.get("gpus")
     assert not service.get("deploy", {}).get("resources", {}).get("reservations", {}).get("devices")
     for service_name in ("service", "web"):
@@ -202,6 +203,25 @@ def test_normal_service_requests_all_gpus() -> None:
     service = _rendered_compose()["services"]["service"]
 
     assert service.get("gpus") == [{"count": -1}]
+    assert service["environment"]["GODS_EYE_RESIDENT_MODELS"] == "4"
+
+
+@pytest.mark.parametrize(
+    "override",
+    ["compose.release.yaml", "compose.offline.yaml", "compose.smoke.yaml"],
+)
+def test_resident_model_capacity_reaches_service_in_compose_modes(
+    monkeypatch, override: str
+) -> None:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker CLI is not installed")
+    monkeypatch.setenv("GODS_EYE_RESIDENT_MODELS", "2")
+    monkeypatch.setenv("COMPOSE_PROFILES", "tools")
+
+    configuration = _rendered_compose(override)
+
+    assert configuration["services"]["service"]["environment"]["GODS_EYE_RESIDENT_MODELS"] == "2"
+    assert configuration["services"]["launcher"]["environment"]["GODS_EYE_RESIDENT_MODELS"] == "2"
 
 
 def test_release_mode_pins_immutable_digests_and_never_builds() -> None:

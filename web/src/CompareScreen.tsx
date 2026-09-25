@@ -1,10 +1,11 @@
 import React from 'react'
-import { outcome, outcomeCounts, type Outcome } from './compare'
+import { outcome, type Outcome } from './compare'
 import type {
   BenchmarkQuery,
   BenchmarkResponse,
   BenchmarkSearchResponse,
   ModelAvailability,
+  ModelBenchmark,
   ModelGroup,
   SearchResponse,
 } from './types'
@@ -59,6 +60,24 @@ function groupName(group: ModelGroup): string {
   return 'Reference'
 }
 
+function rankForQuery(
+  benchmark: ModelBenchmark | undefined,
+  modelId: string | null,
+  result: SearchResultSet | undefined,
+  queryId: string,
+  selectedQueryId: string,
+): number | undefined {
+  const storedRank = benchmark?.benchmark_query_ranks[queryId]
+  if (storedRank !== undefined) return storedRank
+  if (queryId.length === 0 || queryId !== selectedQueryId || modelId === null || result === undefined) {
+    return undefined
+  }
+  if (!resultIsBenchmark(result) || result.query_id !== queryId || result.model_id !== modelId) {
+    return undefined
+  }
+  return result.first_match_rank
+}
+
 export function CompareScreen(props: {
   models: readonly ModelAvailability[]
   benchmark: BenchmarkResponse | null
@@ -88,20 +107,32 @@ export function CompareScreen(props: {
   const rightModel = readyModels.find(model => model.model_id === props.rightModelId) ?? null
   const leftBenchmark = props.benchmark?.models.find(model => model.model_id === props.leftModelId)
   const rightBenchmark = props.benchmark?.models.find(model => model.model_id === props.rightModelId)
-  const counts = outcomeCounts(
-    { ...leftBenchmark?.benchmark_query_ranks },
-    { ...rightBenchmark?.benchmark_query_ranks },
-  )
-  const queryRanks = props.queries.map(query => ({
-    query,
-    status: leftBenchmark?.benchmark_query_ranks[query.id] !== undefined
-      && rightBenchmark?.benchmark_query_ranks[query.id] !== undefined
-      ? outcome(
-        leftBenchmark.benchmark_query_ranks[query.id],
-        rightBenchmark.benchmark_query_ranks[query.id],
-      )
-      : null,
-  }))
+  const queryRanks = props.queries.map(query => {
+    const leftRank = rankForQuery(
+      leftBenchmark,
+      props.leftModelId,
+      props.results?.left,
+      query.id,
+      props.selectedQueryId,
+    )
+    const rightRank = rankForQuery(
+      rightBenchmark,
+      props.rightModelId,
+      props.results?.right,
+      query.id,
+      props.selectedQueryId,
+    )
+    return {
+      query,
+      status: leftRank !== undefined && rightRank !== undefined
+        ? outcome(leftRank, rightRank)
+        : null,
+    }
+  })
+  const counts = queryRanks.reduce<Record<Outcome, number>>((result, item) => {
+    if (item.status !== null) result[item.status]++
+    return result
+  }, { improved: 0, same: 0, worse: 0 })
   const visibleQueries = queryRanks.filter(item => (
     props.queryFilter === 'all' || item.status === props.queryFilter
   ))
@@ -119,6 +150,20 @@ export function CompareScreen(props: {
     && rightModel !== null
     && !props.comparing
     && (props.source === 'text' ? props.queryText.trim().length > 0 : effectiveSelectedQueryId.length > 0)
+  const leftSelectedRank = rankForQuery(
+    leftBenchmark,
+    props.leftModelId,
+    props.results?.left,
+    props.source === 'benchmark' ? effectiveSelectedQueryId : '',
+    effectiveSelectedQueryId,
+  )
+  const rightSelectedRank = rankForQuery(
+    rightBenchmark,
+    props.rightModelId,
+    props.results?.right,
+    props.source === 'benchmark' ? effectiveSelectedQueryId : '',
+    effectiveSelectedQueryId,
+  )
 
   return <section className="panel compare-screen" aria-labelledby="compare-title">
     <p className="section-number">05 / COMPARE</p>
@@ -182,6 +227,8 @@ export function CompareScreen(props: {
       leftModel={leftModel}
       rightModel={rightModel}
       benchmarkMode={props.source === 'benchmark'}
+      leftRank={leftSelectedRank}
+      rightRank={rightSelectedRank}
       query={props.source === 'benchmark'
         ? props.queries.find(item => item.id === effectiveSelectedQueryId)?.caption ?? ''
         : props.queryText}
@@ -195,13 +242,13 @@ function ComparisonView(props: {
   leftModel: ModelAvailability
   rightModel: ModelAvailability
   benchmarkMode: boolean
+  leftRank: number | undefined
+  rightRank: number | undefined
   query: string
   topK: number
 }) {
-  const leftBenchmark = resultIsBenchmark(props.results.left) ? props.results.left : null
-  const rightBenchmark = resultIsBenchmark(props.results.right) ? props.results.right : null
-  const rankSummary = leftBenchmark && rightBenchmark
-    ? `${groupName(props.leftModel.group)} #${leftBenchmark.first_match_rank} → ${groupName(props.rightModel.group)} #${rightBenchmark.first_match_rank}`
+  const rankSummary = props.leftRank !== undefined && props.rightRank !== undefined
+    ? `${groupName(props.leftModel.group)} #${props.leftRank} → ${groupName(props.rightModel.group)} #${props.rightRank}`
     : null
 
   return <section className="comparison-results" aria-label="Side-by-side comparison results">

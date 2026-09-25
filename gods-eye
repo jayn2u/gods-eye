@@ -2,7 +2,7 @@
 
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/scripts/launcher-args.sh"
 if gods_eye_rewrite_import_args "$SCRIPT_DIR" "$@"; then
     :

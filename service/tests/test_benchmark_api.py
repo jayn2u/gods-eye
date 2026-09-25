@@ -225,6 +225,26 @@ def test_fixture_benchmark_compares_paired_models_and_returns_rank_examples(capl
     assert all(caption not in record.message for caption in captions for record in caplog.records)
 
 
+def test_benchmark_search_does_not_map_unrelated_key_errors_to_not_found() -> None:
+    class InternalKeyErrorRuntime(FixtureModelRuntime):
+        def benchmark_search(self, model_id: str, query_id: str, top_k: int):
+            del model_id, query_id, top_k
+            raise KeyError("internal runtime lookup")
+
+    with use_model_runtime(InternalKeyErrorRuntime()), TestClient(
+        app, raise_server_exceptions=False
+    ) as non_raising_client:
+        response = non_raising_client.post(
+            "/api/benchmark/search",
+            json={
+                "query_id": "bq_improved",
+                "model_id": "openclip/ViT-B-16@openai:384x128-reid",
+            },
+        )
+
+    assert response.status_code == 500
+
+
 def test_retrieval_adapter_returns_empty_benchmark_and_no_benchmark_queries() -> None:
     with use_retrieval_engine(FixtureRetrievalEngine()):
         comparison = client.get("/api/benchmark")

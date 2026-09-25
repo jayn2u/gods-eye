@@ -15,6 +15,8 @@ Run `prepare` from the repository root. It accepts one or more `--checkpoint` pa
 
 `--label` and `--reference-metrics` each require exactly one `--checkpoint`. The reference file is optional. When supplied, it must identify the `cuhk-pedes` dataset, `test` split, and `text-to-image` direction. The normal Dataset Acquisition terms prompt still applies; `--yes` alone does not accept dataset terms.
 
+On a fresh install, `./gods-eye prepare --checkpoint ...` prepares the requested checkpoint and its Paired Baseline; it does not prepare the default Hugging Face model. Run `./gods-eye prepare` as well when you want the default model prepared.
+
 The import validates that the source can be read with `torch.load(..., weights_only=True)`, contains a tensor `model_state_dict` and mapping-valued `args`, and matches a constructible OpenCLIP model with a pinned pretrained source and safetensors Hugging Face weights. Required `args` fields include `dataset`, `train_split`, `val_split`, `eval_split`, `model_name`, `pretrained`, `img_height`, `img_width`, and `preprocess_mode`. It requires `dataset=cuhk-pedes`, `train_split=train`, string validation/evaluation metadata that does not select `test`, positive image dimensions, and a supported `reid` or `model_reid` preprocessing mode. The state dictionary must match the OpenCLIP model strictly. Only the model weights are copied into the model cache as safetensors; the original `.pt` file remains at its import path and is not used at runtime. `ViT-B-16` with `openai` is the only equivalence-verified combination.
 
 Each imported checkpoint is assigned a model ID of the form `labclip:cuhk-pedes:<first 12 hex characters of weights SHA-256>`. Its matching Paired Baseline is prepared automatically and shared with any checkpoint using the same architecture, pretrained source, image size, and preprocessing.
@@ -22,6 +24,8 @@ Each imported checkpoint is assigned a model ID of the form `labclip:cuhk-pedes:
 ## Preparation and the web modes
 
 For each requested model, Demo Preparation builds or reuses the model assets and Gallery Manifest, then builds and activates the index. Stage 7, **benchmark evaluation**, computes metrics from that active index using test-split captions and person-ID ground truth; it adds minutes to preparation. Stage 8 is the **real-search smoke test**. Checkpoint and Paired Baseline models need a successful evaluation to be ready for comparison.
+
+The running service loads checkpoint registrations at startup. After importing or removing a checkpoint, run `./gods-eye stop` followed by `./gods-eye start` for the change to appear in the web app. `GODS_EYE_RESIDENT_MODELS` sets the service's LRU capacity for text-only embedders; it defaults to `4`.
 
 The web app has three modes:
 

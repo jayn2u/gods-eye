@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
-from .benchmark import BenchmarkQuery
+from .benchmark import BenchmarkQuery, BenchmarkQueryNotFoundError
 from .clip_models import DEFAULT_MODEL_ID
 from .config import get_settings
 from .index_store import load_active
@@ -150,7 +150,7 @@ class _RetrievalRuntimeAdapter:
 
     def benchmark_search(self, model_id: str, query_id: str, top_k: int) -> BenchmarkSearchResponse:
         del model_id, top_k
-        raise KeyError(query_id)
+        raise BenchmarkQueryNotFoundError(query_id)
 
     def close(self) -> None:
         pass
@@ -329,7 +329,7 @@ def benchmark_search(
     started = time.perf_counter()
     try:
         response = runtime.benchmark_search(request.model_id, request.query_id, request.top_k)
-    except KeyError as exc:
+    except BenchmarkQueryNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Benchmark Query not found.") from exc
     except ModelUnavailableError as exc:
         if not exc.prepared:
