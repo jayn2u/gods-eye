@@ -5,12 +5,15 @@ import os
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 
 from .benchmark import (
+    BenchmarkQuery,
+    Evaluation,
     evaluation_path,
     read_benchmark_queries,
     read_evaluation,
@@ -283,6 +286,225 @@ def _parse_manifest_digest(payload: str) -> str:
     return payload
 
 
+def _read_benchmark_queries(path: Path, manifest_sha256: str) -> tuple[BenchmarkQuery, ...] | None:
+    try:
+        return read_benchmark_queries(path, manifest_sha256=manifest_sha256)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _read_matching_evaluation(
+    path: Path,
+    *,
+    model_id: str,
+    index_version: str,
+    model_revision: str,
+) -> Evaluation | None:
+    try:
+        evaluation = read_evaluation(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    if (
+        evaluation.model_id != model_id
+        or evaluation.index_version != index_version
+        or evaluation.model_revision != model_revision
+    ):
+        return None
+    return evaluation
+
+
+def _evaluation_stage(
+    adapter: PreparationRunner,
+    paths: PreparationPaths,
+    model_paths: ModelPreparationPaths,
+    state: dict,
+    preparation: dict,
+    evaluation_state: dict,
+    *,
+    model_id: str,
+    model_revision: str,
+    index_version: str,
+    manifest_sha256: str,
+    arguments: dict[str, list[str]],
+    state_path: Path,
+    progress: PreparationProgress,
+    stage_started: float,
+    now: Callable[[], str],
+) -> tuple[dict, PreparationError | None, bool]:
+    """Ensure Benchmark Queries and adopt or compute one immutable evaluation."""
+    benchmark_state = preparation.get("benchmark_queries", {})
+    if not isinstance(benchmark_state, dict):
+        benchmark_state = {}
+    queries = _read_benchmark_queries(paths.benchmark_queries, manifest_sha256)
+    benchmark_state_matches = (
+        benchmark_state.get("status") == "verified"
+        and benchmark_state.get("path") == str(paths.benchmark_queries)
+        and benchmark_state.get("manifest_sha256") == manifest_sha256
+    )
+    if queries is None:
+        try:
+            adapter.run("build-benchmark-queries", *arguments["benchmark"])
+        except (OSError, TypeError, ValueError, PreparationError) as exc:
+            failure = (
+                exc
+                if isinstance(exc, PreparationError)
+                else PreparationError(f"Could not build Benchmark Queries: {exc}")
+            )
+            return (
+                _failed_evaluation_state(
+                    model_id,
+                    model_revision,
+                    index_version,
+                    evaluation_path(model_paths.index_root, index_version),
+                    failure,
+                    progress,
+                    stage_started,
+                    now,
+                ),
+                failure,
+                True,
+            )
+        queries = _read_benchmark_queries(paths.benchmark_queries, manifest_sha256)
+        if queries is None:
+            failure = PreparationError("Benchmark Queries could not be verified")
+            return (
+                _failed_evaluation_state(
+                    model_id,
+                    model_revision,
+                    index_version,
+                    evaluation_path(model_paths.index_root, index_version),
+                    failure,
+                    progress,
+                    stage_started,
+                    now,
+                ),
+                failure,
+                True,
+            )
+        print("  Benchmark Queries built (verified)")
+    elif benchmark_state_matches:
+        print("  Benchmark Queries reused (verified)")
+    else:
+        print("  Benchmark Queries adopted from the matching manifest")
+
+    if not benchmark_state_matches:
+        preparation["benchmark_queries"] = {
+            "status": "verified",
+            "path": str(paths.benchmark_queries),
+            "manifest_sha256": manifest_sha256,
+            "completed_at": now(),
+        }
+        _save_state(state_path, state)
+
+    evaluation_file = evaluation_path(model_paths.index_root, index_version)
+    evaluation = _read_matching_evaluation(
+        evaluation_file,
+        model_id=model_id,
+        index_version=index_version,
+        model_revision=model_revision,
+    )
+    if evaluation is not None:
+        evaluation_state_matches = (
+            evaluation_state.get("status") == "verified"
+            and evaluation_state.get("model_id") == model_id
+            and evaluation_state.get("index_version") == index_version
+            and evaluation_state.get("model_revision") == model_revision
+            and evaluation_state.get("path") == str(evaluation_file)
+        )
+        if evaluation_state_matches:
+            print("  evaluation reused (verified)")
+            progress.complete("evaluation", stage_started, "compatible evaluation reused")
+            return evaluation_state, None, False
+
+        print("  evaluation adopted from the matching immutable file")
+        adopted = {
+            "status": "verified",
+            "model_id": model_id,
+            "index_version": index_version,
+            "model_revision": model_revision,
+            "path": str(evaluation_file),
+            "completed_at": now(),
+            "duration_seconds": progress.complete(
+                "evaluation", stage_started, "matching evaluation file adopted"
+            ),
+        }
+        return adopted, None, True
+
+    evaluation_args = [
+        str(model_paths.active),
+        *arguments["evaluation"],
+        "--output",
+        str(evaluation_file),
+    ]
+    try:
+        adapter.run("evaluate", *evaluation_args)
+        evaluation = _read_matching_evaluation(
+            evaluation_file,
+            model_id=model_id,
+            index_version=index_version,
+            model_revision=model_revision,
+        )
+        if evaluation is None:
+            raise PreparationError(
+                "evaluate returned an unreadable result or a different model, index, or revision"
+            )
+    except (OSError, TypeError, ValueError, PreparationError) as exc:
+        failure = (
+            exc
+            if isinstance(exc, PreparationError)
+            else PreparationError(f"Benchmark evaluation returned an unreadable result: {exc}")
+        )
+        return (
+            _failed_evaluation_state(
+                model_id,
+                model_revision,
+                index_version,
+                evaluation_file,
+                failure,
+                progress,
+                stage_started,
+                now,
+            ),
+            failure,
+            True,
+        )
+
+    verified = {
+        "status": "verified",
+        "model_id": model_id,
+        "index_version": index_version,
+        "model_revision": model_revision,
+        "path": str(evaluation_file),
+        "completed_at": now(),
+        "duration_seconds": progress.complete(
+            "evaluation", stage_started, "benchmark metrics verified"
+        ),
+    }
+    return verified, None, True
+
+
+def _failed_evaluation_state(
+    model_id: str,
+    model_revision: str,
+    index_version: str,
+    evaluation_file: Path,
+    failure: PreparationError,
+    progress: PreparationProgress,
+    stage_started: float,
+    now: Callable[[], str],
+) -> dict:
+    return {
+        "status": "failed",
+        "model_id": model_id,
+        "index_version": index_version,
+        "model_revision": model_revision,
+        "path": str(evaluation_file),
+        "error": str(failure),
+        "completed_at": now(),
+        "duration_seconds": progress.fail("evaluation", stage_started, str(failure)),
+    }
+
+
 def prepare_model_index(
     root: Path,
     state_path: Path,
@@ -479,112 +701,37 @@ def prepare_model_index(
         progress.complete("index", stage_started, "compatible active index reused")
 
     stage_started = progress.stage(7, "benchmark evaluation", "evaluation")
-    index_version_id = active_version_id or Path(index_state.get("version_path", "")).name
+    index_version_id = active_version_id
     if not index_version_id:
         raise PreparationError("Active index verification did not return an immutable version ID")
-    evaluation_file = evaluation_path(model_paths.index_root, index_version_id)
-    evaluation_args = [
-        str(model_paths.active),
-        *args["evaluation"],
-        "--output",
-        str(evaluation_file),
-    ]
     evaluation_state = model_record.get("evaluation", {})
-    evaluation_compatible = False
-    try:
-        benchmark_state = preparation.get("benchmark_queries", {})
-        benchmark_compatible = (
-            benchmark_state.get("status") == "verified"
-            and benchmark_state.get("path") == str(paths.benchmark_queries)
-            and benchmark_state.get("manifest_sha256") == manifest_sha256
-        )
-        if benchmark_compatible:
-            try:
-                read_benchmark_queries(paths.benchmark_queries, manifest_sha256=manifest_sha256)
-                print("  Benchmark Queries reused (verified)")
-            except (OSError, TypeError, ValueError):
-                benchmark_compatible = False
-        if not benchmark_compatible:
-            adapter.run("build-benchmark-queries", *args["benchmark"])
-            try:
-                read_benchmark_queries(paths.benchmark_queries, manifest_sha256=manifest_sha256)
-            except (OSError, TypeError, ValueError) as exc:
-                raise PreparationError(f"Benchmark Queries could not be verified: {exc}") from exc
-            preparation["benchmark_queries"] = {
-                "status": "verified",
-                "path": str(paths.benchmark_queries),
-                "manifest_sha256": manifest_sha256,
-                "completed_at": now(),
-            }
-            _save_state(state_path, state)
-
-        evaluation_compatible = (
-            evaluation_state.get("status") == "verified"
-            and evaluation_state.get("index_version") == index_version_id
-            and evaluation_state.get("model_revision") == resolved_revision
-            and evaluation_state.get("path") == str(evaluation_file)
-        )
-        if evaluation_compatible:
-            try:
-                stored_evaluation = read_evaluation(evaluation_file)
-                evaluation_compatible = (
-                    stored_evaluation.model_id == model_id
-                    and stored_evaluation.index_version == index_version_id
-                    and stored_evaluation.model_revision == resolved_revision
-                )
-            except (OSError, TypeError, ValueError):
-                evaluation_compatible = False
-
-        if evaluation_compatible:
-            progress.complete("evaluation", stage_started, "compatible evaluation reused")
-            print("  evaluation reused (verified)")
-        else:
-            adapter.run("evaluate", *evaluation_args)
-            evaluation = read_evaluation(evaluation_file)
-            if (
-                evaluation.model_id != model_id
-                or evaluation.index_version != index_version_id
-                or evaluation.model_revision != resolved_revision
-            ):
-                raise PreparationError(
-                    "evaluate returned a result for a different model, index, or revision"
-                )
-    except (OSError, TypeError, ValueError, PreparationError) as exc:
-        if isinstance(exc, PreparationError):
-            failure = exc
-        else:
-            failure = PreparationError(f"Benchmark evaluation returned an unreadable result: {exc}")
-        failed_state = {
-            "status": "failed",
-            "model_id": model_id,
-            "index_version": index_version_id,
-            "model_revision": resolved_revision,
-            "path": str(evaluation_file),
-            "error": str(failure),
-            "completed_at": now(),
-            "duration_seconds": progress.fail("evaluation", stage_started, str(failure)),
-        }
-        set_model_stage(preparation, model_id, "evaluation", failed_state)
+    if not isinstance(evaluation_state, dict):
+        evaluation_state = {}
+    evaluation_state, evaluation_failure, store_evaluation_state = _evaluation_stage(
+        adapter,
+        paths,
+        model_paths,
+        state,
+        preparation,
+        evaluation_state,
+        model_id=model_id,
+        model_revision=resolved_revision,
+        index_version=index_version_id,
+        manifest_sha256=manifest_sha256,
+        arguments=args,
+        state_path=state_path,
+        progress=progress,
+        stage_started=stage_started,
+        now=now,
+    )
+    if store_evaluation_state:
+        set_model_stage(preparation, model_id, "evaluation", evaluation_state)
         _save_state(state_path, state)
+    if evaluation_failure is not None:
         if spec.group == "reference":
-            print(f"  reference-model benchmark evaluation failed: {failure}")
+            print(f"  reference-model benchmark evaluation failed: {evaluation_failure}")
         else:
-            raise failure
-    else:
-        if not evaluation_compatible:
-            evaluation_state = {
-                "status": "verified",
-                "model_id": model_id,
-                "index_version": index_version_id,
-                "model_revision": resolved_revision,
-                "path": str(evaluation_file),
-                "completed_at": now(),
-                "duration_seconds": progress.complete(
-                    "evaluation", stage_started, "benchmark metrics verified"
-                ),
-            }
-            set_model_stage(preparation, model_id, "evaluation", evaluation_state)
-            _save_state(state_path, state)
+            raise evaluation_failure
 
     stage_started = progress.stage(8, "real-search smoke test", "smoke_test")
     adapter.run("smoke-search", *args["smoke"])

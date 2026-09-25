@@ -5,7 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from gods_eye.benchmark import Evaluation, write_benchmark_queries, write_evaluation
+from gods_eye.benchmark import (
+    Evaluation,
+    evaluation_path,
+    read_evaluation,
+    write_benchmark_queries,
+    write_evaluation,
+)
 from gods_eye.checkpoint_registry import Registration, checkpoint_model_id, write_registration
 from gods_eye.clip_models import (
     CLIP_MODELS,
@@ -21,6 +27,7 @@ from gods_eye.preparation import (
     PreparationPaths,
     PreparationRunner,
     _parse_model_receipt,
+    _save_state,
     prepare_model_index,
 )
 from gods_eye.preparation_state import (
@@ -40,6 +47,7 @@ class FakeRunner:
         self.failures = failures or []
         self.manifest_digest = "b" * 64
         self.revisions = dict(REVISIONS)
+        self.evaluation_runs = 0
 
     def run(self, operation: str, *arguments: str) -> str:
         self.calls.append((operation, arguments))
@@ -85,6 +93,7 @@ class FakeRunner:
             write_benchmark_queries(output, (), manifest_sha256=self.manifest_digest)
             return str(output)
         if operation == "evaluate":
+            self.evaluation_runs += 1
             active = Path(arguments[0])
             version_id = (active.parent / active.read_text().strip()).name
             output = Path(_option(arguments, "--output") or "")
@@ -95,7 +104,7 @@ class FakeRunner:
                     model_id=model_id or "",
                     index_version=version_id,
                     model_revision=revision,
-                    created_at="2026-09-25T00:00:00+00:00",
+                    created_at=f"2026-09-25T00:00:{self.evaluation_runs:02d}+00:00",
                     query_count=1,
                     gallery_count=1,
                     metrics={"top1": 1.0, "top5": 1.0, "top10": 1.0, "mAP": 1.0, "mINP": 1.0},
@@ -508,6 +517,70 @@ def test_verified_evaluation_is_reused_for_same_index_and_revision(tmp_path: Pat
         "smoke-search",
     ]
     assert [operation for operation, _ in runner.calls].count("evaluate") == 1
+
+
+def test_uncommitted_evaluation_file_is_adopted_after_state_record_is_lost(
+    tmp_path: Path,
+) -> None:
+    state_path = _state_path(tmp_path)
+    model_id, revision = _register_checkpoint(tmp_path)
+    runner = FakeRunner(tmp_path)
+    runner.revisions[model_id] = revision
+    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id)
+    state = json.loads(state_path.read_text())
+    record = state["preparation"]["models"][model_id]
+    index_version = Path(record["index"]["version_path"]).name
+    output = evaluation_path(
+        PreparationPaths(tmp_path).for_model(model_id).index_root, index_version
+    )
+    original_evaluation = read_evaluation(output)
+    del record["evaluation"]
+    state_path.write_text(json.dumps(state) + "\n")
+    calls_before = len(runner.calls)
+
+    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id)
+
+    resumed = [operation for operation, _ in runner.calls[calls_before:]]
+    state = json.loads(state_path.read_text())
+    evaluation_state = model_preparation(state["preparation"], model_id)["evaluation"]
+    assert "evaluate" not in resumed
+    assert runner.evaluation_runs == 1
+    assert evaluation_state["status"] == "verified"
+    assert evaluation_state["index_version"] == index_version
+    assert read_evaluation(output) == original_evaluation
+
+
+def test_benchmark_state_save_error_is_not_recorded_as_evaluation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = _state_path(tmp_path)
+    model_id, revision = _register_checkpoint(tmp_path)
+    runner = FakeRunner(tmp_path)
+    runner.revisions[model_id] = revision
+    prepare_model_index(tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id)
+    state = json.loads(state_path.read_text())
+    state["preparation"].pop("benchmark_queries")
+    state["preparation"]["models"][model_id].pop("evaluation")
+    state_path.write_text(json.dumps(state) + "\n")
+    save_attempts = 0
+
+    def fail_once(path: Path, new_state: dict) -> None:
+        nonlocal save_attempts
+        save_attempts += 1
+        if save_attempts == 1:
+            raise OSError("state write interrupted")
+        _save_state(path, new_state)
+
+    monkeypatch.setattr("gods_eye.preparation._save_state", fail_once)
+
+    with pytest.raises(OSError, match="state write interrupted"):
+        prepare_model_index(
+            tmp_path, state_path, vram_mib=24 * 1024, runner=runner, model_id=model_id
+        )
+
+    saved = json.loads(state_path.read_text())
+    assert save_attempts == 1
+    assert "evaluation" not in saved["preparation"]["models"][model_id]
 
 
 def test_hung_worker_is_reported_as_preparation_failure(monkeypatch: pytest.MonkeyPatch) -> None:

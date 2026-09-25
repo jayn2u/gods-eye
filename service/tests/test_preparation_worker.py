@@ -23,7 +23,12 @@ MODEL_ID = "openai/clip-vit-base-patch16"
 MODEL_REVISION = "a" * 40
 
 
-def _index_fixture(root: Path) -> tuple[Path, Path, Path, str]:
+def _index_fixture(
+    root: Path,
+    *,
+    model_id: str = MODEL_ID,
+    model_revision: str = MODEL_REVISION,
+) -> tuple[Path, Path, Path, str]:
     dataset_root = root / "data" / "datasets"
     dataset = SUPPORTED_DATASETS[0]
     image_root = dataset_root / dataset
@@ -70,12 +75,12 @@ def _index_fixture(root: Path) -> tuple[Path, Path, Path, str]:
     version = build_index(
         manifest_path,
         index_root / "versions",
-        model_id=MODEL_ID,
+        model_id=model_id,
         backend="numpy",
-        model_revision=MODEL_REVISION,
+        model_revision=model_revision,
         dataset_root=dataset_root,
     )
-    activate_version(version, index_root / "active", MODEL_ID, dataset_root)
+    activate_version(version, index_root / "active", model_id, dataset_root)
     return manifest_path, metadata, index_root / "active", str(version.name)
 
 
@@ -99,7 +104,7 @@ def test_worker_builds_benchmark_queries_and_writes_evaluation(tmp_path: Path, m
         calls.append(([], {"model_id": model_id, **options}))
         return FakeEmbedder()
 
-    monkeypatch.setattr("gods_eye.preparation_worker.create_embedder", create_fake, raising=False)
+    monkeypatch.setattr("gods_eye.preparation_worker.create_embedder", create_fake)
 
     assert (
         main(
@@ -179,7 +184,6 @@ def test_worker_returns_existing_oom_exit_code_for_evaluation(tmp_path: Path, mo
     monkeypatch.setattr(
         "gods_eye.preparation_worker.create_embedder",
         lambda model_id, **options: OutOfMemoryEmbedder(),
-        raising=False,
     )
     assert (
         main(
@@ -261,7 +265,12 @@ def test_worker_prepares_and_verifies_openclip_baseline_without_torch(
     ]
 
 
-def _registered_checkpoint(cache_dir: Path, weights: bytes) -> tuple[str, str, Path]:
+def _registered_checkpoint(
+    cache_dir: Path,
+    weights: bytes,
+    *,
+    reference_metrics: dict | None = None,
+) -> tuple[str, str, Path]:
     digest = hashlib.sha256(weights).hexdigest()
     model_id = checkpoint_model_id(digest)
     checkpoint_root = checkpoint_root_for(cache_dir)
@@ -275,7 +284,7 @@ def _registered_checkpoint(cache_dir: Path, weights: bytes) -> tuple[str, str, P
         verified=True,
         registered_at="2026-09-25T00:00:00Z",
         provenance={},
-        reference_metrics=None,
+        reference_metrics=reference_metrics,
     )
     checkpoint_dir = write_registration(checkpoint_root, registration).parent
     weights_path = checkpoint_dir / "model.safetensors"
@@ -324,3 +333,85 @@ def test_worker_rejects_registered_checkpoint_weight_mismatch(
 
     with pytest.raises(ModelRevisionError, match="registered SHA-256"):
         main(argv)
+
+
+def test_worker_passes_checkpoint_reference_metrics_into_evaluation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    reference_metrics = {
+        "metrics": {"top1": 0.7, "top5": 0.88, "top10": 0.93, "mAP": 0.64, "mINP": 0.48},
+        "gallery": {"images": 3074},
+        "queries": {"captions": 6156},
+    }
+    cache_dir = tmp_path / ".cache" / "huggingface"
+    model_id, revision, _weights_path = _registered_checkpoint(
+        cache_dir,
+        b"checkpoint weights",
+        reference_metrics=reference_metrics,
+    )
+    manifest, metadata, active, version_id = _index_fixture(
+        tmp_path,
+        model_id=model_id,
+        model_revision=revision,
+    )
+    loaded = load_active(active, model_id, revision, tmp_path / "data" / "datasets")
+    query_path = tmp_path / "indexes" / "benchmark-queries.json"
+    output = evaluation_path(active.parent, version_id)
+
+    class FakeEmbedder:
+        def embed_texts(self, texts: list[str], batch_size: int = 256) -> np.ndarray:
+            assert batch_size == 256
+            return np.repeat(loaded.vectors[:1], len(texts), axis=0)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "gods_eye.preparation_worker.create_embedder",
+        lambda requested_model_id, **options: FakeEmbedder(),
+    )
+    assert (
+        main(
+            [
+                "build-benchmark-queries",
+                "--manifest",
+                str(manifest),
+                "--metadata",
+                str(metadata),
+                "--output",
+                str(query_path),
+            ]
+        )
+        == 0
+    )
+
+    assert (
+        main(
+            [
+                "evaluate",
+                str(active),
+                "--model-id",
+                model_id,
+                "--revision",
+                revision,
+                "--cache-dir",
+                str(cache_dir),
+                "--dataset-root",
+                str(tmp_path / "data" / "datasets"),
+                "--metadata",
+                str(metadata),
+                "--benchmark-queries",
+                str(query_path),
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+
+    evaluation = read_evaluation(output)
+    assert evaluation.reference is not None
+    assert evaluation.reference["source"] == "lab_clip"
+    assert evaluation.reference["metrics"] == reference_metrics["metrics"]
+    assert evaluation.reference["gallery"] == reference_metrics["gallery"]
+    assert evaluation.reference["queries"] == reference_metrics["queries"]
