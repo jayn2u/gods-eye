@@ -100,11 +100,11 @@ supported.
 
 ## What preparation does
 
-`./gods-eye prepare` verifies and resumes seven stages: preflight, terms acknowledgement, Dataset
+`./gods-eye prepare` verifies and resumes eight stages: preflight, terms acknowledgement, Dataset
 Acquisition, CLIP model preparation, Gallery Manifest generation, GPU index build and atomic
-activation, and a real-search smoke test. It records compatible completed stages and detailed logs
-under the gitignored `.gods-eye/` directory. It does not report the Full Demo as prepared unless the
-final search succeeds.
+activation, benchmark evaluation, and a real-search smoke test. It records compatible completed
+stages and detailed logs under the gitignored `.gods-eye/` directory. It does not report the Full
+Demo as prepared unless the final search succeeds.
 
 Development checkouts build the service and web images from local source. Tagged releases can use
 the repository's immutable `release-images.env`; the Launcher always reports which mode it chose.

@@ -7,7 +7,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from .clip_models import CLIP_MODELS, DEFAULT_MODEL_ID
+from .clip_models import DEFAULT_MODEL_ID
 from .launcher_assets import prepare_datasets
 from .launcher_common import (
     EXIT_OK,
@@ -63,7 +63,6 @@ def _parser() -> tuple[LauncherArgumentParser, argparse.ArgumentParser]:
     prepare.add_argument(
         "--model-id",
         action="append",
-        choices=[spec.model_id for spec in CLIP_MODELS],
         dest="model_ids",
     )
     start = commands.add_parser("start")
@@ -87,9 +86,15 @@ def _parser() -> tuple[LauncherArgumentParser, argparse.ArgumentParser]:
 
 
 def _prepare(layout: RuntimeLayout, args: argparse.Namespace) -> int:
-    from .preparation import PreparationError, prepare_model_index
+    from .preparation import PreparationError, PreparationPaths, prepare_model_index
 
     model_ids = list(dict.fromkeys(args.model_ids or [DEFAULT_MODEL_ID]))
+    try:
+        for model_id in model_ids:
+            PreparationPaths(layout.root).for_model(model_id)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_USAGE
     try:
         with mutation_lock(layout, "prepare"):
             if os.getenv("GODS_EYE_USE_FIXTURES") == "true":

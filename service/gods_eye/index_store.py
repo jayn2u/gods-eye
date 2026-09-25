@@ -494,17 +494,14 @@ def main() -> None:
     if args.command == "build":
         embedder = None
         if args.model_id != "fixture/deterministic-v1":
-            from .clip import HuggingFaceClipEmbedder
-            from .config import ClipRuntimeConfig
+            from .embedders import create_embedder
 
-            embedder = HuggingFaceClipEmbedder.from_config(
-                ClipRuntimeConfig(
-                    model_id=args.model_id,
-                    revision=args.revision,
-                    device=args.device,
-                    offline=args.offline,
-                    cache_dir=args.cache_dir,
-                )
+            embedder = create_embedder(
+                args.model_id,
+                revision=args.revision,
+                device=args.device,
+                offline=args.offline,
+                cache_dir=args.cache_dir,
             )
         print(
             build_index(

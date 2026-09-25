@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .clip_models import get_clip_model
+from .clip_models import ModelRegistry, checkpoint_root_for
 from .models import SUPPORTED_DATASETS
 from .preparation import PreparationPaths
 from .preparation_state import normalize_preparation_state, set_model_stage
@@ -22,6 +22,7 @@ def prepare_fixture(root: Path, state_path: Path, *, model_ids: list[str]) -> No
         receipt.write_text(json.dumps({"dataset": name, "fixture": True}) + "\n")
     model_cache = root / ".cache" / "huggingface"
     model_cache.mkdir(parents=True, exist_ok=True)
+    registry = ModelRegistry(checkpoint_root_for(model_cache))
     manifest = root / "indexes" / "gallery-manifest.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(json.dumps({"schema_version": 1, "fixture": True}) + "\n")
@@ -31,7 +32,7 @@ def prepare_fixture(root: Path, state_path: Path, *, model_ids: list[str]) -> No
     preparation["gallery_manifest"] = {"status": "verified", "fixture": True}
     paths = PreparationPaths(root)
     for model_id in model_ids:
-        spec = get_clip_model(model_id)
+        spec = registry.get(model_id)
         revision = f"fixture-{spec.storage_key}"
         (model_cache / f"{spec.storage_key}.ready").write_text("fixture\n")
         model_paths = paths.for_model(model_id)
@@ -63,6 +64,19 @@ def prepare_fixture(root: Path, state_path: Path, *, model_ids: list[str]) -> No
         set_model_stage(
             preparation,
             model_id,
+            "evaluation",
+            {
+                "status": "verified",
+                "fixture": True,
+                "model_id": model_id,
+                "model_revision": revision,
+                "index_version": "fixture",
+                "completed_at": now,
+            },
+        )
+        set_model_stage(
+            preparation,
+            model_id,
             "smoke_test",
             {
                 "status": "verified",
@@ -75,5 +89,5 @@ def prepare_fixture(root: Path, state_path: Path, *, model_ids: list[str]) -> No
     temporary = state_path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
     temporary.replace(state_path)
-    labels = ", ".join(get_clip_model(model_id).label for model_id in model_ids)
+    labels = ", ".join(registry.get(model_id).label for model_id in model_ids)
     print(f"Fixture-backed synthetic Demo Preparation completed for {labels}.")

@@ -44,13 +44,16 @@ Runs the following verified, resumable stages:
 4. Selected CLIP model preparation (B/16 only when no `--model-id` is supplied).
 5. Gallery Manifest generation.
 6. GPU index build and atomic activation.
-7. Model load, active-index validation, and a real-search smoke test.
+7. Benchmark evaluation from the active index; a reference-model evaluation failure is recorded
+   without preventing preparation from continuing.
+8. Model load, active-index validation, and a real-search smoke test.
 
 The command shows stage number, progress, elapsed time, and an evidence-based estimate. Detailed output is written to `.gods-eye/logs/<timestamp>.log`. Cancellation preserves verified stages, resumable archive parts, and index checkpoints; a later run validates and resumes them. GPU-memory failure halves the conservatively selected batch size and retries the current index stage.
 
-`--model-id` is repeatable for the four registered OpenAI ViT models. IDs are deduplicated in
-first-seen order and processed sequentially; a completed earlier model remains resumable if a later
-one fails. Dataset and manifest work remains shared.
+`--model-id` is repeatable for registered Hugging Face models, paired OpenCLIP baselines, and
+imported checkpoint IDs. IDs are deduplicated in first-seen order and processed sequentially; a
+completed earlier model remains resumable if a later one fails. Dataset and manifest work remains
+shared.
 
 Before downloading, the operator sees the CUHK-PEDES official source and terms or license, its distinct mirror location, expected size, usage restrictions, and sensitive-data warning. Interactive acceptance is recorded with timestamp, Dataset Registry version, and selected source in `.gods-eye/state.json`. A Registry or source change requires renewed acceptance. `--yes` never implies `--accept-data-terms`.
 

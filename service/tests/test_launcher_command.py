@@ -129,6 +129,10 @@ elif operation == "verify-index":
     path = Path(args[1])
 elif operation == "smoke-search":
     path = Path(args[1])
+elif operation == "build-benchmark-queries":
+    path = Path(args[args.index("--output") + 1])
+elif operation == "evaluate":
+    path = Path(args[args.index("--output") + 1])
 else:
     raise SystemExit(64)
 if operation == "build-index":
@@ -140,12 +144,35 @@ else:
     path.parent.mkdir(parents=True, exist_ok=True)
     if operation == "activate-index":
         path.write_text(str(Path(args[1]).relative_to(path.parent)) + "\\n")
+    elif operation == "build-benchmark-queries":
+        path.write_text(json.dumps({"manifest_sha256": "b" * 64, "queries": []}) + "\\n")
+    elif operation == "evaluate":
+        from gods_eye.benchmark import Evaluation, write_evaluation
+
+        active = Path(args[1])
+        version_id = (active.parent / active.read_text().strip()).name
+        write_evaluation(
+            path,
+            Evaluation(
+                model_id=args[args.index("--model-id") + 1],
+                index_version=version_id,
+                model_revision=args[args.index("--revision") + 1],
+                created_at="2026-09-25T00:00:00+00:00",
+                query_count=1,
+                gallery_count=1,
+                metrics={"top1": 1.0, "top5": 1.0, "top10": 1.0, "mAP": 1.0, "mINP": 1.0},
+                benchmark_query_ranks={},
+                reference=None,
+            ),
+        )
     else:
         path.write_text("ok")
 if operation in {"prepare-model", "verify-model"}:
     print(json.dumps({"model_id": model_id, "resolved_revision": "a" * 40}, separators=(",", ":")))
 elif operation == "verify-manifest":
     print("b" * 64)
+elif operation == "verify-index":
+    print((path.parent / path.read_text().strip()).name)
 else:
     print(path)
 """
@@ -217,7 +244,7 @@ def test_prepare_acquires_datasets_without_building_the_manifest(tmp_path: Path)
     assert state["preparation"]["smoke_test"]["status"] == "verified"
     operations = [json.loads(line)[0] for line in log.read_text().splitlines()]
     assert operations[-1] == "smoke-search"
-    assert "Stage 3/7" in result.stdout
+    assert "Stage 3/8" in result.stdout
     assert log.exists()
 
 
@@ -626,14 +653,15 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
     )
 
     assert first.returncode == 0, first.stderr
-    assert "Stage 4/7 — CLIP ViT-B/16 model preparation (elapsed" in first.stdout
-    assert "Stage 5/7 — Gallery Manifest generation (elapsed" in first.stdout
-    assert "Stage 6/7 — GPU index build and atomic activation (elapsed" in first.stdout
-    assert "Stage 7/7 — real-search smoke test (elapsed" in first.stdout
+    assert "Stage 4/8 — CLIP ViT-B/16 model preparation (elapsed" in first.stdout
+    assert "Stage 5/8 — Gallery Manifest generation (elapsed" in first.stdout
+    assert "Stage 6/8 — GPU index build and atomic activation (elapsed" in first.stdout
+    assert "Stage 7/8 — benchmark evaluation (elapsed" in first.stdout
+    assert "Stage 8/8 — real-search smoke test (elapsed" in first.stdout
     assert "estimate measuring" in first.stdout
     assert "Detailed preparation log:" in first.stdout
     assert second.returncode == 0, second.stderr
-    assert second.stdout.count("reused (verified)") == 3
+    assert second.stdout.count("reused (verified)") == 5
     calls = [json.loads(line) for line in call_log.read_text().splitlines()]
     first_build = next(call for call in calls if call[0] == "build-index")
     assert first_build[first_build.index("--batch-size") + 1] == "64"
@@ -644,6 +672,8 @@ def test_prepare_builds_and_reuses_compatible_model_manifest_and_index(tmp_path:
         "build-index",
         "validate-index",
         "activate-index",
+        "build-benchmark-queries",
+        "evaluate",
         "smoke-search",
         "verify-model",
         "verify-manifest",
@@ -759,7 +789,7 @@ def test_prepare_unknown_model_id_exits_usage_before_mutation(tmp_path: Path) ->
     )
 
     assert result.returncode == 64
-    assert "invalid choice" in result.stderr
+    assert "Unsupported CLIP model ID" in result.stderr
     assert not (project / ".gods-eye/state.json").exists()
     assert not call_log.exists()
 
