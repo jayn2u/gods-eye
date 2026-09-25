@@ -4,7 +4,6 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
-  EVIDENCE_BRANCH,
   EvidenceBranchError,
   MAX_FILES,
   evidencePath,
@@ -13,6 +12,7 @@ const {
 } = require('../evidence-branch.cjs');
 
 const REPOSITORY = 'jayn2u/gods-eye';
+const BRANCH = 'copilot-agent-qa-evidence';
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
   'base64',
@@ -40,7 +40,7 @@ function fakeGithub({ existingTree = null, refRaces = 0 } = {}) {
     rest: {
       git: {
         getRef: async ({ ref }) => {
-          assert.equal(ref, `heads/${EVIDENCE_BRANCH}`);
+          assert.equal(ref, 'heads/copilot-agent-qa-evidence');
           if (!state.head) {
             const error = new Error('Not Found');
             error.status = 404;
@@ -101,8 +101,8 @@ test('Given a run identity, when a path is composed, then every segment is machi
     'pr-42/987-2/blank-input.png',
   );
   assert.equal(
-    evidenceUrl(REPOSITORY, 'pr-42/987-2/blank-input.png'),
-    `https://github.com/${REPOSITORY}/blob/${EVIDENCE_BRANCH}/pr-42/987-2/blank-input.png?raw=true`,
+    evidenceUrl(REPOSITORY, BRANCH, 'pr-42/987-2/blank-input.png'),
+    `https://github.com/${REPOSITORY}/blob/copilot-agent-qa-evidence/pr-42/987-2/blank-input.png?raw=true`,
   );
 });
 
@@ -125,7 +125,7 @@ test('Given a scenario id that could escape its directory, when a path is compos
 test('Given no existing branch, when screenshots publish, then an orphan commit creates it', async () => {
   const { github, state } = fakeGithub();
   const published = await publishScreenshots({
-    github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1,
+    github, repository: REPOSITORY, branch: BRANCH, prNumber: 7, runId: 100, runAttempt: 1,
     screenshots: screenshots(['blank-input', 'recover-409']),
   });
   assert.equal(state.blobs.length, 2);
@@ -133,11 +133,12 @@ test('Given no existing branch, when screenshots publish, then an orphan commit 
   // No parent: the evidence branch must not share history with any source branch.
   assert.deepEqual(state.commits[0].parents, []);
   assert.equal(state.refCreates.length, 1);
-  assert.equal(state.refCreates[0].ref, `refs/heads/${EVIDENCE_BRANCH}`);
+  assert.equal(state.refCreates[0].ref, 'refs/heads/copilot-agent-qa-evidence');
   assert.deepEqual(published.files.map((file) => file.path), [
     'pr-7/100-1/blank-input.png', 'pr-7/100-1/recover-409.png',
   ]);
-  assert.equal(published.branch, EVIDENCE_BRANCH);
+  assert.equal(published.branch, BRANCH);
+  assert.equal(state.commits[0].message, 'Copilot Agent QA evidence for PR #7 run 100 attempt 1');
 });
 
 test('Given earlier generations, when a newer one publishes, then only this PR\'s older paths are removed', async () => {
@@ -151,7 +152,7 @@ test('Given earlier generations, when a newer one publishes, then only this PR\'
     ],
   });
   await publishScreenshots({
-    github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1,
+    github, repository: REPOSITORY, branch: BRANCH, prNumber: 7, runId: 100, runAttempt: 1,
     screenshots: screenshots(['blank-input']),
   });
   const written = state.trees[0];
@@ -168,7 +169,7 @@ test('Given a truncated tree listing, when publishing, then nothing is deleted',
   const { github, state } = fakeGithub({ existingTree: [{ type: 'blob', path: 'pr-7/90-1/x.png' }] });
   state.truncated = true;
   await publishScreenshots({
-    github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1,
+    github, repository: REPOSITORY, branch: BRANCH, prNumber: 7, runId: 100, runAttempt: 1,
     screenshots: screenshots(['blank-input']),
   });
   assert.equal(state.trees[0].tree.some((entry) => entry.sha === null), false);
@@ -177,7 +178,7 @@ test('Given a truncated tree listing, when publishing, then nothing is deleted',
 test('Given a concurrent publication, when the ref moves, then the commit is rebuilt once and retried', async () => {
   const { github, state } = fakeGithub({ existingTree: [], refRaces: 1 });
   await publishScreenshots({
-    github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1,
+    github, repository: REPOSITORY, branch: BRANCH, prNumber: 7, runId: 100, runAttempt: 1,
     screenshots: screenshots(['blank-input']),
   });
   assert.equal(state.commits.length, 2, 'the losing attempt must not be reused');
@@ -190,7 +191,7 @@ test('Given a ref that keeps moving, when both attempts lose, then publication f
   const { github } = fakeGithub({ existingTree: [], refRaces: 5 });
   await assert.rejects(
     publishScreenshots({
-      github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1,
+      github, repository: REPOSITORY, branch: BRANCH, prNumber: 7, runId: 100, runAttempt: 1,
       screenshots: screenshots(['blank-input']),
     }),
     (error) => error instanceof EvidenceBranchError && error.code === 'ref_update_failed',
@@ -209,7 +210,8 @@ test('Given content that is not an accepted screenshot, when publishing, then it
     const { github, state } = fakeGithub();
     await assert.rejects(
       publishScreenshots({
-        github, repository: REPOSITORY, prNumber: 7, runId: 100, runAttempt: 1, screenshots: payload,
+        github, repository: REPOSITORY, branch: BRANCH,
+        prNumber: 7, runId: 100, runAttempt: 1, screenshots: payload,
       }),
       (error) => error instanceof EvidenceBranchError && error.code === code,
       `expected ${code}`,
@@ -222,10 +224,22 @@ test('Given a repository that is not owner/repo, when publishing, then it is ref
   const { github, state } = fakeGithub();
   await assert.rejects(
     publishScreenshots({
-      github, repository: 'https://example.invalid/evil', prNumber: 7, runId: 1, runAttempt: 1,
+      github, repository: 'https://example.invalid/evil', branch: BRANCH, prNumber: 7, runId: 1, runAttempt: 1,
       screenshots: screenshots(['blank-input']),
     }),
     (error) => error.code === 'invalid_repository',
+  );
+  assert.equal(state.blobs.length, 0);
+});
+
+test('a branch not declared by an Agent Profile is refused before any Git API call', async () => {
+  const { github, state } = fakeGithub();
+  await assert.rejects(
+    publishScreenshots({
+      github, repository: REPOSITORY, branch: 'agent-qa-evidence',
+      prNumber: 7, runId: 1, runAttempt: 1, screenshots: screenshots(['blank-input']),
+    }),
+    (error) => error instanceof EvidenceBranchError && error.code === 'invalid_branch',
   );
   assert.equal(state.blobs.length, 0);
 });

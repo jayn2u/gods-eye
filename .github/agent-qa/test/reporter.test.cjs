@@ -12,14 +12,16 @@ const { crc32, deflateRawSync } = require('node:zlib');
 
 const {
   BOT_LOGIN,
-  COMMENT_MARKER,
   ReporterError,
+  findManagedComment,
   inspectArtifactZip,
   prepareEvidencePublication,
   publishWorkflowRun,
   renderComment,
 } = require('../reporter.cjs');
+const { profileFor } = require('../agents/profiles.cjs');
 
+const PROFILE = profileFor('copilot');
 const FIXTURE = JSON.parse(readFileSync(path.join(__dirname, 'fixtures/reporter/api.json'), 'utf8'));
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('fixture-png')]);
 const SCENARIOS = [
@@ -187,6 +189,22 @@ function makeRun(id, attempt = 1, conclusion = 'success') {
   };
 }
 
+function trustedRun() {
+  return clone(FIXTURE.run);
+}
+
+function minimalCommentInput() {
+  return {
+    identity: { prNumber: 42, headSha: 'a'.repeat(40) },
+    run: makeRun(100),
+    status: 'no_findings',
+    reason: 'none',
+    report: null,
+    artifact: null,
+    evidenceFiles: [],
+  };
+}
+
 function eventFor(run) {
   return { id: run.id, run_attempt: run.run_attempt, repository: { full_name: 'jayn2u/gods-eye' } };
 }
@@ -202,7 +220,7 @@ function fakeGithub() {
     comments: Array.from({ length: 100 }, (_, index) => ({
       id: index + 1,
       user: { login: index === 0 ? 'marker-spoofer' : `human-${index}` },
-      body: index === 0 ? `${COMMENT_MARKER}\nhuman text` : `human text ${index}`,
+      body: index === 0 ? `${PROFILE.commentMarker}\nhuman text` : `human text ${index}`,
     })),
     mutations: [],
     pages: { comments: 0, runs: 0 },
@@ -260,12 +278,33 @@ function fakeGithub() {
 function setArtifact(state, run, archive, artifactId = run.id * 10 + run.run_attempt) {
   state.artifacts.set(run.id, [{
     id: artifactId,
-    name: `agent-qa-42-${run.id}-${run.run_attempt}`,
+    name: `${PROFILE.artifactPrefix}-42-${run.id}-${run.run_attempt}`,
     expired: false,
     workflow_run: { id: run.id },
   }]);
   state.archives.set(artifactId, archive);
 }
+
+test('the comment uses the profile marker and title and ignores the legacy comment', () => {
+  const legacy = {
+    id: 7,
+    user: { login: BOT_LOGIN },
+    body: '<!-- gods-eye-agent-qa:v1 -->\nold',
+  };
+  assert.equal(findManagedComment([legacy], PROFILE), null);
+  const body = renderComment({ profile: PROFILE, ...minimalCommentInput() });
+  assert.ok(body.startsWith(`${PROFILE.commentMarker}\n## ${PROFILE.title}`));
+});
+
+test('a workflow_run from the legacy agent-qa.yml path is untrusted', async () => {
+  const run = { ...trustedRun(), path: '.github/workflows/agent-qa.yml' };
+  const { github, state } = fakeGithub();
+  state.runs[0] = run;
+  const outcome = await publishWorkflowRun({
+    github, workflowRun: run, repository: 'jayn2u/gods-eye', evidenceFiles: [],
+  });
+  assert.equal(outcome.status, 'skipped');
+});
 
 test('real publisher keeps one bot comment through clean, findings, and latest cancelled generations', async () => {
   const { github, state } = fakeGithub();
@@ -296,14 +335,14 @@ test('real publisher keeps one bot comment through clean, findings, and latest c
   assert.match(state.comments.at(-1).body, /actions\/runs\/101\/attempts\/1/);
   assert.equal(state.comments.filter(({ user }) => user.login === BOT_LOGIN).length, 1);
   assert.deepEqual(state.comments[0], {
-    id: 1, user: { login: 'marker-spoofer' }, body: `${COMMENT_MARKER}\nhuman text`,
+    id: 1, user: { login: 'marker-spoofer' }, body: `${PROFILE.commentMarker}\nhuman text`,
   });
   recordEvidence('publication.json', `${JSON.stringify({
     scenario: 'real publisher API fixture: clean -> findings -> cancelled',
     results: [clean, findings, cancelled],
     stable_comment_id: clean.commentId === findings.commentId && findings.commentId === cancelled.commentId,
     bot_comment_count: state.comments.filter(({ user }) => user.login === BOT_LOGIN).length,
-    human_marker_preserved: state.comments[0].body === `${COMMENT_MARKER}\nhuman text`,
+    human_marker_preserved: state.comments[0].body === `${PROFILE.commentMarker}\nhuman text`,
     current_generation: { id: cancelledRun.id, attempt: cancelledRun.run_attempt },
     mutation_methods: state.mutations.map(({ method, id }) => ({ method, id })),
     links_verified: state.comments.at(-1).body.includes('/actions/runs/101/attempts/1'),
@@ -341,13 +380,13 @@ test('artifact identity is data and cannot override the authoritative run', asyn
 
 test('now-ineligible work updates only an existing bot comment and metadata outages never write', async () => {
   const first = fakeGithub();
-  first.state.pull.base.ref = 'develop';
+  first.state.pull.labels = [];
   const skipped = await publishWorkflowRun({ github: first.github, workflowRun: eventFor(first.state.runs[0]) });
   assert.deepEqual(skipped, { status: 'skipped', reason: 'ineligible_no_existing_comment', prNumber: 42 });
   assert.equal(first.state.mutations.length, 0);
 
   const second = fakeGithub();
-  second.state.comments.push({ id: 9001, user: { login: BOT_LOGIN }, body: `${COMMENT_MARKER}\nold` });
+  second.state.comments.push({ id: 9001, user: { login: BOT_LOGIN }, body: `${PROFILE.commentMarker}\nold` });
   second.state.pull.draft = true;
   const ineligible = await publishWorkflowRun({ github: second.github, workflowRun: eventFor(second.state.runs[0]) });
   assert.equal(ineligible.reportStatus, 'not_applicable');
@@ -423,7 +462,7 @@ test('forged run metadata, empty PR arrays, and malformed artifact produce safe 
   const forged = fakeGithub();
   forged.state.runs[0].path = '.github/workflows/forged.yml';
   const rejectedRun = await publishWorkflowRun({ github: forged.github, workflowRun: eventFor(forged.state.runs[0]) });
-  assert.equal(rejectedRun.reason, 'workflow_run_mismatch');
+  assert.equal(rejectedRun.reason, 'untrusted_workflow');
   assert.equal(forged.state.mutations.length, 0);
 
   const safe = fakeGithub();
@@ -438,7 +477,7 @@ test('forged run metadata, empty PR arrays, and malformed artifact produce safe 
 test('authoritative correlation rejects mismatched dynamic name and event', async () => {
   for (const [alter, reason] of [
     [(run) => { run.name = 'Agent QA'; }, 'invalid_run_name'],
-    [(run) => { run.event = 'pull_request'; }, 'workflow_run_mismatch'],
+    [(run) => { run.event = 'pull_request'; }, 'untrusted_workflow'],
   ]) {
     const forged = fakeGithub();
     alter(forged.state.runs[0]);
@@ -493,13 +532,13 @@ test('workflow-run and artifact discovery cross page boundaries', async () => {
   state.runs = [
     ...Array.from({ length: 100 }, (_, index) => ({
       ...makeRun(1000 + index),
-      display_title: `Agent QA PR #${1000 + index} head ${'d'.repeat(40)}`,
+      display_title: `Copilot Agent QA PR #${1000 + index} head ${'d'.repeat(40)}`,
     })),
     run,
   ];
   const desiredArtifact = {
     id: 5000,
-    name: `agent-qa-42-${run.id}-${run.run_attempt}`,
+    name: `${PROFILE.artifactPrefix}-42-${run.id}-${run.run_attempt}`,
     expired: false,
     workflow_run: { id: run.id },
   };
@@ -518,6 +557,7 @@ test('workflow-run and artifact discovery cross page boundaries', async () => {
 test('rendered comments remain byte-bounded for multibyte model text', () => {
   const run = makeRun(100);
   const body = renderComment({
+    profile: PROFILE,
     identity: { prNumber: 42, headSha: 'a'.repeat(40) },
     run,
     status: 'findings',
@@ -549,6 +589,7 @@ test('a published report carries the scenario table so a reviewer sees what ran'
 
 test('only evidence URLs on this repository\'s evidence branch are rendered as images', () => {
   const body = renderComment({
+    profile: PROFILE,
     identity: { prNumber: 7, headSha: 'a'.repeat(40) },
     run: makeRun(500),
     status: 'no_findings',
@@ -556,20 +597,21 @@ test('only evidence URLs on this repository\'s evidence branch are rendered as i
     artifact: null,
     report: report(),
     evidenceFiles: [
-      { scenario_id: SCENARIOS[0], url: 'https://github.com/jayn2u/gods-eye/blob/agent-qa-evidence/pr-7/500-1/a.png?raw=true' },
+      { scenario_id: SCENARIOS[0], url: 'https://github.com/jayn2u/gods-eye/blob/copilot-agent-qa-evidence/pr-7/500-1/a.png?raw=true' },
       { scenario_id: 'attacker', url: 'https://evil.invalid/pixel.png' },
-      { scenario_id: 'wrong-repo', url: 'https://github.com/attacker/gods-eye/blob/agent-qa-evidence/x.png' },
+      { scenario_id: 'wrong-repo', url: 'https://github.com/attacker/gods-eye/blob/copilot-agent-qa-evidence/x.png' },
       { scenario_id: 'not-a-string', url: 42 },
     ],
   });
   assert.match(body, /Screenshots \(1\)/u);
-  assert.match(body, /!\[[a-z-]+\]\(https:\/\/github\.com\/jayn2u\/gods-eye\/blob\/agent-qa-evidence\//u);
+  assert.match(body, /!\[[a-z-]+\]\(https:\/\/github\.com\/jayn2u\/gods-eye\/blob\/copilot-agent-qa-evidence\//u);
   assert.doesNotMatch(body, /evil\.invalid/u);
   assert.doesNotMatch(body, /attacker\/gods-eye/u);
 });
 
 test('a report with no screenshots publishes a comment with no image section', () => {
   const body = renderComment({
+    profile: PROFILE,
     identity: { prNumber: 7, headSha: 'a'.repeat(40) },
     run: makeRun(501),
     status: 'incomplete',
@@ -588,6 +630,8 @@ test('evidence preparation returns only the accepted screenshots of the authorit
   const prepared = await prepareEvidencePublication({
     github, workflowRun: eventFor(FIXTURE.run),
   });
+  assert.equal(prepared.agent, PROFILE.agent);
+  assert.equal(prepared.branch, PROFILE.evidenceBranch);
   assert.equal(Number.isSafeInteger(prepared.prNumber) && prepared.prNumber > 0, true);
   assert.equal(prepared.runId, FIXTURE.run.id);
   assert.equal(prepared.runAttempt, FIXTURE.run.run_attempt);

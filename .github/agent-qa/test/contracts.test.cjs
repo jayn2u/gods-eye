@@ -140,6 +140,23 @@ function reportFixture(root) {
   };
 }
 
+test('a report must name the agent its request admitted', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'gods-eye-contract-agent-'));
+  try {
+    const request = requestFixture();
+    const report = reportFixture(root);
+    report.tools.agent.name = 'claude';
+    assert.throws(() => validateReport(report, request));
+    const schema = require('../report.schema.json');
+    assert.deepEqual(
+      schema.properties.tools.properties.agent.properties.name.enum,
+      [...require('../agents/profiles.cjs').AGENTS],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function expectContractError(label, code, operation) {
   assert.throws(operation, (error) => {
     assert.ok(error instanceof ContractError);

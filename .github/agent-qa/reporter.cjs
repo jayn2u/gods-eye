@@ -13,7 +13,6 @@ const {
 } = require('./contracts.cjs');
 const { renderScenarioTable } = require('./summary.cjs');
 const {
-  AGENT_QA_WORKFLOW_PATH,
   EXPECTED_REPOSITORY,
   admitPullRequest,
   findLatestGeneration,
@@ -23,10 +22,9 @@ const {
   parseWorkflowRunIdentity,
   recheckPullRequest,
 } = require('./controller.cjs');
+const { profileFor, profileForWorkflowPath } = require('./agents/profiles.cjs');
 
-const COMMENT_MARKER = '<!-- gods-eye-agent-qa:v1 -->';
 const BOT_LOGIN = 'github-actions[bot]';
-const WORKFLOW_PATH = AGENT_QA_WORKFLOW_PATH;
 const PAGE_SIZE = 100;
 const MAX_ENTRIES = 250;
 const MAX_COMMENT_BYTES = 60 * 1024;
@@ -266,10 +264,10 @@ function verifiedArtifactUrl(run, artifact) {
  * viewer who can already read the repository and to nobody else. A reader without that access sees
  * the alt text, which is why each image is also introduced by name.
  */
-function renderScreenshotSection(evidenceFiles) {
+function renderScreenshotSection(evidenceFiles, profile) {
   const files = (Array.isArray(evidenceFiles) ? evidenceFiles : [])
     .filter((file) => typeof file?.scenario_id === 'string' && typeof file?.url === 'string'
-      && file.url.startsWith(`https://github.com/${EXPECTED_REPOSITORY}/blob/`))
+      && file.url.startsWith(`https://github.com/${EXPECTED_REPOSITORY}/blob/${profile.evidenceBranch}/`))
     .slice(0, 12);
   if (files.length === 0) return null;
   const lines = [`<details><summary>Screenshots (${files.length})</summary>`, ''];
@@ -281,10 +279,10 @@ function renderScreenshotSection(evidenceFiles) {
   return lines.join('\n');
 }
 
-function renderComment({ identity, run, status, reason, report, artifact, notApplicableReason, evidenceFiles }) {
+function renderComment({ profile, identity, run, status, reason, report, artifact, notApplicableReason, evidenceFiles }) {
   const lines = [
-    COMMENT_MARKER,
-    '## Agent QA (advisory)',
+    profile.commentMarker,
+    `## ${profile.title}`,
     '',
     `**Status:** ${escapeText(notApplicableReason ? 'not_applicable' : status, 40)}`,
     `**Tested head:** \`${identity.headSha}\``,
@@ -312,9 +310,9 @@ function renderComment({ identity, run, status, reason, report, artifact, notApp
   // from the same validated report, so nothing here is the agent's unverified narration.
   const table = renderScenarioTable(report);
   if (table) lines.push('', table);
-  const images = renderScreenshotSection(evidenceFiles);
+  const images = renderScreenshotSection(evidenceFiles, profile);
   if (images) lines.push('', images);
-  lines.push('', '_Agent QA is advisory and does not establish identity or real-gallery quality._');
+  lines.push('', `_${profile.title.replace(' (advisory)', '')} is advisory and does not establish identity or real-gallery quality._`);
   let body = lines.join('\n');
   if (Buffer.byteLength(body) > MAX_COMMENT_BYTES) {
     const suffix = '\n\n_Details truncated to the publication limit._';
@@ -338,12 +336,20 @@ async function fetchAuthoritativeRun(github, eventRun, repository) {
   const run = response?.data;
   if (!run || run.id !== eventRun.id || run.run_attempt !== eventRun.run_attempt
       || run.repository?.full_name !== repository
-      || !isTrustedWorkflowPath(run.path) || run.event !== 'pull_request_target' || run.status !== 'completed') {
+      || run.event !== 'pull_request_target' || run.status !== 'completed') {
     throw new ReporterError('workflow_run_mismatch', 'authoritative run metadata does not match the trusted workflow');
   }
   const identity = parseWorkflowRunIdentity(run);
-  if (!identity) throw new ReporterError('invalid_run_name', 'trusted workflow run name is not correlated');
-  return { run, identity };
+  if (!identity) {
+    if (!profileForWorkflowPath(run.path)) {
+      throw new ReporterError('workflow_run_mismatch', 'authoritative run uses an untrusted workflow path');
+    }
+    throw new ReporterError('invalid_run_name', 'trusted workflow run name is not correlated');
+  }
+  if (!isTrustedWorkflowPath(run.path, identity.agent)) {
+    throw new ReporterError('workflow_run_mismatch', 'authoritative run uses an untrusted workflow path');
+  }
+  return { run, identity, profile: profileFor(identity.agent) };
 }
 
 async function listComments(github, pullNumber) {
@@ -358,17 +364,17 @@ async function listComments(github, pullNumber) {
   }
 }
 
-function findManagedComment(comments) {
+function findManagedComment(comments, profile) {
   const matches = comments.filter((comment) => comment?.user?.login === BOT_LOGIN
     && typeof comment.body === 'string'
-    && (comment.body === COMMENT_MARKER || comment.body.startsWith(`${COMMENT_MARKER}\n`)));
+    && (comment.body === profile.commentMarker || comment.body.startsWith(`${profile.commentMarker}\n`)));
   if (matches.length > 1) throw new ReporterError('duplicate_managed_comments', 'multiple managed comments found');
   return matches[0] || null;
 }
 
-async function listExactArtifact(github, run, identity) {
+async function listExactArtifact(github, run, identity, profile) {
   const { owner, repo } = splitRepository(EXPECTED_REPOSITORY);
-  const expectedName = `agent-qa-${identity.prNumber}-${run.id}-${run.run_attempt}`;
+  const expectedName = `${profile.artifactPrefix}-${identity.prNumber}-${run.id}-${run.run_attempt}`;
   const method = apiMethod(github, 'actions', 'listWorkflowRunArtifacts');
   const matches = [];
   for (let page = 1; ; page += 1) {
@@ -397,7 +403,8 @@ async function downloadArtifact(github, artifact) {
 }
 
 function expectedRequestFromReport(report, run, identity) {
-  if (report.request.repository !== EXPECTED_REPOSITORY
+  if (report.request.agent !== identity.agent
+      || report.request.repository !== EXPECTED_REPOSITORY
       || report.request.pr_number !== identity.prNumber
       || report.request.head.sha !== identity.headSha
       || report.request.run.id !== run.id
@@ -413,6 +420,7 @@ async function synthesizeCurrentRequest(github, run, identity) {
   return admitPullRequest({
     github,
     repository: EXPECTED_REPOSITORY,
+    agent: identity.agent,
     pullNumber: identity.prNumber,
     eventHeadSha: identity.headSha,
     controllerSha,
@@ -445,8 +453,8 @@ async function mutateComment(github, pullNumber, comment, body) {
  * there is nothing safe to publish; that is a normal outcome and never fails the report.
  */
 async function prepareEvidencePublication({ github, workflowRun, repository = EXPECTED_REPOSITORY }) {
-  const { run, identity } = await fetchAuthoritativeRun(github, workflowRun, repository);
-  const artifact = await listExactArtifact(github, run, identity);
+  const { run, identity, profile } = await fetchAuthoritativeRun(github, workflowRun, repository);
+  const artifact = await listExactArtifact(github, run, identity, profile);
   if (!artifact) return null;
   const inspected = inspectArtifactZip(await downloadArtifact(github, artifact));
   expectedRequestFromReport(inspected.report, run, identity);
@@ -461,6 +469,8 @@ async function prepareEvidencePublication({ github, workflowRun, repository = EX
   }
   if (screenshots.length === 0) return null;
   return Object.freeze({
+    agent: identity.agent,
+    branch: profile.evidenceBranch,
     prNumber: identity.prNumber,
     runId: run.id,
     runAttempt: run.run_attempt,
@@ -475,15 +485,18 @@ async function publishWorkflowRun({
   try {
     authoritative = await fetchAuthoritativeRun(github, workflowRun, repository);
   } catch (error) {
+    if (error instanceof ReporterError && error.code === 'workflow_run_mismatch') {
+      return result('skipped', 'untrusted_workflow');
+    }
     return result('incomplete', error instanceof ReporterError ? error.code : 'run_lookup_failed');
   }
-  const { run, identity } = authoritative;
+  const { run, identity, profile } = authoritative;
   const safeIdentity = { prNumber: identity.prNumber, headSha: identity.headSha };
   const currentGeneration = { id: run.id, run_attempt: run.run_attempt };
 
   try {
     const initialLatest = await findLatestGeneration({
-      github, prNumber: identity.prNumber, headSha: identity.headSha,
+      github, agent: identity.agent, prNumber: identity.prNumber, headSha: identity.headSha,
     });
     if (!isLatestGeneration(currentGeneration, initialLatest)) {
       return result('stale', 'superseded_generation', { prNumber: identity.prNumber });
@@ -497,7 +510,7 @@ async function publishWorkflowRun({
   let publicationStatus;
   let publicationReason;
   try {
-    artifact = await listExactArtifact(github, run, identity);
+    artifact = await listExactArtifact(github, run, identity, profile);
     if (artifact) {
       const archive = await downloadArtifact(github, artifact);
       const inspected = inspectArtifactZip(archive);
@@ -524,7 +537,7 @@ async function publishWorkflowRun({
   let managedComment;
   try {
     comments = await listComments(github, identity.prNumber);
-    managedComment = findManagedComment(comments);
+    managedComment = findManagedComment(comments, profile);
   } catch (error) {
     return result('incomplete', error instanceof ReporterError ? error.code : 'comments_lookup_failed', {
       prNumber: identity.prNumber,
@@ -545,7 +558,7 @@ async function publishWorkflowRun({
 
   try {
     const latest = await findLatestGeneration({
-      github, prNumber: identity.prNumber, headSha: identity.headSha,
+      github, agent: identity.agent, prNumber: identity.prNumber, headSha: identity.headSha,
     });
     if (!isLatestGeneration(currentGeneration, latest)) {
       return result('stale', 'superseded_generation', { prNumber: identity.prNumber });
@@ -559,6 +572,7 @@ async function publishWorkflowRun({
       return result('skipped', 'ineligible_no_existing_comment', { prNumber: identity.prNumber });
     }
     const body = renderComment({
+      profile,
       identity: safeIdentity, run, status: publicationStatus, reason: publicationReason,
       report, artifact: null, notApplicableReason: eligibility.reason,
     });
@@ -574,6 +588,7 @@ async function publishWorkflowRun({
   }
 
   const body = renderComment({
+    profile,
     identity: safeIdentity, run, status: publicationStatus, reason: publicationReason, report, artifact,
     evidenceFiles,
   });
@@ -590,11 +605,10 @@ async function publishWorkflowRun({
 
 module.exports = Object.freeze({
   BOT_LOGIN,
-  COMMENT_MARKER,
   MAX_COMMENT_BYTES,
   ReporterError,
-  WORKFLOW_PATH,
   escapeText,
+  findManagedComment,
   inspectArtifactZip,
   parseRunName,
   parseWorkflowRunIdentity,
