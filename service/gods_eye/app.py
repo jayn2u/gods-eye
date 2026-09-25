@@ -10,11 +10,18 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
+from .benchmark import BenchmarkQuery
 from .clip_models import DEFAULT_MODEL_ID
 from .config import get_settings
 from .index_store import load_active
 from .model_runtime import FixtureModelRuntime, ModelRuntimeManager, ModelUnavailableError
 from .models import (
+    BenchmarkProtocol,
+    BenchmarkQueriesResponse,
+    BenchmarkQueryItem,
+    BenchmarkResponse,
+    BenchmarkSearchRequest,
+    BenchmarkSearchResponse,
     Dataset,
     ModelAvailability,
     ModelCatalogResponse,
@@ -41,6 +48,14 @@ class ModelRuntime(Protocol):
     ) -> SearchExecution: ...
 
     def resolve_image(self, stable_id: str) -> Path | None: ...
+
+    def benchmark(self) -> BenchmarkResponse: ...
+
+    def benchmark_queries(self) -> tuple[BenchmarkQuery, ...]: ...
+
+    def benchmark_search(
+        self, model_id: str, query_id: str, top_k: int
+    ) -> BenchmarkSearchResponse: ...
 
     def close(self) -> None: ...
 
@@ -69,6 +84,7 @@ def _configured_runtime() -> ModelRuntime:
         settings.dataset_root,
         settings.hf_cache,
         device=settings.device,
+        resident_models=settings.resident_models,
     )
 
 
@@ -125,6 +141,16 @@ class _RetrievalRuntimeAdapter:
         if isinstance(engine, (ManifestRetrievalEngine, IndexedRetrievalEngine)):
             return engine.manifest.resolve(stable_id)
         return None
+
+    def benchmark(self) -> BenchmarkResponse:
+        return BenchmarkResponse(protocol=BenchmarkProtocol(), models=[])
+
+    def benchmark_queries(self) -> tuple[BenchmarkQuery, ...]:
+        return ()
+
+    def benchmark_search(self, model_id: str, query_id: str, top_k: int) -> BenchmarkSearchResponse:
+        del model_id, top_k
+        raise KeyError(query_id)
 
     def close(self) -> None:
         pass
@@ -186,6 +212,11 @@ def model_catalog(runtime: ModelRuntime = Depends(get_model_runtime)) -> ModelCa
                 active_index_version=entry.active_index_version,
                 gallery_count=entry.gallery_count,
                 guidance=entry.guidance,
+                group=entry.group,
+                paired_baseline_id=entry.paired_baseline_id,
+                verified=entry.verified,
+                registered_at=entry.registered_at,
+                evaluation_ready=entry.evaluation_ready,
             )
             for entry in runtime.catalog()
         )
@@ -219,14 +250,16 @@ def search(
     availability = (
         catalog[0]
         if isinstance(runtime, _RetrievalRuntimeAdapter)
-        else next(entry for entry in catalog if entry.model_id == request.model_id)
+        else next((entry for entry in catalog if entry.model_id == request.model_id), None)
     )
+    index_version = availability.active_index_version if availability is not None else None
+    gallery_count = availability.gallery_count if availability is not None else None
     telemetry = {
         "top_k": request.top_k,
         "datasets": request.datasets,
         "model_id": request.model_id,
-        "index_version": availability.active_index_version or "unavailable",
-        "gallery_count": availability.gallery_count or 0,
+        "index_version": index_version or "unavailable",
+        "gallery_count": gallery_count or 0,
     }
     try:
         execution = runtime.search(request.model_id, request.query, request.top_k, request.datasets)
@@ -269,6 +302,59 @@ def search(
         active_index_version=execution.active_index_version,
         results=list(execution.results),
     )
+
+
+@app.get("/api/benchmark", response_model=BenchmarkResponse)
+def benchmark(runtime: ModelRuntime = Depends(get_model_runtime)) -> BenchmarkResponse:  # noqa: B008
+    return runtime.benchmark()
+
+
+@app.get("/api/benchmark/queries", response_model=BenchmarkQueriesResponse)
+def benchmark_queries(
+    runtime: ModelRuntime = Depends(get_model_runtime),  # noqa: B008
+) -> BenchmarkQueriesResponse:
+    return BenchmarkQueriesResponse(
+        queries=[
+            BenchmarkQueryItem(id=query.id, caption=query.caption)
+            for query in runtime.benchmark_queries()
+        ]
+    )
+
+
+@app.post("/api/benchmark/search", response_model=BenchmarkSearchResponse)
+def benchmark_search(
+    request: BenchmarkSearchRequest,
+    runtime: ModelRuntime = Depends(get_model_runtime),  # noqa: B008
+) -> BenchmarkSearchResponse:
+    started = time.perf_counter()
+    try:
+        response = runtime.benchmark_search(request.model_id, request.query_id, request.top_k)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Benchmark Query not found.") from exc
+    except ModelUnavailableError as exc:
+        if not exc.prepared:
+            detail = (
+                f"Model '{exc.model_id}' is not prepared. "
+                f"Run './gods-eye prepare --model-id {exc.model_id}'."
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Model '{exc.model_id}' is unavailable from the prepared local cache. "
+                "Verify Demo Preparation and try again."
+            ),
+        ) from exc
+    _log(
+        "benchmark_search_completed",
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+        result_count=len(response.results),
+        model_id=response.model_id,
+        index_version=response.active_index_version,
+        top_k=request.top_k,
+        first_match_rank=response.first_match_rank,
+    )
+    return response
 
 
 _COLORS = {"sky": "#91d8ff", "violet": "#b7a8ff", "mint": "#8fe3c2"}
