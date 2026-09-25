@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -17,6 +18,8 @@ class RetrievalEngine(Protocol):
 class TextEmbedder(Protocol):
     def embed_text(self, text: str) -> np.ndarray: ...
 
+    def embed_texts(self, texts: Sequence[str], batch_size: int = 256) -> np.ndarray: ...
+
 
 class RuntimeEmbedder(TextEmbedder, Protocol):
     def close(self) -> None: ...
@@ -31,6 +34,7 @@ class EmbedderFactory(Protocol):
         device: str,
         offline: bool,
         cache_dir: Path | None,
+        text_only: bool = False,
     ) -> RuntimeEmbedder: ...
 
 

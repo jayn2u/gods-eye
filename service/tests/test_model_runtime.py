@@ -74,8 +74,10 @@ class FakeFactory:
         device: str,
         offline: bool,
         cache_dir: Path | None,
+        text_only: bool = False,
     ) -> FakeEmbedder:
         del device
+        del text_only
         self.tracker.calls.append((model_id, revision, offline, cache_dir))
         if model_id == self.tracker.fail_model_id:
             raise OSError("synthetic local checkpoint failure")
