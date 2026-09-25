@@ -85,9 +85,15 @@ RESET_PATHS = {
     "archives": Path("data/archives"),
 }
 RESET_INVALIDATION = {
-    "index": {"index", "smoke_test"},
-    "model_cache": {"model", "index", "smoke_test"},
-    "installed_datasets": {"dataset_acquisition", "gallery_manifest", "index", "smoke_test"},
+    "index": {"index", "benchmark_queries", "evaluation", "smoke_test"},
+    "model_cache": {"model", "index", "evaluation", "smoke_test"},
+    "installed_datasets": {
+        "dataset_acquisition",
+        "gallery_manifest",
+        "index",
+        "evaluation",
+        "smoke_test",
+    },
     "archives": set(),
 }
 
@@ -152,12 +158,25 @@ def reset_assets(
 
 COMPATIBILITY_INVALIDATION = {
     "application": set(),
-    "registry": {"dataset_acquisition", "gallery_manifest", "index", "smoke_test"},
-    "model": {"model", "index", "smoke_test"},
-    "manifest_schema": {"gallery_manifest", "index", "smoke_test"},
-    "index_schema": {"index", "smoke_test"},
+    "registry": {
+        "dataset_acquisition",
+        "gallery_manifest",
+        "index",
+        "evaluation",
+        "smoke_test",
+    },
+    "model": {"model", "index", "evaluation", "smoke_test"},
+    "manifest_schema": {"gallery_manifest", "index", "evaluation", "smoke_test"},
+    "index_schema": {"index", "evaluation", "smoke_test"},
 }
-STAGE_ORDER = ["dataset_acquisition", "model", "gallery_manifest", "index", "smoke_test"]
+STAGE_ORDER = [
+    "dataset_acquisition",
+    "model",
+    "gallery_manifest",
+    "index",
+    "evaluation",
+    "smoke_test",
+]
 
 
 def compatibility_plan(state: dict) -> tuple[dict[str, str], list[str], list[str]]:

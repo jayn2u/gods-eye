@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -17,6 +18,8 @@ class RetrievalEngine(Protocol):
 class TextEmbedder(Protocol):
     def embed_text(self, text: str) -> np.ndarray: ...
 
+    def embed_texts(self, texts: Sequence[str], batch_size: int = 256) -> np.ndarray: ...
+
 
 class RuntimeEmbedder(TextEmbedder, Protocol):
     def close(self) -> None: ...
@@ -31,6 +34,7 @@ class EmbedderFactory(Protocol):
         device: str,
         offline: bool,
         cache_dir: Path | None,
+        text_only: bool = False,
     ) -> RuntimeEmbedder: ...
 
 
@@ -51,6 +55,11 @@ class RuntimeModelAvailability:
     gallery_count: int | None
     guidance: str | None
     legacy_revision_unresolved: bool = False
+    group: str = "reference"
+    paired_baseline_id: str | None = None
+    verified: bool = True
+    registered_at: str | None = None
+    evaluation_ready: bool = False
 
 
 class RetrievalUnavailableError(RuntimeError):
@@ -132,14 +141,7 @@ class IndexedRetrievalEngine:
         self.text_embedder = text_embedder
 
     def search(self, query: str, top_k: int, datasets: list[Dataset]) -> list[SearchResult]:
-        vector = (
-            self.text_embedder.embed_text(query)
-            if self.text_embedder is not None
-            else deterministic_embedding(query, self.loaded.metadata.dimension)
-        )
-        scores, rows = self.loaded.index.search(
-            np.asarray(vector, dtype=np.float32), self.gallery_count
-        )
+        scores, rows = self.rank_all(query)
         selected = []
         for score, row in zip(scores, rows, strict=True):
             if int(row) < 0:
@@ -161,3 +163,11 @@ class IndexedRetrievalEngine:
             )
             for rank, (score, record, provenance) in enumerate(selected, 1)
         ]
+
+    def rank_all(self, query: str) -> tuple[np.ndarray, np.ndarray]:
+        vector = (
+            self.text_embedder.embed_text(query)
+            if self.text_embedder is not None
+            else deterministic_embedding(query, self.loaded.metadata.dimension)
+        )
+        return self.loaded.index.search(np.asarray(vector, dtype=np.float32), self.gallery_count)

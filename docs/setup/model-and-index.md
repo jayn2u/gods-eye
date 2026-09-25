@@ -1,5 +1,9 @@
 # Model preparation and index management
 
+For lab_clip checkpoint import and model comparison, see [Fine-tuned checkpoints and model
+comparison](fine-tuned-checkpoints.md). A Fine-tuned Checkpoint and its Paired Baseline must pass
+Stage 7, benchmark evaluation, before Stage 8, the real-search smoke test.
+
 Demo Preparation defaults to `openai/clip-vit-base-patch16`. Prepare another supported model
 explicitly, or repeat the option to prepare several sequentially:
 

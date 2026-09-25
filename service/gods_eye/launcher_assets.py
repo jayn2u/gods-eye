@@ -50,7 +50,7 @@ def _print_dataset_terms(registry: dict[str, object]) -> None:
 
 def _stage(number: int, label: str, started: float, estimate: str) -> None:
     print(
-        f"Stage {number}/7 — {label} (elapsed {time.monotonic() - started:.1f}s; estimated {estimate})"
+        f"Stage {number}/8 — {label} (elapsed {time.monotonic() - started:.1f}s; estimated {estimate})"
     )
 
 
@@ -87,7 +87,13 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
     compatible = all(saved.get(key) == value for key, value in expected.items())
     if saved and not compatible:
         preparation = state.setdefault("preparation", {})
-        for stage in ("dataset_acquisition", "gallery_manifest", "index", "smoke_test"):
+        for stage in (
+            "dataset_acquisition",
+            "gallery_manifest",
+            "index",
+            "evaluation",
+            "smoke_test",
+        ):
             preparation.pop(stage, None)
         layout.write_state(state)
     if compatible:
@@ -126,7 +132,7 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
         if build.returncode != 0:
             log_path = _preparation_log_path(layout)
             log_path.write_text(
-                "Stage 3/7 — Dataset Acquisition service image build\n"
+                "Stage 3/8 — Dataset Acquisition service image build\n"
                 + f"Command: {_safe_log_output(shlex.join(build_command))}\n"
                 + _safe_log_output(build.stdout)
                 + _safe_log_output(build.stderr)
@@ -158,7 +164,7 @@ def prepare_datasets(layout: RuntimeLayout, *, accept_data_terms: bool, assume_y
     )
     log_path = _preparation_log_path(layout)
     log_path.write_text(
-        "Stage 3/7 — Dataset Acquisition\n"
+        "Stage 3/8 — Dataset Acquisition\n"
         + _safe_log_output(result.stdout)
         + _safe_log_output(result.stderr)
         + (

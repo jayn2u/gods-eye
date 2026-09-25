@@ -113,7 +113,10 @@ def evaluate(
 ) -> dict[str, Any]:
     manifest = GalleryManifest.read(manifest_path)
     report: dict[str, Any] = {
-        "scope": "qualitative research acceptance; not biometric identification or benchmark accuracy",
+        "scope": (
+            "qualitative research acceptance; benchmark metrics are reported separately by "
+            "Benchmark Evaluation and are not biometric identification accuracy"
+        ),
         "hardware": {"platform": platform.platform(), "processor": platform.processor()},
         "coverage": coverage(manifest),
         "index": {"status": "not supplied"},

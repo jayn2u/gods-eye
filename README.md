@@ -35,6 +35,14 @@ so the split appears on the detail view rather than on each result card.
 
 ![Synthetic light-mode image detail showing the fixture model and index provenance, fixture portrait, and image metadata](docs/images/search-detail.png)
 
+The web app has three modes: **Search** retrieves images for a description, **Compare** runs one query
+against two prepared models, and **Benchmark** presents retrieval metrics and provenance. The
+Benchmark protocol line is `CUHK-PEDES test split · text→image · person-ID ground truth · computed
+from God's Eye's active index`. R@k is the share of queries with a correct-person result in the top
+*k*, while mAP and mINP summarize ranked matches. Dataset captions are exposed to the app only
+through the fixed 48 **Benchmark Queries**. To import a lab_clip checkpoint and compare it with its
+Paired Baseline, see [Fine-tuned checkpoints and model comparison](docs/setup/fine-tuned-checkpoints.md).
+
 To run the app yourself, follow the [Quickstart](#quickstart). For a dataset-free fixture setup,
 see [Local development and tests](docs/setup/local-development.md).
 
@@ -100,11 +108,11 @@ supported.
 
 ## What preparation does
 
-`./gods-eye prepare` verifies and resumes seven stages: preflight, terms acknowledgement, Dataset
+`./gods-eye prepare` verifies and resumes eight stages: preflight, terms acknowledgement, Dataset
 Acquisition, CLIP model preparation, Gallery Manifest generation, GPU index build and atomic
-activation, and a real-search smoke test. It records compatible completed stages and detailed logs
-under the gitignored `.gods-eye/` directory. It does not report the Full Demo as prepared unless the
-final search succeeds.
+activation, benchmark evaluation, and a real-search smoke test. It records compatible completed
+stages and detailed logs under the gitignored `.gods-eye/` directory. It does not report the Full
+Demo as prepared unless the final search succeeds.
 
 Development checkouts build the service and web images from local source. Tagged releases can use
 the repository's immutable `release-images.env`; the Launcher always reports which mode it chose.

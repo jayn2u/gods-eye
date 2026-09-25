@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     hf_cache: Path | None = None
     offline: bool = False
     device: str = "auto"
+    resident_models: int = Field(default=4, ge=1)
     batch_size: int = 32
     bind_host: str = "127.0.0.1"
     bind_port: int = 8000

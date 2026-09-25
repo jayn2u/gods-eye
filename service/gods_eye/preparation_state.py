@@ -5,10 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Final, TypeAlias
 
-from .clip_models import DEFAULT_MODEL_ID, get_clip_model
+from .clip_models import DEFAULT_MODEL_ID, UnsupportedClipModelError, is_known_model_id_shape
 
 STATE_SCHEMA_VERSION: Final = 2
-MODEL_STAGES: Final = ("model", "index", "smoke_test")
+MODEL_STAGES: Final = ("model", "index", "evaluation", "smoke_test")
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 StateDictionary: TypeAlias = dict[str, JsonValue]
 
@@ -32,7 +32,7 @@ def normalize_preparation_state(state: dict) -> StateDictionary:
 
 def model_preparation(preparation: dict, model_id: str) -> StateDictionary:
     """Return one supported model's canonical preparation record, if present."""
-    get_clip_model(model_id)
+    _validate_model_id_shape(model_id)
     models = preparation.get("models", {})
     record = models.get(model_id, {})
     return record if isinstance(record, dict) else {}
@@ -40,7 +40,7 @@ def model_preparation(preparation: dict, model_id: str) -> StateDictionary:
 
 def ensure_model_preparation(preparation: dict, model_id: str) -> StateDictionary:
     """Return a mutable canonical record for one supported model."""
-    get_clip_model(model_id)
+    _validate_model_id_shape(model_id)
     models = preparation.setdefault("models", {})
     return models.setdefault(model_id, {})
 
@@ -63,3 +63,8 @@ def _normalize_legacy_stage(stage: str, value: dict) -> StateDictionary:
     if revision is None:
         normalized["legacy_revision_unresolved"] = True
     return normalized
+
+
+def _validate_model_id_shape(model_id: str) -> None:
+    if not is_known_model_id_shape(model_id):
+        raise UnsupportedClipModelError(model_id)

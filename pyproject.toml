@@ -15,6 +15,9 @@ dependencies = [
 [project.optional-dependencies]
 indexing = ["faiss-cpu>=1.9,<2"]
 clip = [
+  "huggingface-hub>=0.25",
+  "open-clip-torch==3.3.0",
+  "safetensors>=0.4",
   "torch>=2.4,<3",
   "transformers>=4.45,<5",
 ]

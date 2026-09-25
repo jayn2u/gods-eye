@@ -38,6 +38,8 @@ with log.open("a") as stream:
         line = " ".join(args)
         if args[:2] == ["image", "inspect"]:
             line += " fingerprint=" + os.environ.get("GODS_EYE_SOURCE_FINGERPRINT", "")
+        if os.getenv("GODS_EYE_FAKE_LOG_HOST_ROOT") == "1":
+            line += " host-root=" + os.environ.get("GODS_EYE_HOST_PROJECT_ROOT", "")
         stream.write(line + "\\n")
     else:
         stream.write(json.dumps({
@@ -205,7 +207,71 @@ def _run(
         capture_output=True,
         check=False,
     )
-    return result, log.read_text().splitlines()
+    return result, log.read_text().splitlines() if log.exists() else []
+
+
+def _copy_root_launcher(project_root: Path) -> None:
+    shutil.copy2(ROOT / "gods-eye", project_root / "gods-eye")
+    helper_directory = project_root / "scripts"
+    helper_directory.mkdir()
+    shutil.copy2(ROOT / "scripts" / "launcher-args.sh", helper_directory / "launcher-args.sh")
+
+
+def test_root_launcher_preserves_logical_project_root_for_symlinked_checkout(tmp_path: Path) -> None:
+    target_root = tmp_path / "physical-checkout"
+    target_root.mkdir()
+    _copy_root_launcher(target_root)
+    logical_root = tmp_path / "linked-checkout"
+    logical_root.symlink_to(target_root, target_is_directory=True)
+    bin_dir, log = _fake_docker(tmp_path)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PYTHONPATH": str(ROOT / "service"),
+        "GODS_EYE_FAKE_DOCKER_LOG": str(log),
+        "GODS_EYE_FAKE_LOG_HOST_ROOT": "1",
+    }
+
+    result = subprocess.run(
+        [str(logical_root / "gods-eye"), "doctor", "--help"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"host-root={logical_root}" in log.read_text()
+
+
+def _rewrite_import_args(
+    helper_root: Path, project_root: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    script = """
+. "$1"
+project_root=$2
+shift 2
+gods_eye_rewrite_import_args "$project_root" "$@"
+status=$?
+[ "$status" -eq 0 ] || exit "$status"
+eval "set -- $GODS_EYE_IMPORT_VOLUME_ARGS 'launcher' $GODS_EYE_REWRITTEN_ARGS"
+printf '%s\\n' "$@"
+"""
+    return subprocess.run(
+        [
+            "sh",
+            "-c",
+            script,
+            "sh",
+            str(helper_root / "scripts" / "launcher-args.sh"),
+            str(project_root),
+            *args,
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 @pytest.mark.parametrize("command", ["prepare", "start"])
@@ -267,10 +333,109 @@ def test_root_launcher_stops_when_compose_plugin_cannot_be_mounted(tmp_path: Pat
     assert not any("build launcher" in call or "run --rm launcher" in call for call in calls)
 
 
+def test_launcher_import_argument_rewrite_maps_project_and_external_files(tmp_path: Path) -> None:
+    project_root = tmp_path / "checkout with spaces"
+    project_root.mkdir()
+    internal = project_root / "checkpoint 'weights'.pt"
+    internal.write_bytes(b"checkpoint")
+    external_root = tmp_path / "external assets"
+    external_root.mkdir()
+    external = external_root / "reference 'metrics'.json"
+    external.write_text("{}")
+
+    result = _rewrite_import_args(
+        ROOT,
+        project_root,
+        "prepare",
+        "--checkpoint",
+        str(internal),
+        f"--checkpoint={external}",
+        "--reference-metrics",
+        str(external),
+        f"--reference-metrics={external}",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "-v",
+        f"{external_root}:/import/1:ro",
+        "-v",
+        f"{external_root}:/import/2:ro",
+        "-v",
+        f"{external_root}:/import/3:ro",
+        "launcher",
+        "prepare",
+        "--checkpoint",
+        "/workspace/checkpoint 'weights'.pt",
+        f"--checkpoint=/import/1/{external.name}",
+        "--reference-metrics",
+        f"/import/2/{external.name}",
+        f"--reference-metrics=/import/3/{external.name}",
+    ]
+
+
+def test_launcher_import_argument_rewrite_rejects_missing_files(tmp_path: Path) -> None:
+    project_root = tmp_path / "checkout"
+    project_root.mkdir()
+    missing = project_root / "missing.pt"
+
+    result = _rewrite_import_args(ROOT, project_root, "prepare", "--checkpoint", str(missing))
+
+    assert result.returncode == 2
+    assert "does not exist" in result.stderr
+
+
+@pytest.mark.parametrize("image_mode", ["development", "release"])
+def test_root_launcher_passes_rewritten_checkpoint_mounts_in_both_image_modes(
+    tmp_path: Path, image_mode: str
+) -> None:
+    external = tmp_path / "reference.json"
+    external.write_text("{}")
+    overrides = {}
+    if image_mode == "release":
+        manifest = tmp_path / "release-images.env"
+        manifest.write_text(
+            "GODS_EYE_RELEASE_VERSION=v1.2.3\n"
+            "GODS_EYE_SERVICE_IMAGE=ghcr.io/jayn2u/gods-eye-service@sha256:" + "a" * 64 + "\n"
+            "GODS_EYE_WEB_IMAGE=ghcr.io/jayn2u/gods-eye-web@sha256:" + "b" * 64 + "\n"
+        )
+        overrides["GODS_EYE_RELEASE_MANIFEST"] = str(manifest)
+
+    result, calls = _run(
+        tmp_path,
+        "prepare",
+        "--checkpoint",
+        str(ROOT / "README.md"),
+        f"--reference-metrics={external}",
+        "--help",
+        **overrides,
+    )
+
+    assert result.returncode == 0, result.stderr
+    run = next(call for call in calls if "run --rm" in call)
+    assert f"-v {external.parent}:/import/1:ro" in run
+    assert "--checkpoint /workspace/README.md" in run
+    assert "--reference-metrics=/import/1/reference.json" in run
+    if image_mode == "release":
+        assert "compose.release.yaml" in run
+    else:
+        assert any(call.endswith("--profile tools build launcher") for call in calls)
+
+
+def test_root_launcher_fails_before_docker_for_missing_import_file(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.pt"
+
+    result, calls = _run(tmp_path, "prepare", "--checkpoint", str(missing))
+
+    assert result.returncode == 2
+    assert "does not exist" in result.stderr
+    assert calls == []
+
+
 def test_root_launcher_reuses_prepared_assets_from_actual_checkout_root(tmp_path: Path) -> None:
     host_root = tmp_path / "checkout with spaces"
     host_root.mkdir()
-    shutil.copy2(ROOT / "gods-eye", host_root / "gods-eye")
+    _copy_root_launcher(host_root)
     workspace_root = tmp_path / "launcher-workspace"
     workspace_root.mkdir()
 
@@ -325,7 +490,7 @@ def test_root_launcher_reuses_one_runtime_contract_across_lifecycle_commands(
 ) -> None:
     host_root = tmp_path / "checkout with spaces"
     host_root.mkdir()
-    shutil.copy2(ROOT / "gods-eye", host_root / "gods-eye")
+    _copy_root_launcher(host_root)
     workspace_root = tmp_path / "launcher-workspace"
     workspace_root.mkdir()
 

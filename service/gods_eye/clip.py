@@ -40,6 +40,7 @@ class HuggingFaceClipEmbedder:
         device: str = "auto",
         offline: bool = False,
         cache_dir: Path | None = None,
+        text_only: bool = False,
     ):
         try:
             import torch
@@ -52,6 +53,7 @@ class HuggingFaceClipEmbedder:
         self.model_id = model_id
         self.revision = revision
         self.device = resolve_device(device)
+        self.text_only = text_only
         options = {
             "revision": revision,
             "local_files_only": offline,
@@ -68,6 +70,11 @@ class HuggingFaceClipEmbedder:
                 "Run once online to prepare the cache, or correct GODS_EYE_HF_CACHE."
             ) from exc
         self.dimension = int(self.model.config.projection_dim)
+        if text_only:
+            self.model.vision_model = None
+            self.model.visual_projection = None
+            if self.device.startswith("cuda"):
+                self.torch.cuda.empty_cache()
         self._closed = False
 
     @classmethod
@@ -85,13 +92,32 @@ class HuggingFaceClipEmbedder:
         return np.ascontiguousarray(features.detach().cpu().float().numpy(), dtype=np.float32)
 
     def embed_text(self, text: str) -> np.ndarray:
-        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True)
-        inputs = {key: value.to(self.device) for key, value in inputs.items()}
-        with self.torch.inference_mode():
-            features = self.model.get_text_features(**inputs)
-        return self._normalized(features)[0]
+        return self.embed_texts([text])[0]
+
+    def embed_texts(self, texts: Sequence[str], batch_size: int = 256) -> np.ndarray:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if not texts:
+            return np.empty((0, self.dimension), dtype=np.float32)
+        vectors = []
+        for start in range(0, len(texts), batch_size):
+            inputs = self.processor(
+                text=list(texts[start : start + batch_size]),
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+            )
+            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            with self.torch.inference_mode():
+                features = self.model.get_text_features(**inputs)
+            vectors.append(self._normalized(features))
+        return np.ascontiguousarray(np.concatenate(vectors), dtype=np.float32)
 
     def embed_images(self, images: Sequence[Image.Image]) -> np.ndarray:
+        if self.text_only:
+            raise ClipLoadError("Image embeddings are unavailable for a text-only CLIP embedder.")
+        if not images:
+            return np.empty((0, self.dimension), dtype=np.float32)
         inputs = self.processor(images=list(images), return_tensors="pt")
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         with self.torch.inference_mode():

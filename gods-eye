@@ -2,12 +2,20 @@
 
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/scripts/launcher-args.sh"
+if gods_eye_rewrite_import_args "$SCRIPT_DIR" "$@"; then
+    :
+else
+    exit 2
+fi
+eval "set -- $GODS_EYE_IMPORT_VOLUME_ARGS 'launcher' $GODS_EYE_REWRITTEN_ARGS"
+
 if ! command -v docker >/dev/null 2>&1; then
     printf '%s\n' "God's Eye requires Docker Engine. Install Docker, then run './gods-eye doctor' again." >&2
     exit 2
 fi
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export GODS_EYE_HOST_PROJECT_ROOT="$SCRIPT_DIR"
 export GODS_EYE_DOCKER_BIN
 GODS_EYE_DOCKER_BIN=$(command -v docker)
@@ -46,7 +54,7 @@ if [ -f "$release_manifest" ]; then
         --project-directory "$SCRIPT_DIR" \
         -f "$SCRIPT_DIR/compose.yaml" \
         -f "$SCRIPT_DIR/compose.release.yaml" \
-        --profile tools run --rm launcher "$@"
+        --profile tools run --rm "$@"
 fi
 
 export GODS_EYE_IMAGE_MODE=local
@@ -100,4 +108,4 @@ if [ -n "$build_reason" ]; then
         exit "$build_status"
     fi
 fi
-exec docker compose --project-directory "$SCRIPT_DIR" --profile tools run --rm launcher "$@"
+exec docker compose --project-directory "$SCRIPT_DIR" --profile tools run --rm "$@"

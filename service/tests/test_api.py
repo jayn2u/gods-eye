@@ -133,6 +133,17 @@ def test_unknown_model_is_rejected_before_runtime_search() -> None:
     assert response.status_code == 422
 
 
+def test_well_formed_unregistered_checkpoint_model_returns_conflict() -> None:
+    with use_model_runtime(FixtureModelRuntime()):
+        response = client.post(
+            "/api/search",
+            json={"query": "coat", "model_id": "labclip:cuhk-pedes:ffffffffffff"},
+        )
+
+    assert response.status_code == 409
+    assert "labclip:cuhk-pedes:ffffffffffff" in response.json()["detail"]
+
+
 class _ImageRuntime(FixtureModelRuntime):
     def __init__(self, image: Path) -> None:
         super().__init__()

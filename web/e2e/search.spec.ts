@@ -10,10 +10,10 @@ const modelIds = {
 const modelCatalog = (lastReady = true) => ({
   default_model_id: modelIds.b16,
   models: [
-    {model_id:modelIds.b32,label:'ViT-B/32',ready:true,active_index_version:'fixture-clip-vit-b-32-v1',gallery_count:1,guidance:null},
-    {model_id:modelIds.b16,label:'ViT-B/16',ready:true,active_index_version:'fixture-clip-vit-b-16-v1',gallery_count:1,guidance:null},
-    {model_id:modelIds.l14,label:'ViT-L/14',ready:true,active_index_version:'fixture-clip-vit-l-14-v1',gallery_count:1,guidance:null},
-    {model_id:modelIds.l14336,label:'ViT-L/14@336px',ready:lastReady,active_index_version:lastReady?'fixture-clip-vit-l-14-336-v1':null,gallery_count:lastReady?1:null,guidance:lastReady?null:`Model '${modelIds.l14336}' is not prepared. Run './gods-eye prepare --model-id ${modelIds.l14336}'.`},
+    {model_id:modelIds.b32,label:'ViT-B/32',ready:true,active_index_version:'fixture-clip-vit-b-32-v1',gallery_count:1,guidance:null,group:'reference',paired_baseline_id:null,verified:true,registered_at:null,evaluation_ready:false},
+    {model_id:modelIds.b16,label:'ViT-B/16',ready:true,active_index_version:'fixture-clip-vit-b-16-v1',gallery_count:1,guidance:null,group:'reference',paired_baseline_id:null,verified:true,registered_at:null,evaluation_ready:false},
+    {model_id:modelIds.l14,label:'ViT-L/14',ready:true,active_index_version:'fixture-clip-vit-l-14-v1',gallery_count:1,guidance:null,group:'reference',paired_baseline_id:null,verified:true,registered_at:null,evaluation_ready:false},
+    {model_id:modelIds.l14336,label:'ViT-L/14@336px',ready:lastReady,active_index_version:lastReady?'fixture-clip-vit-l-14-336-v1':null,gallery_count:lastReady?1:null,guidance:lastReady?null:`Model '${modelIds.l14336}' is not prepared. Run './gods-eye prepare --model-id ${modelIds.l14336}'.`,group:'reference',paired_baseline_id:null,verified:true,registered_at:null,evaluation_ready:false},
   ],
 })
 

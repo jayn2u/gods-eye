@@ -164,6 +164,7 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
             "model": {"status": "verified"},
             "gallery_manifest": {"status": "verified"},
             "index": {"status": "verified"},
+            "evaluation": {"status": "verified"},
             "smoke_test": {"status": "verified"},
         },
     }
@@ -185,6 +186,7 @@ def test_update_reuses_compatible_assets_and_invalidates_only_dependents(tmp_pat
         "dataset_acquisition",
         "gallery_manifest",
         "index",
+        "evaluation",
         "smoke_test",
     ]
     assert applied.returncode == 0
