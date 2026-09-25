@@ -342,12 +342,12 @@ async function fetchAuthoritativeRun(github, eventRun, repository) {
   const identity = parseWorkflowRunIdentity(run);
   if (!identity) {
     if (!profileForWorkflowPath(run.path)) {
-      throw new ReporterError('workflow_run_mismatch', 'authoritative run uses an untrusted workflow path');
+      throw new ReporterError('untrusted_workflow_path', 'authoritative run uses an untrusted workflow path');
     }
     throw new ReporterError('invalid_run_name', 'trusted workflow run name is not correlated');
   }
   if (!isTrustedWorkflowPath(run.path, identity.agent)) {
-    throw new ReporterError('workflow_run_mismatch', 'authoritative run uses an untrusted workflow path');
+    throw new ReporterError('untrusted_workflow_path', 'authoritative run uses an untrusted workflow path');
   }
   return { run, identity, profile: profileFor(identity.agent) };
 }
@@ -485,7 +485,7 @@ async function publishWorkflowRun({
   try {
     authoritative = await fetchAuthoritativeRun(github, workflowRun, repository);
   } catch (error) {
-    if (error instanceof ReporterError && error.code === 'workflow_run_mismatch') {
+    if (error instanceof ReporterError && error.code === 'untrusted_workflow_path') {
       return result('skipped', 'untrusted_workflow');
     }
     return result('incomplete', error instanceof ReporterError ? error.code : 'run_lookup_failed');

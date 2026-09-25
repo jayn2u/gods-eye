@@ -304,6 +304,8 @@ test('a workflow_run from the legacy agent-qa.yml path is untrusted', async () =
     github, workflowRun: run, repository: 'jayn2u/gods-eye', evidenceFiles: [],
   });
   assert.equal(outcome.status, 'skipped');
+  assert.equal(outcome.reason, 'untrusted_workflow');
+  assert.equal(state.mutations.length, 0);
 });
 
 test('real publisher keeps one bot comment through clean, findings, and latest cancelled generations', async () => {
@@ -477,7 +479,7 @@ test('forged run metadata, empty PR arrays, and malformed artifact produce safe 
 test('authoritative correlation rejects mismatched dynamic name and event', async () => {
   for (const [alter, reason] of [
     [(run) => { run.name = 'Agent QA'; }, 'invalid_run_name'],
-    [(run) => { run.event = 'pull_request'; }, 'untrusted_workflow'],
+    [(run) => { run.event = 'pull_request'; }, 'workflow_run_mismatch'],
   ]) {
     const forged = fakeGithub();
     alter(forged.state.runs[0]);
@@ -485,6 +487,7 @@ test('authoritative correlation rejects mismatched dynamic name and event', asyn
       github: forged.github,
       workflowRun: eventFor(forged.state.runs[0]),
     });
+    assert.equal(outcome.status, 'incomplete');
     assert.equal(outcome.reason, reason);
     assert.equal(forged.state.mutations.length, 0);
   }
