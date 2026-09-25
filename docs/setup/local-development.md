@@ -34,4 +34,4 @@ pnpm test:e2e
 The Playwright suite runs the real API/web flow with the deterministic CUHK-PEDES fixture.
 
 The repository's separate advisory browser-QA runner is documented in
-[Agent QA operator guide](agent-qa.md).
+[Copilot Agent QA operator guide](agent-qa.md).
