@@ -29,8 +29,26 @@ Local metadata that proves a Dataset Installation was produced from a specific v
 _Avoid_: Done marker, install state
 
 **Gallery Manifest**:
-The normalized collection of image records and provenance derived from the evaluation (test) split of one or more Dataset Installations for retrieval indexing. Train and validation rows are structurally validated and then left out: they are never embedded, indexed, or searchable.
+The normalized collection of image records and provenance derived from the evaluation (test) split of one or more Dataset Installations for retrieval indexing. Train and validation rows are structurally validated and then left out: they are never embedded, indexed, or searchable. Captions are never exposed except as Benchmark Queries.
 _Avoid_: Dataset index, image list
+
+**Fine-tuned Checkpoint**:
+A model checkpoint with weights trained for text-to-image retrieval on designated research data,
+separate from the held-out test gallery.
+_Avoid_: Training artifact, test-split checkpoint
+
+**Paired Baseline**:
+The zero-shot model with the same architecture, pretrained source, image size, and preprocessing as a
+Fine-tuned Checkpoint, used to isolate the effect of fine-tuning.
+_Avoid_: Reference model, control model
+
+**Benchmark Evaluation**:
+A text-to-image ranking measurement against the Gallery Manifest using test-split captions and person-ID ground truth.
+_Avoid_: Accuracy test, biometric evaluation
+
+**Benchmark Query**:
+One of 48 fixed, model-independent test captions selected for visible model comparison.
+_Avoid_: Prompt example, dataset description
 
 **Full Demo**:
 The runnable research experience that searches the supported real-world galleries with the selected retrieval model.
