@@ -396,3 +396,28 @@ test('stopHandedOffRuntime refuses a manifest outside its run root', async t => 
     { code: 'PATH_OUTSIDE_RUN' },
   )
 })
+
+test('handed-off cleanup refuses malformed owned paths without removing the run root', async t => {
+  const runRoot = await temporaryDirectory(t, 'runtime-handoff-owned-paths')
+  const supervisor = await new ProcessSupervisor({ runRoot, deadline: monotonicDeadlineAfter(5000) }).initialize()
+  t.after(() => fsPromises.rm(supervisor.temporaryDirectory, { recursive: true, force: true }))
+  const handoff = await supervisor.handOff()
+  const manifest = JSON.parse(await fsPromises.readFile(handoff.manifestPath, 'utf8'))
+  const rootWithTrailingSlash = `${runRoot}/`
+  manifest.ownedPaths.push(
+    { path: rootWithTrailingSlash, kind: 'malformed-root', cleanup: true },
+    { path: 42, kind: 'malformed-value', cleanup: true },
+  )
+  await fsPromises.writeFile(handoff.manifestPath, JSON.stringify(manifest))
+  const sentinel = path.join(runRoot, 'sentinel')
+  await fsPromises.writeFile(sentinel, 'keep')
+
+  const receipt = await stopHandedOffRuntime({ ...handoff, reason: 'test_cleanup' })
+  assert.deepEqual(receipt.paths.slice(0, 2).map(({ path: ownedPath, outcome }) => ({ path: ownedPath, outcome })), [
+    { path: 42, outcome: 'refused' },
+    { path: rootWithTrailingSlash, outcome: 'refused' },
+  ])
+  assert.equal(fs.existsSync(runRoot), true)
+  assert.equal(await fsPromises.readFile(sentinel, 'utf8'), 'keep')
+  assert.equal(fs.existsSync(manifest.temporaryDirectory), false)
+})

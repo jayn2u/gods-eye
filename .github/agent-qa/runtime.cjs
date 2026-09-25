@@ -362,14 +362,7 @@ class ProcessSupervisor {
       temporaryDirectory: this.temporaryDirectory,
       ownedPaths: this.ownedPaths,
     })
-    const receipt = {
-      version: 1,
-      reason,
-      finishedAt: new Date().toISOString(),
-      processes: processResults,
-      paths: pathResults,
-      allProcessesStopped: processResults.every(item => item.outcome === 'stopped' || item.outcome === 'identity_mismatch'),
-    }
+    const receipt = buildCleanupReceipt(reason, processResults, pathResults)
     await writeJsonAtomic(this.receiptPath, receipt)
     return receipt
   }
@@ -377,42 +370,34 @@ class ProcessSupervisor {
 
 async function removeOwnedPaths({ runRoot, temporaryDirectory, ownedPaths }) {
   const pathResults = []
+  const resolvedTemporaryDirectory = typeof temporaryDirectory === 'string' ? path.resolve(temporaryDirectory) : null
   for (const owned of [...ownedPaths].reverse()) {
+    if (typeof owned?.path !== 'string') {
+      pathResults.push({ ...owned, outcome: 'refused' })
+      continue
+    }
     if (!owned.cleanup) {
       pathResults.push({ ...owned, outcome: 'retained' })
       continue
     }
-    const isRunChild = isWithin(runRoot, owned.path) && owned.path !== runRoot
+    const resolvedPath = path.resolve(owned.path)
+    const isRunChild = isWithin(runRoot, resolvedPath) && resolvedPath !== runRoot
     const isPrivateTemporaryDirectory = owned.kind === 'temporary-directory' &&
-      owned.path === temporaryDirectory &&
-      path.dirname(owned.path) === path.resolve(os.tmpdir()) &&
-      path.basename(owned.path).startsWith(TEMPORARY_DIRECTORY_PREFIX)
+      resolvedPath === resolvedTemporaryDirectory &&
+      path.dirname(resolvedPath) === path.resolve(os.tmpdir()) &&
+      path.basename(resolvedPath).startsWith(TEMPORARY_DIRECTORY_PREFIX)
     if (!isRunChild && !isPrivateTemporaryDirectory) {
       pathResults.push({ ...owned, outcome: 'refused' })
       continue
     }
-    await fsPromises.rm(owned.path, { recursive: true, force: true })
+    await fsPromises.rm(resolvedPath, { recursive: true, force: true })
     pathResults.push({ ...owned, outcome: 'removed' })
   }
   return pathResults
 }
 
-async function stopHandedOffRuntime({ manifestPath, runRoot, reason = 'normal' }) {
-  const absoluteRoot = assertAbsolutePath(runRoot, 'runRoot')
-  const absoluteManifest = assertAbsolutePath(manifestPath, 'manifestPath')
-  if (!isWithin(absoluteRoot, absoluteManifest)) throw new RuntimeError('PATH_OUTSIDE_RUN', 'Manifest is outside run root')
-  const manifest = JSON.parse(await fsPromises.readFile(absoluteManifest, 'utf8'))
-  if (manifest.version !== MANIFEST_VERSION || path.resolve(manifest.runRoot) !== absoluteRoot || !Array.isArray(manifest.processes)) {
-    throw new RuntimeError('INVALID_MANIFEST', 'Process manifest does not match the requested run root')
-  }
-  const processes = []
-  for (const record of [...manifest.processes].reverse()) processes.push(await terminateMatchingGroup(record))
-  const paths = await removeOwnedPaths({
-    runRoot: absoluteRoot,
-    temporaryDirectory: manifest.temporaryDirectory,
-    ownedPaths: manifest.ownedPaths ?? [],
-  })
-  const receipt = {
+function buildCleanupReceipt(reason, processes, paths) {
+  return {
     version: 1,
     reason,
     finishedAt: new Date().toISOString(),
@@ -420,6 +405,30 @@ async function stopHandedOffRuntime({ manifestPath, runRoot, reason = 'normal' }
     paths,
     allProcessesStopped: processes.every(item => item.outcome === 'stopped' || item.outcome === 'identity_mismatch'),
   }
+}
+
+async function readRunManifest({ manifestPath, runRoot }) {
+  const absoluteManifest = assertAbsolutePath(manifestPath, 'manifestPath')
+  const absoluteRoot = assertAbsolutePath(runRoot, 'runRoot')
+  if (!isWithin(absoluteRoot, absoluteManifest)) throw new RuntimeError('PATH_OUTSIDE_RUN', 'Manifest is outside run root')
+  const manifest = JSON.parse(await fsPromises.readFile(absoluteManifest, 'utf8'))
+  if (manifest?.version !== MANIFEST_VERSION || typeof manifest.runRoot !== 'string' ||
+    path.resolve(manifest.runRoot) !== absoluteRoot || !Array.isArray(manifest.processes)) {
+    throw new RuntimeError('INVALID_MANIFEST', 'Stale process manifest does not match the requested run root')
+  }
+  return { manifest, runRoot: absoluteRoot }
+}
+
+async function stopHandedOffRuntime({ manifestPath, runRoot, reason = 'normal' }) {
+  const { manifest, runRoot: absoluteRoot } = await readRunManifest({ manifestPath, runRoot })
+  const processes = []
+  for (const record of [...manifest.processes].reverse()) processes.push(await terminateMatchingGroup(record))
+  const paths = await removeOwnedPaths({
+    runRoot: absoluteRoot,
+    temporaryDirectory: manifest.temporaryDirectory,
+    ownedPaths: manifest.ownedPaths ?? [],
+  })
+  const receipt = buildCleanupReceipt(reason, processes, paths)
   await writeJsonAtomic(path.join(absoluteRoot, 'cleanup.json'), receipt)
   return receipt
 }
@@ -799,13 +808,7 @@ async function probeCandidate({ candidate, evidence, deadline = monotonicDeadlin
 }
 
 async function reclaimStaleManifest({ manifestPath, runRoot, graceMilliseconds = 500 }) {
-  const absoluteManifest = assertAbsolutePath(manifestPath, 'manifestPath')
-  const absoluteRoot = assertAbsolutePath(runRoot, 'runRoot')
-  if (!isWithin(absoluteRoot, absoluteManifest)) throw new RuntimeError('PATH_OUTSIDE_RUN', 'Manifest is outside run root')
-  const manifest = JSON.parse(await fsPromises.readFile(absoluteManifest, 'utf8'))
-  if (manifest.version !== MANIFEST_VERSION || path.resolve(manifest.runRoot) !== absoluteRoot || !Array.isArray(manifest.processes)) {
-    throw new RuntimeError('INVALID_MANIFEST', 'Stale process manifest does not match the requested run root')
-  }
+  const { manifest } = await readRunManifest({ manifestPath, runRoot })
   const results = []
   for (const record of [...manifest.processes].reverse()) {
     results.push(await terminateMatchingGroup(record, graceMilliseconds))
