@@ -1,5 +1,5 @@
-name: Agent QA
-run-name: "Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"
+name: Copilot Agent QA
+run-name: "Copilot Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"
 
 on:
   pull_request_target:
@@ -17,7 +17,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: gods-eye-agent-qa-pr-${{ github.event.pull_request.number }}
+  group: gods-eye-copilot-agent-qa-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -64,6 +64,7 @@ jobs:
             const decision = await controller.admitPullRequest({
               github,
               repository: process.env.EXPECTED_REPOSITORY,
+              agent: 'copilot',
               pullNumber: Number(process.env.PULL_NUMBER),
               eventHeadSha: process.env.EVENT_HEAD_SHA,
               controllerSha: process.env.CONTROLLER_SHA,
@@ -72,7 +73,7 @@ jobs:
               admittedAt: new Date().toISOString(),
             });
             core.setOutput('status', decision.status);
-            core.info(`Agent QA admission: ${decision.status}/${decision.reason}`);
+            core.info(`Copilot Agent QA admission: ${decision.status}/${decision.reason}`);
             if (decision.request) {
               core.setOutput('request', JSON.stringify(decision.request));
             }
@@ -158,9 +159,10 @@ jobs:
               request: JSON.parse(process.env.QA_REQUEST_JSON),
             });
             core.setOutput('status', decision.status);
-            core.info(`Agent QA recheck: ${decision.status}/${decision.reason}`);
+            core.info(`Copilot Agent QA recheck: ${decision.status}/${decision.reason}`);
 
-      - name: Run bounded Copilot browser QA
+      - name: Prepare the fixture runtime and baseline
+        id: prepare
         if: steps.recheck.outputs.status == 'admitted'
         env:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
@@ -169,6 +171,22 @@ jobs:
           CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
           EVIDENCE_PATH: ${{ steps.paths.outputs.evidence }}
           JOB_START: ${{ steps.clock.outputs.started_at }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        shell: bash
+        run: |
+          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" prepare \
+            --request "$REQUEST_PATH" --candidate "$CANDIDATE_PATH" \
+            --evidence "$EVIDENCE_PATH" --job-start "$JOB_START" > "$RUNNER_TEMP/agent-qa-prepare.json"
+          printf 'state=%s\n' "$(node -p 'require(process.argv[1]).state' "$RUNNER_TEMP/agent-qa-prepare.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Run bounded Copilot browser QA
+        id: agent
+        if: steps.prepare.outputs.state != ''
+        timeout-minutes: 22
+        env:
+          QA_ROOT: ${{ steps.paths.outputs.qa_root }}
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
           # Copilot CLI authenticates from this token only. GITHUB_TOKEN and GH_TOKEN stay empty so
           # the agent cannot reach the repository API even though it now holds a Copilot credential.
           QA_COPILOT_TOKEN: ${{ secrets.AGENT_QA_COPILOT_TOKEN }}
@@ -180,16 +198,27 @@ jobs:
           CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
         shell: bash
+        run: node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" agent --state "${{ steps.prepare.outputs.state }}"
+
+      - name: Verify the journal, write the report, and stop the runtime
+        id: finalize
+        if: always() && steps.prepare.outputs.state != ''
+        env:
+          QA_ROOT: ${{ steps.paths.outputs.qa_root }}
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
+          JOB_STATUS: ${{ job.status }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        shell: bash
         run: |
-          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" run \
-            --request "$REQUEST_PATH" \
-            --candidate "$CANDIDATE_PATH" \
-            --evidence "$EVIDENCE_PATH" \
-            --job-start "$JOB_START"
+          cancelled=()
+          if [ "$JOB_STATUS" = "cancelled" ]; then cancelled=(--cancelled); fi
+          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" finalize \
+            --state "${{ steps.prepare.outputs.state }}" "${cancelled[@]}"
 
       - name: Stage validated public evidence
         id: stage
-        if: always() && steps.recheck.outputs.status == 'admitted'
+        if: always() && steps.prepare.outputs.state != ''
         env:
           CONTROL_ROOT: ${{ github.workspace }}/trusted-control/.github/agent-qa
           NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
@@ -252,7 +281,7 @@ jobs:
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: copilot-agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.stage.outputs.path }}
           if-no-files-found: error
           retention-days: 14

@@ -24,8 +24,10 @@ const {
   runLive,
 } = require('../verify-live.cjs');
 const { LiveMatrixAdapter } = require('./fixtures/live-adapter.cjs');
+const { profileFor } = require('../agents/profiles.cjs');
 
 const SHA = 'a'.repeat(40);
+const COPILOT = profileFor('copilot');
 
 function doctor(ok = true) {
   return {
@@ -49,8 +51,8 @@ function adapterFixture(overrides = {}) {
     async defaultRef() { return { object: { sha: SHA } }; },
     async workflows() {
       return [
-        { id: 1, path: '.github/workflows/agent-qa.yml', state: 'active' },
-        { id: 2, path: '.github/workflows/agent-qa-report.yml', state: 'active' },
+        { id: 1, path: COPILOT.workflowPath, state: 'active' },
+        { id: 2, path: `.github/workflows/${COPILOT.reportWorkflowFile}`, state: 'active' },
       ];
     },
     async trustedBlob() { return { sha: SHA }; },
@@ -64,7 +66,14 @@ function adapterFixture(overrides = {}) {
     async doctor() { return { ok: true, report: doctor() }; },
     async requiredChecks() { return { observable: true, contexts: ['Python'], checks: [] }; },
     async createBranch() { mutations.push('createBranch'); },
-    async createPull() { mutations.push('createPull'); },
+    async createPull(input) {
+      mutations.push({ method: 'createPull', input });
+      return { number: 7, title: input.title, head: { ref: input.head }, base: { ref: input.base }, body: input.body };
+    },
+    async addLabels(number, labels) {
+      mutations.push({ method: 'addLabels', number, labels });
+      return labels.map((name) => ({ name }));
+    },
     async findBranch(name) { return { ref: `refs/heads/${name}`, object: { sha: SHA } }; },
     async getPull(number) { return { number, state: 'open' }; },
     async findPull() { return null; },
@@ -165,14 +174,14 @@ test('missing default workflows and unknown required checks cannot be inferred s
   });
   const result = await preflight(adapter);
   assert.equal(result.ok, false);
-  assert.ok(result.missing.includes('default_branch_agent-qa.yml_not_active'));
-  assert.ok(result.missing.includes('default_branch_agent-qa-report.yml_not_active'));
+  assert.ok(result.missing.includes(`default_branch_${COPILOT.workflowFile}_not_active`));
+  assert.ok(result.missing.includes(`default_branch_${COPILOT.reportWorkflowFile}_not_active`));
   assert.ok(result.missing.includes('required_checks_not_observable'));
 });
 
-test('required Agent QA check is rejected because the workflow must remain advisory', async () => {
+test('required Copilot Agent QA check is rejected because the workflow must remain advisory', async () => {
   const { adapter } = adapterFixture({
-    async requiredChecks() { return { observable: true, contexts: ['Agent QA / Fixture browser QA'], checks: [] }; },
+    async requiredChecks() { return { observable: true, contexts: ['Copilot Agent QA / Fixture browser QA'], checks: [] }; },
   });
   const result = await preflight(adapter);
   assert.equal(result.ok, false);
@@ -235,6 +244,22 @@ test('run identity parser binds a workflow run to exact PR and head', () => {
   assert.equal(matchingRun(null, 53, run.head_sha), false);
 });
 
+test('created live pull requests receive the Copilot opt-in label immediately', async (t) => {
+  const evidence = mkdtempSync(path.join(tmpdir(), 'verify-live-label-'));
+  t.after(() => rmSync(evidence, { recursive: true, force: true }));
+  const { adapter, mutations } = adapterFixture();
+  const registry = { schema_version: 1, repository: 'jayn2u/gods-eye', prefix: 'agent-qa-live-1000-abcdef',
+    branches: [], pulls: [], processes: [] };
+  const created = await createOwnedPull(adapter, evidence, registry, {
+    title: '[agent-qa-live-1000-abcdef] labeled PR', head: 'agent-qa-live-1000-abcdef-clean',
+    base: 'release/agent-qa-live-1000-abcdef',
+    body: 'Disposable live validation resource agent-qa-live-1000-abcdef.',
+  });
+  assert.equal(created.number, 7);
+  assert.deepEqual(mutations.map(({ method }) => method), ['createPull', 'addLabels']);
+  assert.deepEqual(mutations[1], { method: 'addLabels', number: 7, labels: [COPILOT.label] });
+});
+
 test('temporary product defect changes only the exact search-submit expression', () => {
   const source = 'before <button className="primary" disabled={props.selectedModel?.ready !== true}>Search gallery after';
   assert.equal(defectSource(source), 'before <button className="primary" disabled={true}>Search gallery after');
@@ -283,6 +308,7 @@ test('full adapter-backed runLive executes a-f, validates artifacts, and cleans 
   assert.equal(result.scenarios.f_cancel.conclusion, 'cancelled');
   assert.equal(adapter.branches.size, 0);
   assert.ok([...adapter.pulls.values()].every(({ state }) => state === 'closed'));
+  assert.ok([...adapter.pulls.values()].every(({ labels }) => labels.includes(COPILOT.label)));
   assert.deepEqual(loadRegistry(evidence).branches, []);
   assert.deepEqual(loadRegistry(evidence).pulls, []);
 });

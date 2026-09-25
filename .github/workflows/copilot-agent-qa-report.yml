@@ -1,9 +1,9 @@
-name: Agent QA Report
+name: Copilot Agent QA Report
 
 on:
   workflow_run:
     workflows:
-      - Agent QA
+      - Copilot Agent QA
     types:
       - completed
 
@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   correlate:
-    name: Correlate trusted Agent QA run
+    name: Correlate trusted Copilot Agent QA run
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -41,10 +41,10 @@ jobs:
               process.env.GITHUB_WORKSPACE,
               'trusted-control/.github/agent-qa/reporter.cjs',
             ));
+            const { profileForWorkflowPath } = require(path.join(process.env.GITHUB_WORKSPACE, 'trusted-control/.github/agent-qa/agents/profiles.cjs'));
             const run = context.payload.workflow_run;
             const repository = context.payload.repository?.full_name;
-            const trustedPath = run?.path === reporter.WORKFLOW_PATH
-              || (typeof run?.path === 'string' && run.path.startsWith(`${reporter.WORKFLOW_PATH}@`));
+            const trustedPath = profileForWorkflowPath(run?.path)?.agent === 'copilot';
             if (
               repository !== 'jayn2u/gods-eye'
               || run?.repository?.full_name !== repository
@@ -56,12 +56,12 @@ jobs:
               || run.run_attempt <= 0
               || !trustedPath
             ) {
-              core.setFailed('Untrusted or malformed Agent QA workflow_run metadata');
+              core.setFailed('Untrusted or malformed Copilot Agent QA workflow_run metadata');
               return;
             }
             const identity = reporter.parseWorkflowRunIdentity(run);
             if (!identity) {
-              core.setFailed('Agent QA run name did not contain a trusted identity');
+              core.setFailed('Copilot Agent QA run name did not contain a trusted identity');
               return;
             }
             core.setOutput('pr_number', String(identity.prNumber));
@@ -70,7 +70,7 @@ jobs:
   # that can write to the pull request. This one holds `contents: write` and no pull-request access,
   # runs only trusted control code, and pushes nothing but PNGs the harness already accepted.
   publish-evidence:
-    name: Publish accepted screenshots
+    name: Publish accepted Copilot Agent QA screenshots
     needs: correlate
     runs-on: ubuntu-24.04
     permissions:
@@ -107,15 +107,15 @@ jobs:
                 github, workflowRun: context.payload.workflow_run, repository,
               });
               if (!prepared) {
-                core.info('Agent QA published no screenshots: the run produced no accepted proof');
+                core.info('Copilot Agent QA published no screenshots: the run produced no accepted proof');
                 core.setOutput('files', '[]');
                 return;
               }
               const published = await publishScreenshots({ github, repository, ...prepared });
-              core.info(`Agent QA evidence commit ${published.commitSha} on ${published.branch}`);
+              core.info(`Copilot Agent QA evidence commit ${published.commitSha} on ${published.branch}`);
               core.setOutput('files', JSON.stringify(published.files));
             } catch (error) {
-              core.warning(`Agent QA screenshot publication skipped: ${error.code ?? error.message}`);
+              core.warning(`Copilot Agent QA screenshot publication skipped: ${error.code ?? error.message}`);
               core.setOutput('files', '[]');
             }
 
@@ -131,7 +131,7 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: gods-eye-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}
+      group: gods-eye-copilot-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}
       cancel-in-progress: false
       queue: max
     steps:
@@ -163,7 +163,7 @@ jobs:
               const parsed = JSON.parse(process.env.EVIDENCE_FILES || '[]');
               if (Array.isArray(parsed)) evidenceFiles = parsed;
             } catch {
-              core.warning('Agent QA evidence file list was unreadable; publishing without screenshots');
+              core.warning('Copilot Agent QA evidence file list was unreadable; publishing without screenshots');
             }
             const outcome = await publishWorkflowRun({
               github,
@@ -171,7 +171,7 @@ jobs:
               repository: `${context.repo.owner}/${context.repo.repo}`,
               evidenceFiles,
             });
-            core.info(`Agent QA publication: ${JSON.stringify(outcome)}`);
+            core.info(`Copilot Agent QA publication: ${JSON.stringify(outcome)}`);
             if (outcome.status === 'incomplete') {
-              core.setFailed(`Agent QA publication incomplete: ${outcome.reason}`);
+              core.setFailed(`Copilot Agent QA publication incomplete: ${outcome.reason}`);
             }

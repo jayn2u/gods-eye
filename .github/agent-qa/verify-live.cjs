@@ -11,13 +11,13 @@ const { spawnSync } = require('node:child_process');
 
 const { SCENARIO_IDS, validateReport } = require('./contracts.cjs');
 const {
-  BOT_LOGIN, COMMENT_MARKER, WORKFLOW_PATH, inspectArtifactZip, parseWorkflowRunIdentity,
+  BOT_LOGIN, inspectArtifactZip, parseWorkflowRunIdentity,
 } = require('./reporter.cjs');
+const { profileFor } = require('./agents/profiles.cjs');
 
 const EXPECTED_REPOSITORY = 'jayn2u/gods-eye';
 const DEFAULT_BRANCH = 'develop';
-const QA_WORKFLOW_FILE = 'agent-qa.yml';
-const REPORT_WORKFLOW_FILE = 'agent-qa-report.yml';
+const COPILOT = profileFor('copilot');
 const RUNNER_NAME = 'gods-eye-agent-qa';
 const MAX_PAGES = 20;
 const POLL_MS = 10_000;
@@ -234,6 +234,12 @@ class GhAdapter {
     });
   }
 
+  async addLabels(number, labels) {
+    return this.api(`repos/${this.repository}/issues/${number}/labels`, {
+      method: 'POST', jsonBody: { labels },
+    });
+  }
+
   async getPull(number) {
     try {
       return this.api(`repos/${this.repository}/pulls/${number}`);
@@ -301,7 +307,7 @@ class GhAdapter {
   }
 
   async workflowRuns() {
-    return this.paginate(`repos/${this.repository}/actions/workflows/${QA_WORKFLOW_FILE}/runs?event=pull_request_target`, 'workflow_runs');
+    return this.paginate(`repos/${this.repository}/actions/workflows/${COPILOT.workflowFile}/runs?event=pull_request_target`, 'workflow_runs');
   }
 
   async jobs(runId, attempt = 1) {
@@ -361,7 +367,7 @@ async function preflight(adapter) {
     { sha: SHA_PATTERN.test(defaultSha || '') ? defaultSha : null }, 'default_branch_head_invalid');
 
   const workflows = await adapter.workflows();
-  for (const file of [QA_WORKFLOW_FILE, REPORT_WORKFLOW_FILE]) {
+  for (const file of [COPILOT.workflowFile, COPILOT.reportWorkflowFile]) {
     const workflow = workflows.find((item) => item.path === `.github/workflows/${file}`);
     add(`workflow_${file}`, workflow?.state === 'active',
       { present: Boolean(workflow), state: workflow?.state || null, id: workflow?.id || null },
@@ -457,8 +463,9 @@ function loadRegistry(evidenceRoot) {
 function matchingRun(run, prNumber, headSha) {
   const identity = parseWorkflowRunIdentity(run);
   return run?.repository?.full_name === EXPECTED_REPOSITORY
-    && run?.path === WORKFLOW_PATH
+    && run?.path === COPILOT.workflowPath
     && run?.event === 'pull_request_target'
+    && identity?.agent === COPILOT.agent
     && identity?.prNumber === prNumber && identity?.headSha === headSha;
 }
 
@@ -493,8 +500,8 @@ async function managedComment(adapter, prNumber, predicate = () => true, options
   return poll(async () => {
     const comments = await adapter.comments(prNumber);
     const managed = comments.filter((comment) => comment.user?.login === BOT_LOGIN
-      && typeof comment.body === 'string' && comment.body.includes(COMMENT_MARKER));
-    if (managed.length > 1) throw new LiveVerificationError('multiple_managed_comments', 'more than one Agent QA bot comment exists');
+      && typeof comment.body === 'string' && comment.body.includes(COPILOT.commentMarker));
+    if (managed.length > 1) throw new LiveVerificationError('multiple_managed_comments', 'more than one Copilot Agent QA bot comment exists');
     return managed[0] || null;
   }, (comment) => Boolean(comment && predicate(comment)), { timeout: COMMENT_TIMEOUT_MS, ...options });
 }
@@ -528,7 +535,7 @@ function extractZipEntry(archive, entryName) {
 
 async function inspectRunEvidence(adapter, run, pr, evidenceRoot, expectedStatus) {
   const artifacts = (await adapter.artifacts(run.id)).filter((artifact) => (
-    artifact.name === `agent-qa-${pr.number}-${run.id}-${run.run_attempt}`
+    artifact.name === `${COPILOT.artifactPrefix}-${pr.number}-${run.id}-${run.run_attempt}`
     && artifact.expired === false && artifact.workflow_run?.id === run.id
   ));
   if (artifacts.length !== 1) throw new LiveVerificationError('artifact_identity_invalid', 'expected one exact non-expired artifact');
@@ -671,6 +678,10 @@ async function createOwnedPull(adapter, evidenceRoot, registry, input, signal) {
     resource.number = created.number;
     resource.state = 'created';
     persistRegistry(evidenceRoot, registry);
+    const labels = await adapter.addLabels(created.number, [COPILOT.label]);
+    if (!Array.isArray(labels) || !labels.some(({ name }) => name === COPILOT.label)) {
+      throw new LiveVerificationError('pull_label_unconfirmed', 'Copilot Agent QA opt-in label was not confirmed');
+    }
     return created;
   } catch (error) {
     resource.state = 'ambiguous';
