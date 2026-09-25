@@ -7,6 +7,8 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
+const { agentTokenReadiness, runDoctor } = require('../doctor.cjs');
+
 const projectRoot = path.resolve(__dirname, '../../..');
 const doctor = path.join(projectRoot, '.github/agent-qa/doctor.cjs');
 const SECRET = 'DOCTOR_SECRET_CANARY_4f2095';
@@ -85,6 +87,24 @@ function run(env, extraArgs = []) {
 function check(report, name) {
   return report.checks.find((item) => item.name === name);
 }
+
+test('the prepare phase does not require the agent token but still refuses a foreign provider key', async (t) => {
+  const f = fixture(t);
+  const ready = await runDoctor({ env: { ...f.env, QA_COPILOT_TOKEN: '' }, phase: 'prepare' });
+  const auth = check(ready, 'subscription_auth');
+  assert.equal(auth.ok, true);
+  assert.equal(auth.token_source, 'agent-step');
+  assert.equal(auth.required, false);
+
+  const foreign = await runDoctor({ env: { ...f.env, ANTHROPIC_API_KEY: 'x' }, phase: 'prepare' });
+  assert.equal(check(foreign, 'subscription_auth').ok, false);
+});
+
+test('agentTokenReadiness keeps the whitespace rule', () => {
+  assert.deepEqual(agentTokenReadiness('a'.repeat(40)), { present: true, wellFormed: true });
+  assert.deepEqual(agentTokenReadiness(`${'a'.repeat(40)}\n`), { present: false, wellFormed: false });
+  assert.deepEqual(agentTokenReadiness(''), { present: false, wellFormed: true });
+});
 
 test('reports ready from a workflow-supplied Copilot token and non-secret metadata', (t) => {
   const f = fixture(t);

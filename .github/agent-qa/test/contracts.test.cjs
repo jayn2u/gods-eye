@@ -39,6 +39,7 @@ const rejectionResults = [];
 function requestFixture() {
   return {
     schema_version: 1,
+    agent: 'copilot',
     repository: 'jayn2u/gods-eye',
     pr_number: 42,
     head: { repository: 'jayn2u/gods-eye', id: 1234, sha: 'a'.repeat(40) },
@@ -76,6 +77,11 @@ test('declares explicit primitive types for response-schema const and enum leave
   assert.equal(agentResultSchema.$defs.scenarioId.type, 'string');
   assert.equal(agentResultSchema.$defs.scenario.properties.status.type, 'string');
   assert.equal(agentResultSchema.$defs.finding.properties.severity.type, 'string');
+});
+
+test('request schema agents equal the Agent Profile registry', () => {
+  const schema = require('../request.schema.json');
+  assert.deepEqual(schema.properties.agent.enum, [...require('../agents/profiles.cjs').AGENTS]);
 });
 
 function buildEvidence(root) {
@@ -133,6 +139,23 @@ function reportFixture(root) {
     },
   };
 }
+
+test('a report must name the agent its request admitted', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'gods-eye-contract-agent-'));
+  try {
+    const request = requestFixture();
+    const report = reportFixture(root);
+    report.tools.agent.name = 'claude';
+    assert.throws(() => validateReport(report, request));
+    const schema = require('../report.schema.json');
+    assert.deepEqual(
+      schema.properties.tools.properties.agent.properties.name.enum,
+      [...require('../agents/profiles.cjs').AGENTS],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function expectContractError(label, code, operation) {
   assert.throws(operation, (error) => {

@@ -62,7 +62,7 @@
           ],
           "properties": {
             "name": {
-              "const": "copilot"
+              "enum": ["copilot"]
             },
             "version": {
               "$ref": "#/$defs/version"

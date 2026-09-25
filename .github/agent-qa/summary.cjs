@@ -12,6 +12,8 @@
  * markup, a link, or a mention.
  */
 
+const { profileFor } = require('./agents/profiles.cjs');
+
 const STATUS_LABEL = Object.freeze({
   observed: '✅ observed',
   finding: '⚠️ finding',
@@ -150,7 +152,14 @@ function sortedFindings(report) {
  * comment's run link.
  */
 function renderJobSummary({ report, runUrl = null, artifactUrl = null }) {
-  const lines = ['# Agent QA (advisory)', ''];
+  let title = '# Agent QA (advisory)';
+  let agentName = 'Agent QA';
+  try {
+    const profile = profileFor(report?.tools?.agent?.name);
+    title = `# ${profile.title}`;
+    agentName = profile.title.replace(' (advisory)', '');
+  } catch { /* A report rejected before rendering still gets a generic summary. */ }
+  const lines = [title, ''];
   lines.push(`**Status:** \`${code(report?.status, 40)}\` · **Reason:** \`${code(report?.reason, 60)}\``);
   lines.push(`**Tested head:** \`${code(report?.tested_head_sha, 40)}\``);
   const tools = renderToolLine(report);
@@ -201,7 +210,7 @@ function renderJobSummary({ report, runUrl = null, artifactUrl = null }) {
     lines.push(`_Cleanup: ${cleanup.processes_stopped ?? 0} process(es) stopped; private output deleted: ${
       cleanup.private_output_deleted === true}._`);
   }
-  lines.push('', '_Agent QA is advisory fixture-backed research-demo QA. It does not establish identity'
+  lines.push('', `_${agentName} is advisory fixture-backed research-demo QA. It does not establish identity`
     + ' or real-gallery retrieval quality._');
   return lines.join('\n');
 }

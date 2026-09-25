@@ -8,7 +8,7 @@
     "state": "open",
     "draft": false,
     "base": {
-      "ref": "release/1.2.0",
+      "ref": "develop",
       "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     "head": {
@@ -21,6 +21,7 @@
     "user": {
       "login": "team-author"
     },
+    "labels": [{ "name": "copilot-agent-qa" }],
     "author_association": "NONE"
   },
   "permission": {

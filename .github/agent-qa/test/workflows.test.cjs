@@ -37,7 +37,7 @@ function parseWorkflow(name) {
 }
 
 function runInlineCorrelation(payload) {
-  const reporter = parseWorkflow('agent-qa-report.yml');
+  const reporter = parseWorkflow('copilot-agent-qa-report.yml');
   const step = reporter.jobs.correlate.steps.find(
     ({ name }) => name === 'Parse the typed trusted run identity',
   );
@@ -147,6 +147,7 @@ async function executeAdmittedRequest(t, request) {
   await fsp.writeFile(requestPath, JSON.stringify(request));
   const order = [];
   const adapters = {
+    env: { QA_COPILOT_TOKEN: 'a'.repeat(40) },
     candidateHead: () => request.head.sha,
     candidateTrackedClean: () => true,
     snapshotTrackedFiles: () => ({ source: 'unchanged' }),
@@ -163,11 +164,19 @@ async function executeAdmittedRequest(t, request) {
         { name: 'auth_lock', ok: true },
       ],
     }),
-    startRuntime: async () => ({
-      origin: 'http://127.0.0.1:41731',
-      supervisor: { runRoot: root, runToDeadline: async () => ({ code: 0, signal: null }) },
-      stop: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
-    }),
+    startRuntime: async ({ evidence }) => {
+      const runRoot = path.join(evidence, 'runtime-fixture');
+      return {
+        origin: 'http://127.0.0.1:41731',
+        supervisor: {
+          runRoot,
+          runToDeadline: async () => ({ code: 0, signal: null }),
+          handOff: async () => ({ manifestPath: path.join(runRoot, 'processes.json'), runRoot }),
+        },
+        stop: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
+      };
+    },
+    stopHandedOffRuntime: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
     runBaseline: async () => ({
       name: 'candidate-playwright', status: 'passed', harness_started: true, app_started: true, duration_ms: 12,
     }),
@@ -205,7 +214,7 @@ function reporterGithub(state, archive) {
         async getWorkflowRunAttempt() { return { data: structuredClone(state.workflow_run) }; },
         async listWorkflowRuns() { return { data: { workflow_runs: [structuredClone(state.workflow_run)] } }; },
         async listWorkflowRunArtifacts() {
-          return { data: { artifacts: archive ? [{ id: 501, name: 'agent-qa-42-100-1', expired: false, workflow_run: { id: 100 } }] : [] } };
+          return { data: { artifacts: archive ? [{ id: 501, name: 'copilot-agent-qa-42-100-1', expired: false, workflow_run: { id: 100 } }] : [] } };
         },
         async downloadArtifact() { return { data: archive }; },
       },
@@ -233,19 +242,22 @@ function reporterGithub(state, archive) {
 }
 
 test('workflow structure preserves trusted boundaries, least privilege, pins, and separate serialization', () => {
-  const qa = parseWorkflow('agent-qa.yml');
-  const reporter = parseWorkflow('agent-qa-report.yml');
+  const qa = parseWorkflow('copilot-agent-qa.yml');
+  const reporter = parseWorkflow('copilot-agent-qa-report.yml');
   const trigger = qa.true.pull_request_target;
   assert.deepEqual(trigger.types, [
     'opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'converted_to_draft', 'closed',
     'labeled', 'unlabeled',
   ]);
   assert.equal(Object.hasOwn(trigger, 'branches'), false);
-  assert.equal(qa['run-name'], 'Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}');
+  assert.equal(qa.name, 'Copilot Agent QA');
+  assert.equal(qa['run-name'], 'Copilot Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}');
+  assert.equal(reporter.name, 'Copilot Agent QA Report');
+  assert.deepEqual(reporter.true.workflow_run.workflows, ['Copilot Agent QA']);
   assert.deepEqual(qa.permissions, {});
   assert.deepEqual(reporter.permissions, {});
   assert.deepEqual(qa.concurrency, {
-    group: 'gods-eye-agent-qa-pr-${{ github.event.pull_request.number }}',
+    group: 'gods-eye-copilot-agent-qa-pr-${{ github.event.pull_request.number }}',
     'cancel-in-progress': true,
   });
   assert.deepEqual(qa.jobs.qa['runs-on'], ['self-hosted', 'linux', 'x64', 'gods-eye-agent-qa']);
@@ -268,7 +280,7 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
     group: 'gods-eye-agent-qa-global', 'cancel-in-progress': false, queue: 'max',
   });
   assert.deepEqual(reporter.jobs.publish.concurrency, {
-    group: 'gods-eye-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}',
+    group: 'gods-eye-copilot-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}',
     'cancel-in-progress': false,
     queue: 'max',
   });
@@ -289,23 +301,126 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   assert.equal(candidateCheckout.with.path, 'candidate-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(candidateCheckout.with['persist-credentials'], false);
   assert.equal(qa.jobs.qa.steps[0].name, 'Capture the running-job start time');
-  const executeStep = qa.jobs.qa.steps.find((step) => step.name === 'Run bounded Copilot browser QA');
-  assert.match(executeStep.run, /execute\.cjs" run/u);
-  assert.match(executeStep.run, /--job-start "\$JOB_START"/u);
-  assert.equal(executeStep.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
-  // The agent holds a Copilot credential and nothing else: no repository token, no other provider.
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
-    assert.equal(executeStep.env[key], '');
-  }
-  assert.equal(executeStep.env.QA_COPILOT_TOKEN, '${{ secrets.AGENT_QA_COPILOT_TOKEN }}');
-  assert.equal(Object.values(executeStep.env).some((value) => /secrets\.GITHUB_TOKEN/u.test(String(value))), false);
+  const admission = qa.jobs.admission.steps.find((step) => step.name === 'Re-fetch and admit the pull request');
+  assert.match(admission.with.script, /agent: 'copilot'/u);
+  const stage = qa.jobs.qa.steps.find((step) => step.name === 'Stage validated public evidence');
+  assert.equal(stage.if, "always() && steps.prepare.outputs.state != ''");
   const upload = qa.jobs.qa.steps.find((step) => step.name === 'Upload validated public evidence');
   assert.equal(upload.if, "always() && steps.stage.outputs.ready == 'true'");
+  assert.equal(upload.with.name, 'copilot-agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(upload.with['retention-days'], 14);
 });
 
+test('only the agent step holds the Copilot token', () => {
+  const steps = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps;
+  const holders = steps.filter((s) => JSON.stringify(s.env ?? {}).includes('secrets.AGENT_QA_COPILOT_TOKEN'));
+  assert.deepEqual(holders.map((s) => s.id), ['agent']);
+  const prepare = steps.find((s) => s.id === 'prepare');
+  const agent = steps.find((s) => s.id === 'agent');
+  const finalize = steps.find((s) => s.id === 'finalize');
+  // The internal deadline starts at job start; this later step limit is only a backstop.
+  assert.equal(agent['timeout-minutes'], 25);
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
+    assert.equal(agent.env[key], '');
+  }
+  for (const step of [prepare, finalize]) {
+    assert.equal(step.env.GITHUB_TOKEN, '');
+    assert.equal(step.env.GH_TOKEN, '');
+  }
+  for (const step of steps) {
+    assert.equal(Object.values(step.env ?? {}).some((value) => /secrets\.GITHUB_TOKEN/u.test(String(value))), false);
+  }
+  assert.equal(agent.env.QA_COPILOT_TOKEN, '${{ secrets.AGENT_QA_COPILOT_TOKEN }}');
+  assert.equal(prepare.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.match(prepare.run, /execute\.cjs" prepare/u);
+  assert.match(prepare.run, /--job-start "\$JOB_START"/u);
+});
+
+test('prepare publishes its state path after an interrupted command and preserves its exit status', () => {
+  const prepare = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps.find((s) => s.id === 'prepare');
+  assert.match(prepare.run, /if node .*execute\.cjs" prepare/u);
+  assert.match(prepare.run, /prepare_status=\$\?/u);
+  assert.match(prepare.run, /\.private-execution\/state\.json/u);
+  assert.match(prepare.run, /printf 'state=%s\\n'/u);
+  assert.match(prepare.run, /exit "\$prepare_status"/u);
+});
+
+test('prepare exports a JSON or fallback state path while preserving a failed command status', (t) => {
+  const prepare = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps.find((s) => s.id === 'prepare');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gods-eye-prepare-step-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runnerTemp = path.join(root, 'runner-temp');
+  const evidence = path.join(root, 'evidence');
+  const statePath = path.join(evidence, '.private-execution', 'state.json');
+  const outputPath = path.join(root, 'github-output');
+  const mockBin = path.join(root, 'bin');
+  fs.mkdirSync(runnerTemp);
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.mkdirSync(mockBin);
+  const mockNode = path.join(mockBin, 'node');
+  fs.writeFileSync(mockNode, [
+    '#!/usr/bin/env bash',
+    'if [ "$1" = "-e" ]; then printf "%s" "$EXPECTED_STATE_PATH"; exit 0; fi',
+    'if [ "$2" = "prepare" ]; then',
+    '  : > "$EXPECTED_STATE_PATH"',
+    '  if [ "$EMIT_PREPARE_JSON" = "true" ]; then printf \'{"state":"%s"}\\n\' "$EXPECTED_STATE_PATH"; fi',
+    '  exit 143',
+    'fi',
+    'exit 99',
+    '',
+  ].join('\n'));
+  fs.chmodSync(mockNode, 0o700);
+
+  for (const emitJson of [false, true]) {
+    fs.writeFileSync(outputPath, '');
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', prepare.run], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH ?? ''}`,
+        GITHUB_WORKSPACE: root,
+        RUNNER_TEMP: runnerTemp,
+        REQUEST_PATH: path.join(root, 'request.json'),
+        CANDIDATE_PATH: path.join(root, 'candidate'),
+        EVIDENCE_PATH: evidence,
+        JOB_START: '2026-09-25T00:00:00Z',
+        GITHUB_OUTPUT: outputPath,
+        EXPECTED_STATE_PATH: statePath,
+        EMIT_PREPARE_JSON: String(emitJson),
+      },
+    });
+    assert.equal(result.status, 143, result.stderr);
+    assert.equal(fs.readFileSync(outputPath, 'utf8'), `state=${statePath}\n`);
+  }
+});
+
+test('prepare, agent, finalize run in order and finalize always runs after an admitted recheck', () => {
+  const steps = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps;
+  const ids = steps.map((s) => s.id).filter(Boolean);
+  assert.ok(ids.indexOf('prepare') < ids.indexOf('agent') && ids.indexOf('agent') < ids.indexOf('finalize'));
+  const agent = steps.find((s) => s.id === 'agent');
+  const finalize = steps.find((s) => s.id === 'finalize');
+  assert.match(finalize.if, /always\(\)/u);
+  assert.match(finalize.run, /execute\.cjs" finalize/u);
+  for (const step of [agent, finalize]) {
+    assert.equal(step.env.STATE_PATH, '${{ steps.prepare.outputs.state }}');
+    assert.match(step.run, /--state "\$STATE_PATH"/u);
+  }
+  for (const step of steps.filter((s) => typeof s.run === 'string')) {
+    assert.doesNotMatch(step.run, /\$\{\{\s*steps\./u, `${step.name} interpolates step outputs in run`);
+  }
+});
+
+test('admission names the copilot agent and no workflow mentions the legacy label or release', () => {
+  const source = fs.readFileSync(path.join(workflowRoot, 'copilot-agent-qa.yml'), 'utf8');
+  assert.match(source, /agent: 'copilot'/u);
+  assert.doesNotMatch(source, /release\/|['"]agent-qa['"]/u);
+  assert.equal(fs.existsSync(path.join(workflowRoot, 'agent-qa.yml')), false);
+  assert.equal(fs.existsSync(path.join(workflowRoot, 'agent-qa-report.yml')), false);
+});
+
 test('parsed workflow dependency environment loads trusted controller modules from the pinned toolchain', async (t) => {
-  const qa = parseWorkflow('agent-qa.yml');
+  const qa = parseWorkflow('copilot-agent-qa.yml');
   const expectedNodePath = '${{ steps.paths.outputs.qa_root }}/toolchain/node_modules';
   const recheck = qa.jobs.qa.steps.find((step) => step.name === 'Recheck current pull request eligibility');
   const stage = qa.jobs.qa.steps.find((step) => step.name === 'Stage validated public evidence');
@@ -316,6 +431,7 @@ test('parsed workflow dependency environment loads trusted controller modules fr
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const trustedRoot = path.join(root, 'trusted-control', '.github', 'agent-qa');
   await fsp.mkdir(trustedRoot, { recursive: true });
+  await fsp.mkdir(path.join(trustedRoot, 'agents'), { recursive: true });
   for (const filename of [
     'controller.cjs',
     'contracts.cjs',
@@ -326,6 +442,10 @@ test('parsed workflow dependency environment loads trusted controller modules fr
   ]) {
     await fsp.copyFile(path.join(workflowRoot, '..', 'agent-qa', filename), path.join(trustedRoot, filename));
   }
+  await fsp.copyFile(
+    path.join(workflowRoot, '..', 'agent-qa', 'agents', 'profiles.cjs'),
+    path.join(trustedRoot, 'agents', 'profiles.cjs'),
+  );
   const toolchainModules = path.join(root, 'qa-root', 'toolchain', 'node_modules');
   await fsp.mkdir(toolchainModules, { recursive: true });
   for (const dependency of ['ajv', 'fast-deep-equal', 'fast-uri', 'json-schema-traverse', 'require-from-string']) {
@@ -357,12 +477,12 @@ test('parsed workflow dependency environment loads trusted controller modules fr
 });
 
 test('inline reporter correlation accepts the actual run identity and rejects forged metadata', () => {
-  const reporter = parseWorkflow('agent-qa-report.yml');
+  const reporter = parseWorkflow('copilot-agent-qa-report.yml');
   const step = reporter.jobs.correlate.steps.find(
     ({ name }) => name === 'Parse the typed trusted run identity',
   );
   assert.match(step.with.script, /reporter\.parseWorkflowRunIdentity\(run\)/u);
-  assert.doesNotMatch(step.with.script, /run\?\.name !== ['"]Agent QA['"]/u);
+  assert.doesNotMatch(step.with.script, /run\?\.name !== ['"]Copilot Agent QA['"]/u);
 
   const actualRun = JSON.parse(
     fs.readFileSync(path.join(fixtureRoot, 'actions-run-identity.json'), 'utf8'),
@@ -376,8 +496,9 @@ test('inline reporter correlation accepts the actual run identity and rejects fo
   assert.deepEqual(accepted.outputs, { pr_number: '53' });
 
   for (const [label, target, mutate] of [
-    ['name-title mismatch', 'run', (run) => { run.name = 'Agent QA'; }],
-    ['forged workflow path', 'run', (run) => { run.path = '.github/workflows/agent-qa.yml.evil'; }],
+    ['name-title mismatch', 'run', (run) => { run.name = 'Copilot Agent QA'; }],
+    ['forged workflow path', 'run', (run) => { run.path = '.github/workflows/copilot-agent-qa.yml.evil'; }],
+    ['legacy workflow path', 'run', (run) => { run.path = '.github/workflows/agent-qa.yml'; }],
     ['repository mismatch', 'payload', (payload) => { payload.repository.full_name = 'attacker/repo'; }],
     ['run repository mismatch', 'run', (run) => { run.repository.full_name = 'attacker/repo'; }],
     ['wrong event', 'run', (run) => { run.event = 'pull_request'; }],
@@ -397,7 +518,7 @@ test('inline reporter correlation accepts the actual run identity and rejects fo
 test('real admission, recheck, executor, and reporter preserve one typed identity', async (t) => {
   const state = structuredClone(events);
   const github = admissionGithub(state);
-  const admitted = await admitPullRequest({ github, ...state.event });
+  const admitted = await admitPullRequest({ github, ...state.event, agent: 'copilot' });
   assert.equal(admitted.status, 'admitted');
   const rechecked = await recheckPullRequest({ github, request: admitted.request });
   assert.equal(rechecked.status, 'admitted');
@@ -436,9 +557,8 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
   const observed = [];
   for (const [name, mutate, reason] of [
     ['draft', (state) => { state.pull_request.draft = true; }, 'pull_request_draft'],
-    ['develop', (state) => { state.pull_request.base.ref = 'develop'; }, 'qa_not_requested'],
-    ['develop with an unrelated label', (state) => {
-      state.pull_request.base.ref = 'develop';
+    ['missing opt-in label', (state) => { state.pull_request.labels = []; }, 'qa_not_requested'],
+    ['unrelated label', (state) => {
       state.pull_request.labels = [{ name: 'documentation' }];
     }, 'qa_not_requested'],
     ['permission', (state) => { state.permission.permission = 'read'; }, 'permission_insufficient'],
@@ -446,7 +566,7 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
     const state = structuredClone(events);
     mutate(state);
     let executorInvocations = 0;
-    const decision = await admitPullRequest({ github: admissionGithub(state), ...state.event });
+    const decision = await admitPullRequest({ github: admissionGithub(state), ...state.event, agent: 'copilot' });
     if (decision.status === 'admitted') executorInvocations += 1;
     assert.equal(decision.status, 'skipped', name);
     assert.equal(decision.reason, reason, name);
@@ -466,7 +586,7 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
 });
 
 test('workflow policy rejects inherited write tokens and PR-sourced control code', () => {
-  assertWorkflowPolicy(fs.readFileSync(path.join(workflowRoot, 'agent-qa.yml'), 'utf8'));
+  assertWorkflowPolicy(fs.readFileSync(path.join(workflowRoot, 'copilot-agent-qa.yml'), 'utf8'));
   for (const fixture of ['unsafe-write-token.yml', 'unsafe-pr-control.yml']) {
     assert.throws(
       () => assertWorkflowPolicy(fs.readFileSync(path.join(workflowFixtureRoot, fixture), 'utf8')),

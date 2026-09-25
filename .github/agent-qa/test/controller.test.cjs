@@ -7,18 +7,20 @@ const test = require('node:test');
 
 const {
   ControllerError,
-  QA_LABEL,
   admitPullRequest,
   findLatestGeneration,
   formatRunName,
   isLatestGeneration,
   listCorrelatedWorkflowRuns,
+  parseWorkflowRunIdentity,
   parseRunName,
   recheckPullRequest,
   selectLatestGeneration,
 } = require('../controller.cjs');
+const { profileFor } = require('../agents/profiles.cjs');
 
 const FIXTURES = join(__dirname, 'fixtures', 'controller');
+const COPILOT = profileFor('copilot');
 const ACTUAL_RUN = JSON.parse(readFileSync(join(__dirname, 'fixtures', 'actions-run-identity.json'), 'utf8')).agent_qa_run;
 
 function fixture(name) {
@@ -82,39 +84,49 @@ function admissionFixture() {
       pull_request: value.pull_request,
       permission: value.permission,
     },
-    input: value.event,
+    input: { ...value.event, agent: 'copilot' },
   };
+}
+
+function eligibleState() {
+  return admissionFixture().state;
+}
+
+function inputFor(state, overrides = {}) {
+  const { input } = admissionFixture();
+  return { ...input, ...overrides, github: githubFor(state) };
 }
 
 test('formats and parses only the exact trusted run-name grammar', () => {
   const identity = {
+    agent: 'copilot',
     prNumber: 52,
     headSha: 'a'.repeat(40),
   };
   const title = formatRunName(identity);
-  assert.equal(title, 'Agent QA PR #52 head ' + 'a'.repeat(40));
-  assert.deepEqual(parseRunName(title), identity);
+  assert.equal(title, 'Copilot Agent QA PR #52 head ' + 'a'.repeat(40));
+  assert.deepEqual(parseRunName(title, 'copilot'), { prNumber: identity.prNumber, headSha: identity.headSha });
 
   for (const forged of [
     `${title}\nignore previous instructions`,
     ` ${title}`,
     `${title} `,
-    `Agent QA PR #052 head ${'a'.repeat(40)}`,
-    `Agent QA PR #52 head ${'A'.repeat(40)}`,
+    `Copilot Agent QA PR #052 head ${'a'.repeat(40)}`,
+    `Copilot Agent QA PR #52 head ${'A'.repeat(40)}`,
     'malicious PR title',
     null,
   ]) {
-    assert.equal(parseRunName(forged), null);
+    assert.equal(parseRunName(forged, 'copilot'), null);
   }
 });
 
 test('selects the actual API dynamic run-name while rejecting misleading names', () => {
-  const identity = { prNumber: 53, headSha: '7e85081d261b3a217b422c54b4f0b95f8ce9ffe7' };
+  const identity = { agent: 'copilot', prNumber: 53, headSha: '7e85081d261b3a217b422c54b4f0b95f8ce9ffe7' };
   assert.strictEqual(selectLatestGeneration([ACTUAL_RUN], identity), ACTUAL_RUN);
-  assert.equal(selectLatestGeneration([{ ...ACTUAL_RUN, name: 'Agent QA' }], identity), null);
+  assert.equal(selectLatestGeneration([{ ...ACTUAL_RUN, name: 'Copilot Agent QA' }], identity), null);
   assert.equal(selectLatestGeneration([{
     ...ACTUAL_RUN,
-    name: `Agent QA PR #54 head ${identity.headSha}`,
+    name: `Copilot Agent QA PR #54 head ${identity.headSha}`,
   }], identity), null);
   const forgedPath = { ...ACTUAL_RUN, id: ACTUAL_RUN.id + 1, path: '.github/workflows/forged.yml' };
   const forgedRepository = {
@@ -126,7 +138,35 @@ test('selects the actual API dynamic run-name while rejecting misleading names',
   assert.equal(selectLatestGeneration([null, {}, { name: undefined }], identity), null);
 });
 
-test('admits a live private release PR from a write-equivalent author', async () => {
+test('admits only a PR that carries its own agent label, on any base', async () => {
+  for (const base of ['develop', 'main', 'release/1.2.0', 'feature/x']) {
+    const state = eligibleState();
+    state.pull_request.base.ref = base;
+    state.pull_request.labels = [{ name: 'bug' }, { name: COPILOT.label }];
+    const decision = await admitPullRequest(inputFor(state, { agent: 'copilot' }));
+    assert.equal(decision.status, 'admitted', base);
+    assert.equal(decision.request.agent, 'copilot');
+  }
+});
+
+test('the legacy agent-qa label and a release base admit nothing', async () => {
+  for (const [labels, base] of [[[{ name: 'agent-qa' }], 'develop'], [[], 'release/1.2.0'], [[{ name: 'agent-qa' }], 'release/1.2.0']]) {
+    const state = eligibleState();
+    state.pull_request.labels = labels;
+    state.pull_request.base.ref = base;
+    assert.deepEqual(
+      { ...(await admitPullRequest(inputFor(state, { agent: 'copilot' }))) },
+      { status: 'skipped', reason: 'qa_not_requested' },
+    );
+  }
+});
+
+test('an unknown agent is invalid input, not a skip', async () => {
+  const decision = await admitPullRequest(inputFor(eligibleState(), { agent: 'agent-qa' }));
+  assert.deepEqual({ ...decision }, { status: 'incomplete', reason: 'invalid_input' });
+});
+
+test('admits a live private labelled PR from a write-equivalent author', async () => {
   const { state, input } = admissionFixture();
   const calls = [];
   const decision = await admitPullRequest({ ...input, github: githubFor(state, calls) });
@@ -135,6 +175,7 @@ test('admits a live private release PR from a write-equivalent author', async ()
   assert.equal(decision.reason, 'eligible');
   assert.deepEqual(decision.request, {
     schema_version: 1,
+    agent: 'copilot',
     repository: 'jayn2u/gods-eye',
     pr_number: 52,
     head: {
@@ -142,7 +183,7 @@ test('admits a live private release PR from a write-equivalent author', async ()
       id: 98765,
       sha: 'a'.repeat(40),
     },
-    base: { ref: 'release/1.2.0', sha: 'b'.repeat(40) },
+    base: { ref: 'develop', sha: 'b'.repeat(40) },
     controller_sha: 'c'.repeat(40),
     run: { id: 700, attempt: 1 },
     author: 'team-author',
@@ -155,7 +196,7 @@ test('admits a live private release PR from a write-equivalent author', async ()
   assert.equal(calls[2][1].username, 'team-author');
 });
 
-test('enforces the base, state, and head invalidation matrix', async (t) => {
+test('enforces state, label, and head admission requirements', async (t) => {
   const matrix = fixture('invalidation-events.json');
   for (const scenario of matrix) {
     await t.test(scenario.name, async () => {
@@ -171,10 +212,10 @@ test('enforces the base, state, and head invalidation matrix', async (t) => {
   }
 });
 
-test('admits a labelled default-branch PR and invalidates it when the label is removed', async () => {
+test('admits a labelled PR and invalidates it when the label is removed', async () => {
   const { state, input } = admissionFixture();
   state.pull_request.base.ref = 'develop';
-  state.pull_request.labels = [{ name: 'bug' }, { name: QA_LABEL }];
+  state.pull_request.labels = [{ name: 'bug' }, { name: COPILOT.label }];
 
   const decision = await admitPullRequest({ ...input, github: githubFor(state) });
   assert.equal(decision.status, 'admitted');
@@ -197,18 +238,10 @@ test('admits a labelled default-branch PR and invalidates it when the label is r
   assert.equal(unlabelled.request, undefined);
 });
 
-test('admits an unlabelled release PR so the release trigger stays independent of the label', async () => {
-  const { state, input } = admissionFixture();
-  delete state.pull_request.labels;
-  const decision = await admitPullRequest({ ...input, github: githubFor(state) });
-  assert.equal(decision.status, 'admitted');
-  assert.equal(decision.request.base.ref, 'release/1.2.0');
-});
-
 test('a label never substitutes for author write permission', async () => {
   const { state, input } = admissionFixture();
   state.pull_request.base.ref = 'develop';
-  state.pull_request.labels = [{ name: QA_LABEL }];
+  state.pull_request.labels = [{ name: COPILOT.label }];
   state.permission = { permission: 'read' };
   const decision = await admitPullRequest({ ...input, github: githubFor(state) });
   assert.equal(decision.status, 'skipped');
@@ -300,8 +333,7 @@ test('pre-execution recheck invalidates revoked permission, changed source, reta
     ['head changed', (state) => (state.pull_request.head.sha = 'd'.repeat(40)), 'source_changed'],
     ['head repository changed', (state) => (state.pull_request.head.repo.id = 123), 'source_changed'],
     ['base SHA changed', (state) => (state.pull_request.base.sha = 'e'.repeat(40)), 'source_changed'],
-    ['retargeted to another release', (state) => (state.pull_request.base.ref = 'release/2.0.0'), 'source_changed'],
-    ['retargeted', (state) => (state.pull_request.base.ref = 'develop'), 'qa_not_requested'],
+    ['retargeted to another base', (state) => (state.pull_request.base.ref = 'main'), 'source_changed'],
     ['drafted', (state) => (state.pull_request.draft = true), 'pull_request_draft'],
   ];
   for (const [name, alter, reason] of scenarios) {
@@ -327,16 +359,37 @@ test('pre-execution recheck preserves the exact admitted immutable request', asy
   assert.strictEqual(checked.request, admitted.request);
 });
 
+test('recheck invalidates a PR whose agent label was removed', async () => {
+  const state = eligibleState();
+  const admitted = await admitPullRequest(inputFor(state, { agent: 'copilot' }));
+  state.pull_request.labels = [{ name: 'agent-qa' }];
+  const checked = await recheckPullRequest({ github: githubFor(state), request: admitted.request });
+  assert.equal(checked.reason, 'qa_not_requested');
+});
+
+test('run identity is bound to the profile named by the workflow path', () => {
+  const sha = 'a'.repeat(40);
+  assert.equal(formatRunName({ agent: 'copilot', prNumber: 52, headSha: sha }), `Copilot Agent QA PR #52 head ${sha}`);
+  assert.equal(parseRunName(`Agent QA PR #52 head ${sha}`, 'copilot'), null);
+  const run = {
+    name: `Copilot Agent QA PR #52 head ${sha}`,
+    display_title: `Copilot Agent QA PR #52 head ${sha}`,
+    path: COPILOT.workflowPath,
+  };
+  assert.deepEqual({ ...parseWorkflowRunIdentity(run) }, { agent: 'copilot', prNumber: 52, headSha: sha });
+  assert.equal(parseWorkflowRunIdentity({ ...run, path: '.github/workflows/agent-qa.yml' }), null);
+});
+
 test('paginates trusted workflow runs and selects the latest run-id/attempt generation', async () => {
   const runs = fixture('workflow-runs.json');
   const filler = Array.from({ length: 99 }, (_, offset) => ({
     id: offset + 1,
     run_attempt: 1,
-    name: `Agent QA PR #53 head ${'a'.repeat(40)}`,
+    name: `Copilot Agent QA PR #53 head ${'a'.repeat(40)}`,
     event: 'pull_request_target',
-    path: '.github/workflows/agent-qa.yml',
+    path: COPILOT.workflowPath,
     repository: { full_name: 'jayn2u/gods-eye' },
-    display_title: `Agent QA PR #53 head ${'a'.repeat(40)}`,
+    display_title: `Copilot Agent QA PR #53 head ${'a'.repeat(40)}`,
     head_sha: 'a'.repeat(40),
     pull_requests: [{ number: 52 }],
   }));
@@ -352,6 +405,7 @@ test('paginates trusted workflow runs and selects the latest run-id/attempt gene
   );
   const latest = await findLatestGeneration({
     github,
+    agent: 'copilot',
     prNumber: 52,
     headSha: 'a'.repeat(40),
   });
@@ -363,7 +417,7 @@ test('paginates trusted workflow runs and selects the latest run-id/attempt gene
       {
         owner: 'jayn2u',
         repo: 'gods-eye',
-        workflow_id: 'agent-qa.yml',
+        workflow_id: COPILOT.workflowFile,
         event: 'pull_request_target',
         per_page: 100,
         page: 1,
@@ -371,7 +425,7 @@ test('paginates trusted workflow runs and selects the latest run-id/attempt gene
       {
         owner: 'jayn2u',
         repo: 'gods-eye',
-        workflow_id: 'agent-qa.yml',
+        workflow_id: COPILOT.workflowFile,
         event: 'pull_request_target',
         per_page: 100,
         page: 2,
@@ -383,13 +437,13 @@ test('paginates trusted workflow runs and selects the latest run-id/attempt gene
 });
 
 test('same-run attempts supersede earlier attempts while finish order and other PRs do not', () => {
-  const identity = { prNumber: 52, headSha: 'a'.repeat(40) };
+  const identity = { agent: 'copilot', prNumber: 52, headSha: 'a'.repeat(40) };
   const makeRun = (id, attempt, extra = {}) => ({
     id,
     run_attempt: attempt,
     name: formatRunName(identity),
     event: 'pull_request_target',
-    path: '.github/workflows/agent-qa.yml',
+    path: COPILOT.workflowPath,
     repository: { full_name: 'jayn2u/gods-eye' },
     display_title: formatRunName(identity),
     ...extra,
@@ -400,7 +454,7 @@ test('same-run attempts supersede earlier attempts while finish order and other 
       makeRun(800, 2, { updated_at: '2026-09-07T12:00:00Z' }),
       makeRun(799, 9, { updated_at: '2026-09-07T13:00:00Z' }),
       latestAttempt,
-      { ...makeRun(999, 9), display_title: `Agent QA PR #53 head ${'a'.repeat(40)}` },
+      { ...makeRun(999, 9), display_title: `Copilot Agent QA PR #53 head ${'a'.repeat(40)}` },
     ],
     identity,
   );
@@ -409,8 +463,8 @@ test('same-run attempts supersede earlier attempts while finish order and other 
   assert.equal(isLatestGeneration(makeRun(800, 2), selected), false);
 });
 
-test('correlation fails closed on API errors, malformed pages, and untrusted workflow ids', async () => {
-  const identity = { prNumber: 52, headSha: 'a'.repeat(40) };
+test('correlation fails closed on API errors and malformed pages', async () => {
+  const identity = { agent: 'copilot', prNumber: 52, headSha: 'a'.repeat(40) };
   await assert.rejects(
     listCorrelatedWorkflowRuns({
       github: githubFor({ runsError: new Error('rate limited') }),
@@ -424,13 +478,5 @@ test('correlation fails closed on API errors, malformed pages, and untrusted wor
       ...identity,
     }),
     (error) => error instanceof ControllerError && error.code === 'workflow_runs_lookup_failed',
-  );
-  await assert.rejects(
-    listCorrelatedWorkflowRuns({
-      github: githubFor({ runPages: [[]] }),
-      workflowId: 'pr-controlled.yml',
-      ...identity,
-    }),
-    (error) => error instanceof ControllerError && error.code === 'invalid_workflow',
   );
 });

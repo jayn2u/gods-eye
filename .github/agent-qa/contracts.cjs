@@ -120,6 +120,10 @@ function sameRequestIdentity(request, identity) {
 function validateReport(value, expectedRequest) {
   assertSchema('report', value);
   validateRequest(value.request);
+  const request = expectedRequest ?? value.request;
+  if (value.tools.agent.name !== request.agent) {
+    throw new ContractError('agent_mismatch');
+  }
   assertExactScenarioSet(value.scenarios, 'invalid_report_scenarios');
   assertDistinctEvidence(value.scenarios, 'invalid_report_evidence');
   assertDistinctEvidence(value.findings, 'invalid_report_evidence');

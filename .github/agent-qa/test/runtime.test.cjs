@@ -21,6 +21,7 @@ const {
   reclaimStaleManifest,
   remainingMilliseconds,
   sanitizedChildEnvironment,
+  stopHandedOffRuntime,
 } = require('../runtime.cjs')
 
 const fixtures = path.join(__dirname, 'fixtures')
@@ -364,4 +365,59 @@ test('cleanup removes only registered run children and preserves auth and sentin
   assert.equal(fs.existsSync(owned), false)
   assert.equal(await fsPromises.readFile(auth, 'utf8'), 'auth-byte-sentinel')
   assert.equal(cleanup.paths[0].outcome, 'removed')
+})
+
+test('a handed-off supervisor lets its owner exit and a later process stops the groups', async t => {
+  const runRoot = await temporaryDirectory(t, 'runtime-handoff')
+  const script = `
+    const { ProcessSupervisor, monotonicDeadlineAfter } = require(${JSON.stringify(require.resolve('../runtime.cjs'))})
+    ;(async () => {
+      const s = await new ProcessSupervisor({ runRoot: ${JSON.stringify(runRoot)}, deadline: monotonicDeadlineAfter(60000) }).initialize()
+      await s.spawn('sleeper', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { cwd: ${JSON.stringify(runRoot)}, env: { HOME: process.env.HOME, PATH: process.env.PATH } })
+      process.stdout.write(JSON.stringify(await s.handOff()))
+    })()`
+  const owner = childProcess.spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', timeout: 10_000 })
+  assert.equal(owner.status, 0, owner.stderr)
+  const handoff = JSON.parse(owner.stdout)
+  const manifest = JSON.parse(fs.readFileSync(handoff.manifestPath, 'utf8'))
+  assert.equal(manifest.handedOff, true)
+  const [sleeper] = manifest.processes
+  assert.ok(identityMatches(sleeper.identity), 'group survived its owner')
+  const receipt = await stopHandedOffRuntime({ ...handoff, reason: 'execution_complete' })
+  assert.equal(receipt.allProcessesStopped, true)
+  assert.equal(identityMatches(sleeper.identity), false)
+  assert.equal(fs.existsSync(manifest.temporaryDirectory), false)
+})
+
+test('stopHandedOffRuntime refuses a manifest outside its run root', async t => {
+  const runRoot = await temporaryDirectory(t, 'runtime-handoff-outside')
+  await assert.rejects(
+    stopHandedOffRuntime({ manifestPath: '/tmp/processes.json', runRoot, reason: 'x' }),
+    { code: 'PATH_OUTSIDE_RUN' },
+  )
+})
+
+test('handed-off cleanup refuses malformed owned paths without removing the run root', async t => {
+  const runRoot = await temporaryDirectory(t, 'runtime-handoff-owned-paths')
+  const supervisor = await new ProcessSupervisor({ runRoot, deadline: monotonicDeadlineAfter(5000) }).initialize()
+  t.after(() => fsPromises.rm(supervisor.temporaryDirectory, { recursive: true, force: true }))
+  const handoff = await supervisor.handOff()
+  const manifest = JSON.parse(await fsPromises.readFile(handoff.manifestPath, 'utf8'))
+  const rootWithTrailingSlash = `${runRoot}/`
+  manifest.ownedPaths.push(
+    { path: rootWithTrailingSlash, kind: 'malformed-root', cleanup: true },
+    { path: 42, kind: 'malformed-value', cleanup: true },
+  )
+  await fsPromises.writeFile(handoff.manifestPath, JSON.stringify(manifest))
+  const sentinel = path.join(runRoot, 'sentinel')
+  await fsPromises.writeFile(sentinel, 'keep')
+
+  const receipt = await stopHandedOffRuntime({ ...handoff, reason: 'test_cleanup' })
+  assert.deepEqual(receipt.paths.slice(0, 2).map(({ path: ownedPath, outcome }) => ({ path: ownedPath, outcome })), [
+    { path: 42, outcome: 'refused' },
+    { path: rootWithTrailingSlash, outcome: 'refused' },
+  ])
+  assert.equal(fs.existsSync(runRoot), true)
+  assert.equal(await fsPromises.readFile(sentinel, 'utf8'), 'keep')
+  assert.equal(fs.existsSync(manifest.temporaryDirectory), false)
 })

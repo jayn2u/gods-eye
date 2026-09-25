@@ -3,7 +3,10 @@
 const { createHash } = require('node:crypto');
 const { crc32 } = require('node:zlib');
 const { SCENARIO_IDS } = require('../../contracts.cjs');
-const { BOT_LOGIN, COMMENT_MARKER } = require('../../reporter.cjs');
+const { BOT_LOGIN } = require('../../reporter.cjs');
+const { profileFor } = require('../../agents/profiles.cjs');
+
+const COPILOT = profileFor('copilot');
 
 const CONTROL_SHA = 'a'.repeat(40);
 const PNG = Buffer.alloc(33, 1);
@@ -69,7 +72,7 @@ function artifact(run, pr, status) {
   const report = {
     schema_version: 1,
     request: {
-      schema_version: 1, repository: 'jayn2u/gods-eye', pr_number: pr.number,
+      schema_version: 1, agent: 'copilot', repository: 'jayn2u/gods-eye', pr_number: pr.number,
       head: { repository: 'jayn2u/gods-eye', id: 77, sha: pr.head.sha },
       base: { ref: pr.base.ref, sha: CONTROL_SHA }, controller_sha: CONTROL_SHA,
       run: { id: run.id, attempt: run.run_attempt }, author: 'jayn2u', admitted_at: '2026-09-07T00:00:00Z',
@@ -95,10 +98,10 @@ function artifact(run, pr, status) {
 }
 
 function run(id, pr, status = 'completed', conclusion = 'success') {
-  const name = `Agent QA PR #${pr.number} head ${pr.head.sha}`;
+  const name = `${COPILOT.workflowName} PR #${pr.number} head ${pr.head.sha}`;
   return {
     id, run_attempt: 1, name, event: 'pull_request_target', status, conclusion,
-    head_sha: CONTROL_SHA, display_title: name, path: '.github/workflows/agent-qa.yml',
+    head_sha: CONTROL_SHA, display_title: name, path: COPILOT.workflowPath,
     repository: { full_name: 'jayn2u/gods-eye' },
   };
 }
@@ -125,8 +128,8 @@ class LiveMatrixAdapter {
   async defaultRef() { return { object: { sha: CONTROL_SHA } }; }
   async workflows() {
     return [
-      { id: 1, path: '.github/workflows/agent-qa.yml', state: 'active' },
-      { id: 2, path: '.github/workflows/agent-qa-report.yml', state: 'active' },
+      { id: 1, path: COPILOT.workflowPath, state: 'active' },
+      { id: 2, path: `.github/workflows/${COPILOT.reportWorkflowFile}`, state: 'active' },
     ];
   }
   async trustedBlob() { return { sha: CONTROL_SHA }; }
@@ -158,11 +161,20 @@ class LiveMatrixAdapter {
   async getPull(number) { return this.pulls.get(number) || null; }
   async createPull(input) {
     const pr = { number: this.nextPr++, node_id: `PR_${this.nextPr}`, title: input.title, body: input.body,
-      state: 'open', draft: false, head: { ref: input.head, sha: this.branches.get(input.head) }, base: { ref: input.base } };
+      state: 'open', draft: false, labels: [], head: { ref: input.head, sha: this.branches.get(input.head) },
+      base: { ref: input.base } };
     this.pulls.set(pr.number, pr);
-    if (pr.number === 1) this.addRun(pr, 'completed', 'success', 'no_findings');
-    else this.addRun(pr, 'in_progress', null, null);
     return pr;
+  }
+  async addLabels(number, labels) {
+    const pr = this.pulls.get(number);
+    const hadOptIn = pr.labels.includes(COPILOT.label);
+    pr.labels = [...new Set([...pr.labels, ...labels])];
+    if (!hadOptIn && pr.labels.includes(COPILOT.label)) {
+      if (pr.number === 1) this.addRun(pr, 'completed', 'success', 'no_findings');
+      else this.addRun(pr, 'in_progress', null, null);
+    }
+    return pr.labels.map((name) => ({ name }));
   }
   async closePull(number) { const pr = this.pulls.get(number); if (pr) pr.state = 'closed'; this.closed.push(number); }
   async commit({ branch, file }) {
@@ -195,7 +207,7 @@ class LiveMatrixAdapter {
   }
   async workflowRuns() { return structuredClone(this.runs); }
   async artifacts(runId) {
-    return this.archives.has(runId) ? [{ id: runId * 10, name: `agent-qa-${this.runs.find((r) => r.id === runId).pr}-${runId}-1`,
+    return this.archives.has(runId) ? [{ id: runId * 10, name: `${COPILOT.artifactPrefix}-${this.runs.find((r) => r.id === runId).pr}-${runId}-1`,
       expired: false, workflow_run: { id: runId } }] : [];
   }
   async downloadArtifact(artifactId) { return this.archives.get(artifactId / 10); }
@@ -206,7 +218,7 @@ class LiveMatrixAdapter {
       : latest.conclusion === 'cancelled' ? 'cancelled'
         : this.archives.has(latest.id) && latest.pr === 1 && latest.id >= 102 ? 'findings' : 'no_findings';
     return [{ id: 7000 + prNumber, user: { login: BOT_LOGIN },
-      body: `${COMMENT_MARKER}\n**Status:** ${status}\n**Tested head:** ${pr.head.sha}\n/actions/runs/${latest.id}/attempts/1` }];
+      body: `${COPILOT.commentMarker}\n**Status:** ${status}\n**Tested head:** ${pr.head.sha}\n/actions/runs/${latest.id}/attempts/1` }];
   }
   async jobs(runId) {
     const value = this.runs.find((item) => item.id === runId);

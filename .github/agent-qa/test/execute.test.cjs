@@ -12,13 +12,17 @@ const {
   ALLOWED_TOOLS,
   INTERNAL_DEADLINE_MS,
   deadlineFromJobStart,
+  prepareExecution,
   parseCli,
+  runAgentStep,
+  finalizeExecution,
   runExecution,
   snapshotTrackedFiles,
 } = require('../execute.cjs');
 const { parseBrowserJournal } = require('../journal.cjs');
 const { faithfulJournalEntries } = require('./fixtures/journal-builder.cjs');
 const { SCENARIO_IDS, validateEvidenceManifest, validateReport } = require('../contracts.cjs');
+const { ProcessSupervisor, identityMatches, monotonicDeadlineAfter } = require('../runtime.cjs');
 
 const qaRoot = path.resolve(__dirname, '..');
 const fixtureRoot = path.join(__dirname, 'fixtures', 'execution');
@@ -29,6 +33,7 @@ const sha = '1'.repeat(40);
 const baseSha = '2'.repeat(40);
 const request = {
   schema_version: 1,
+  agent: 'copilot',
   repository: 'jayn2u/gods-eye',
   pr_number: 41,
   head: { repository: 'jayn2u/gods-eye', id: 12345, sha },
@@ -67,13 +72,16 @@ async function screenshots(root, missing) {
   }
 }
 
-function successAdapters(overrides = {}) {
+function fixtureAdapters(overrides = {}) {
   let snapshots = 0;
   let cleanChecks = 0;
+  let stopped = false;
   const order = [];
   return {
     order,
+    runtimeStopped: () => stopped,
     adapters: {
+      env: overrides.env ?? { QA_COPILOT_TOKEN: 'a'.repeat(40) },
       candidateHead: () => sha,
       candidateTrackedClean: () => {
         cleanChecks += 1;
@@ -87,19 +95,30 @@ function successAdapters(overrides = {}) {
       chromiumVersion: () => 'Chromium 140.0.0',
       runDoctor: async () => {
         order.push('doctor');
-        return overrides.doctor ?? doctor();
+        return overrides.doctor ?? doctor(overrides.doctorOk ?? true, overrides.failedCheck ? [overrides.failedCheck] : []);
       },
-      startRuntime: async () => {
+      startRuntime: async ({ evidence }) => {
         order.push('runtime');
         if (overrides.startError) throw overrides.startError;
+        const runRoot = path.join(evidence, 'runtime-fixture');
         return {
           origin,
-          supervisor: { runRoot: '/unused-by-adapter', runToDeadline: async () => ({ code: 0, signal: null }) },
+          supervisor: {
+            runRoot,
+            runToDeadline: async () => ({ code: 0, signal: null }),
+            handOff: async () => ({ manifestPath: path.join(runRoot, 'processes.json'), runRoot }),
+          },
           stop: async () => {
             order.push('cleanup');
+            stopped = true;
             return { allProcessesStopped: true, processes: [{ outcome: 'stopped' }] };
           },
         };
+      },
+      stopHandedOffRuntime: async () => {
+        order.push('cleanup');
+        stopped = true;
+        return { allProcessesStopped: true, processes: [{ outcome: 'stopped' }] };
       },
       runBaseline: async () => {
         order.push('baseline');
@@ -157,31 +176,245 @@ function successAdapters(overrides = {}) {
   };
 }
 
-async function executeCase(t, overrides = {}) {
+async function fixtureBundle(t, overrides = {}) {
   const paths = await temporary(t);
-  const bundle = successAdapters(overrides);
-  const result = await runExecution({
-    request: paths.requestPath,
-    candidate: paths.candidate,
-    evidence: paths.evidence,
-    jobStart: new Date().toISOString(),
-  }, bundle.adapters);
-  return { ...paths, ...bundle, ...result };
+  const bundle = fixtureAdapters(overrides);
+  return {
+    ...paths,
+    ...bundle,
+    options: {
+      request: paths.requestPath,
+      candidate: paths.candidate,
+      evidence: paths.evidence,
+      jobStart: new Date().toISOString(),
+    },
+  };
+}
+
+async function executeCase(t, overrides = {}) {
+  const bundle = await fixtureBundle(t, overrides);
+  const result = await runExecution(bundle.options, bundle.adapters);
+  return { ...bundle, ...result };
 }
 
 test('CLI parsing and the single wall-to-monotonic deadline preserve the task contract', () => {
   const parsed = parseCli([
-    'run', '--request', '/tmp/request.json', '--candidate', '/tmp/candidate',
+    'prepare', '--request', '/tmp/request.json', '--candidate', '/tmp/candidate',
     '--evidence', '/tmp/evidence', '--job-start', '2026-09-07T09:00:00Z',
   ]);
-  assert.equal(parsed.command, 'run');
+  assert.equal(parsed.command, 'prepare');
   assert.equal(parsed.jobStart, '2026-09-07T09:00:00Z');
-  assert.throws(() => parseCli(['run', '--requestJSON', '/tmp/request.json']), /Usage/);
+  assert.equal(parseCli(['agent', '--state', '/x/state.json']).command, 'agent');
+  assert.equal(parseCli(['finalize', '--state', '/x/state.json', '--cancelled']).cancelled, true);
+  assert.throws(() => parseCli(['agent', '--state', 'state.json']), { code: 'INVALID_PATH' });
+  assert.throws(() => parseCli(['run', '--request', '/a']), { code: 'USAGE' });
   const deadline = deadlineFromJobStart('2026-09-07T09:00:00Z', {
     wallNow: Date.parse('2026-09-07T09:02:00Z'),
     monotonicNow: 25_000,
   });
   assert.equal(deadline, 25_000 + INTERNAL_DEADLINE_MS - 120_000);
+});
+
+test('prepare, agent, and finalize in separate calls produce the same report as runExecution', async (t) => {
+  const a = await fixtureBundle(t);
+  const whole = await runExecution(a.options, a.adapters);
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  assert.equal(state.runtime.origin.startsWith('http://127.0.0.1:'), true);
+  assert.equal(fs.statSync(statePath).mode & 0o777, 0o600);
+  await runAgentStep({ statePath }, b.adapters);
+  const split = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  const strip = (report) => ({
+    ...report,
+    started_at: 0,
+    finished_at: 0,
+    phases: undefined,
+    request: { ...report.request, run: 0 },
+  });
+  assert.deepEqual(strip(split.report), strip(whole.report));
+});
+
+test('finalize still writes a report and stops the runtime when the agent step never ran', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'runner_failed');
+  assert.equal(b.runtimeStopped(), true);
+});
+
+test('an interrupted agent step reports timeout when the job itself was not cancelled', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await runAgentStep({ statePath, signal: controller.signal }, b.adapters);
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+
+  const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'timeout');
+  assert.equal(validateReport(report, request), report);
+});
+
+test('an interrupted agent step remains cancelled when the job was cancelled', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await runAgentStep({ statePath, signal: controller.signal }, b.adapters);
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+
+  const { report } = await finalizeExecution({ statePath, cancelled: true }, b.adapters);
+  assert.equal(report.status, 'cancelled');
+  assert.equal(report.reason, 'none');
+  assert.equal(validateReport(report, request), report);
+});
+
+test('finalize reclaims a leftover agent process group before deleting private state', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const runRoot = path.join(state.private_root, 'agent-supervisor');
+  const supervisor = await new ProcessSupervisor({ runRoot, deadline: monotonicDeadlineAfter(60_000) }).initialize();
+  const sleeper = await supervisor.spawn('sleeper', process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    cwd: b.root,
+    env: { HOME: process.env.HOME, PATH: process.env.PATH },
+  });
+  await supervisor.handOff();
+  t.after(() => {
+    if (identityMatches(sleeper.identity)) {
+      try { process.kill(-sleeper.identity.pgid, 'SIGKILL'); } catch { /* best-effort test cleanup */ }
+    }
+  });
+  assert.equal(identityMatches(sleeper.identity), true);
+
+  const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.reason, 'runner_failed');
+  assert.equal(identityMatches(sleeper.identity), false);
+  assert.equal(fs.existsSync(state.private_root), false);
+});
+
+test('agent process cleanup failures still produce a runner_failed report', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const agentSupervisorRoot = path.join(state.private_root, 'agent-supervisor');
+  await fsp.mkdir(agentSupervisorRoot);
+  await fsp.writeFile(path.join(agentSupervisorRoot, 'processes.json'), '{invalid');
+
+  const { report, reportPath } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'runner_failed');
+  assert.equal(fs.existsSync(reportPath), true);
+  assert.equal(validateReport(report, request), report);
+});
+
+test('a cancelled job finalizes as cancelled', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const { report } = await finalizeExecution({ statePath, cancelled: true }, b.adapters);
+  assert.equal(report.status, 'cancelled');
+});
+
+test('a prepare failure is carried to finalize instead of being lost', async (t) => {
+  const b = await fixtureBundle(t, { doctorOk: false, failedCheck: 'browser' });
+  const { state } = await prepareExecution(b.options, b.adapters);
+  assert.equal(state.reason, 'browser_unavailable');
+  const { report } = await finalizeExecution({
+    statePath: path.join(state.private_root, 'state.json'), cancelled: false,
+  }, b.adapters);
+  assert.equal(report.reason, 'browser_unavailable');
+});
+
+test('an already-aborted execution remains cancelled before doctor runs', async (t) => {
+  const b = await fixtureBundle(t);
+  const controller = new AbortController();
+  controller.abort();
+  const { report } = await runExecution({ ...b.options, signal: controller.signal }, b.adapters);
+  assert.equal(report.status, 'cancelled');
+  assert.equal(report.reason, 'none');
+  assert.equal(b.order.includes('doctor'), false);
+});
+
+test('a job whose deadline expired before doctor reports timeout', async (t) => {
+  const b = await fixtureBundle(t);
+  const jobStart = new Date(Date.now() - 26 * 60 * 1000).toISOString();
+  const { report } = await runExecution({ ...b.options, jobStart }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'timeout');
+});
+
+test('a mismatched candidate head retains the stale outcome', async (t) => {
+  const b = await fixtureBundle(t);
+  const { report } = await runExecution(b.options, {
+    ...b.adapters, candidateHead: () => 'f'.repeat(40),
+  });
+  assert.equal(report.status, 'cancelled');
+  assert.equal(report.reason, 'stale');
+});
+
+test('prepare rejects a malformed job start before writing execution state', async (t) => {
+  const b = await fixtureBundle(t);
+  await assert.rejects(prepareExecution({ ...b.options, jobStart: 'not-a-time' }, b.adapters), {
+    code: 'INVALID_JOB_START',
+  });
+  assert.equal(fs.existsSync(path.join(b.evidence, '.private-execution', 'state.json')), false);
+});
+
+test('finalize rejects a state that redirects its private root outside evidence', async (t) => {
+  const b = await fixtureBundle(t, { doctorOk: false, failedCheck: 'browser' });
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const otherRoot = path.join(b.root, 'must-not-remove');
+  await fsp.mkdir(otherRoot);
+  const sentinel = path.join(otherRoot, 'sentinel.txt');
+  await fsp.writeFile(sentinel, 'preserve');
+  const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  state.private_root = otherRoot;
+  await fsp.writeFile(statePath, JSON.stringify(state));
+  await assert.rejects(finalizeExecution({ statePath }, b.adapters), { code: 'INVALID_STATE' });
+  assert.equal(fs.existsSync(sentinel), true);
+});
+
+test('finalize rejects a runtime run root outside the private runtime directory', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  const otherRunRoot = path.join(b.root, 'must-not-clean');
+  await fsp.mkdir(otherRunRoot);
+  const sentinel = path.join(otherRunRoot, 'sentinel.txt');
+  await fsp.writeFile(sentinel, 'preserve');
+  const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  state.runtime.run_root = otherRunRoot;
+  state.runtime.manifest_path = path.join(otherRunRoot, 'processes.json');
+  await fsp.writeFile(statePath, JSON.stringify(state));
+
+  await assert.rejects(finalizeExecution({ statePath }, b.adapters), { code: 'INVALID_STATE' });
+  assert.equal(fs.existsSync(sentinel), true);
+});
+
+test('finalize does not delete an agent outcome path outside its private root', async (t) => {
+  const b = await fixtureBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  await runAgentStep({ statePath }, b.adapters);
+  const sentinel = path.join(b.root, 'external-log.txt');
+  await fsp.writeFile(sentinel, 'preserve');
+  const outcomePath = path.join(state.private_root, 'agent-outcome.json');
+  const outcome = JSON.parse(await fsp.readFile(outcomePath, 'utf8'));
+  outcome.stdout_path = sentinel;
+  await fsp.writeFile(outcomePath, JSON.stringify(outcome));
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.status, 'no_findings');
+  assert.equal(fs.existsSync(sentinel), true);
+});
+
+test('the agent step refuses a missing or whitespace-padded token as auth_required', async (t) => {
+  for (const token of [undefined, `${'a'.repeat(40)} `]) {
+    const b = await fixtureBundle(t, { env: token === undefined ? {} : { QA_COPILOT_TOKEN: token } });
+    const { statePath } = await prepareExecution(b.options, b.adapters);
+    const outcome = await runAgentStep({ statePath }, b.adapters);
+    assert.equal(outcome.process_error.code, 'AUTH_REQUIRED');
+    assert.equal(b.order.includes('agent'), false);
+    const { report } = await finalizeExecution({ statePath, cancelled: false }, b.adapters);
+    assert.equal(report.reason, 'auth_required');
+  }
 });
 
 test('Copilot invocation grants only the declared browser tools and no blanket permission', () => {
@@ -250,7 +483,7 @@ test('A complete adapter-backed execution emits a validated no-findings public a
   assert.deepEqual(result.order, ['doctor', 'runtime', 'baseline', 'agent', 'cleanup']);
   validateReport(result.report, request);
   // The job summary reads these; before they were recorded the timings existed only in stderr.
-  assert.deepEqual(result.report.phases.map(({ name }) => name), ['doctor', 'runtime', 'baseline', 'agent']);
+  assert.deepEqual(result.report.phases.map(({ name }) => name), ['doctor', 'runtime', 'baseline', 'agent', 'finalize']);
   assert.equal(result.report.phases.every(({ seconds }) => Number.isSafeInteger(seconds) && seconds >= 0), true);
   validateEvidenceManifest(result.evidence, result.report.evidence);
   assert.equal(fs.existsSync(path.join(result.evidence, '.private-execution')), false);
@@ -292,7 +525,7 @@ test('Failure matrix keeps infrastructure honest, checks source integrity, and a
 
 test('A zero-test or missing baseline result is setup failure even when its process exits zero', async (t) => {
   const paths = await temporary(t);
-  const bundle = successAdapters();
+  const bundle = fixtureAdapters();
   delete bundle.adapters.runBaseline;
   const result = await runExecution({
     request: paths.requestPath,
@@ -319,7 +552,15 @@ test('Tracked snapshot records deletion and symlink bytes rather than following 
   assert.equal(snapshot.link.kind, 'symlink');
 });
 
-test('Real execute CLI with a disposable clean checkout reports a missing agent token without using developer credentials', async (t) => {
+function executeCli(command, args, env) {
+  const result = childProcess.spawnSync(process.execPath, [path.join(qaRoot, 'execute.cjs'), command, ...args], {
+    encoding: 'utf8', timeout: 30_000, env,
+  });
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+async function cliFixture(t) {
   const paths = await temporary(t);
   await fsp.writeFile(path.join(paths.candidate, 'README.md'), 'fixture\n');
   childProcess.execFileSync('git', ['init', '-q', paths.candidate]);
@@ -333,41 +574,68 @@ test('Real execute CLI with a disposable clean checkout reports a missing agent 
   await fsp.writeFile(paths.requestPath, JSON.stringify(cliRequest));
   const stateRoot = path.join(paths.root, 'qa-state');
   await fsp.mkdir(stateRoot, { mode: 0o700 });
-  const result = childProcess.spawnSync(process.execPath, [
-    path.join(qaRoot, 'execute.cjs'), 'run',
+  const env = {
+    HOME: process.env.HOME, PATH: process.env.PATH, LANG: process.env.LANG ?? 'C.UTF-8',
+    QA_ROOT: stateRoot, QA_DEVELOPER_CHECKOUT: paths.candidate, GITHUB_ACTIONS: 'true',
+    QA_GH_BIN: '/bin/false', QA_COPILOT_BIN: '/bin/false',
+    QA_PLAYWRIGHT_MCP_BIN: '/bin/false', QA_UV_BIN: '/bin/false',
+    QA_PNPM_BIN: '/bin/false', QA_SYSTEMCTL_BIN: '/bin/false',
+    QA_LOGINCTL_BIN: '/bin/false', QA_BROWSER_PROBE_BIN: '/bin/false',
+  };
+  const prepared = executeCli('prepare', [
     '--request', paths.requestPath, '--candidate', paths.candidate,
     '--evidence', paths.evidence, '--job-start', new Date().toISOString(),
-  ], {
-    encoding: 'utf8',
-    timeout: 30_000,
-    env: {
-      HOME: process.env.HOME, PATH: process.env.PATH, LANG: process.env.LANG ?? 'C.UTF-8',
-      QA_ROOT: stateRoot, QA_DEVELOPER_CHECKOUT: paths.candidate,
-      // Inside a workflow the agent token is required, so its absence must surface as auth_required
-      // rather than as a product finding.
-      GITHUB_ACTIONS: 'true',
-      QA_GH_BIN: '/bin/false', QA_COPILOT_BIN: '/bin/false',
-      QA_PLAYWRIGHT_MCP_BIN: '/bin/false', QA_UV_BIN: '/bin/false',
-      QA_PNPM_BIN: '/bin/false', QA_SYSTEMCTL_BIN: '/bin/false',
-      QA_LOGINCTL_BIN: '/bin/false', QA_BROWSER_PROBE_BIN: '/bin/false',
-    },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  const output = JSON.parse(result.stdout);
-  assert.equal(output.status, 'incomplete');
-  assert.equal(output.reason, 'auth_required');
-  const report = JSON.parse(await fsp.readFile(path.join(paths.evidence, 'report.json'), 'utf8'));
-  validateReport(report, cliRequest);
+  ], env);
+  assert.equal(prepared.ready, false);
+  assert.equal(prepared.state, path.join(paths.evidence, '.private-execution', 'state.json'));
+  return { ...paths, cliRequest, env, statePath: prepared.state };
+}
+
+async function stageCliRuntime(statePath) {
+  // This disposable README checkout cannot launch the fixture app. Stage a no-process handoff
+  // manifest after the real prepare CLI writes state so the next CLI steps exercise the handoff.
+  const state = JSON.parse(await fsp.readFile(statePath, 'utf8'));
+  const runRoot = path.join(state.private_root, 'runtime', 'cli-handoff');
+  await fsp.mkdir(runRoot, { recursive: true, mode: 0o700 });
+  const manifestPath = path.join(runRoot, 'processes.json');
+  await fsp.writeFile(manifestPath, JSON.stringify({
+    version: 1, runRoot, handedOff: true, processes: [], ownedPaths: [], temporaryDirectory: null,
+  }), { mode: 0o600 });
+  const promptPath = path.join(state.private_root, 'prompt.txt');
+  await fsp.writeFile(promptPath, 'fixture assignment', { mode: 0o600 });
+  state.reason = null;
+  state.runtime = { origin, manifest_path: manifestPath, run_root: runRoot };
+  state.prompt_path = promptPath;
+  state.agent_paths = {
+    work_dir: path.join(state.private_root, 'work'),
+    agent_home: path.join(state.private_root, 'agent-home'),
+    journal: path.join(state.private_root, 'browser-journal.jsonl'),
+    private_result: path.join(state.private_root, 'agent-result.json'),
+  };
+  await fsp.mkdir(state.agent_paths.work_dir, { mode: 0o700 });
+  await fsp.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+test('real execute CLI carries missing agent auth across prepare, agent, and finalize processes', async (t) => {
+  const b = await cliFixture(t);
+  await stageCliRuntime(b.statePath);
+  const agent = executeCli('agent', ['--state', b.statePath], b.env);
+  assert.equal(agent.outcome, path.join(path.dirname(b.statePath), 'agent-outcome.json'));
+  const finalized = executeCli('finalize', ['--state', b.statePath], b.env);
+  assert.equal(finalized.status, 'incomplete');
+  assert.equal(finalized.reason, 'auth_required');
+  const report = JSON.parse(await fsp.readFile(finalized.report, 'utf8'));
+  validateReport(report, b.cliRequest);
   assert.equal(report.cleanup.private_output_deleted, true);
-  const durable = path.join(durableEvidence, 'cli-missing-auth');
-  await fsp.rm(durable, { recursive: true, force: true });
-  await fsp.mkdir(durable, { recursive: true });
-  await fsp.copyFile(path.join(paths.evidence, 'report.json'), path.join(durable, 'report.json'));
-  await fsp.writeFile(path.join(durable, 'observation.json'), `${JSON.stringify({
-    invocation: 'node .github/agent-qa/execute.cjs run --request <json> --candidate <path> --evidence <path> --job-start <timestamp>',
-    exit_status: result.status,
-    status: output.status,
-    reason: output.reason,
-    developer_auth_used: false,
-  }, null, 2)}\n`);
+});
+
+test('real execute CLI finalizes a validated report when the agent process was skipped', async (t) => {
+  const b = await cliFixture(t);
+  await stageCliRuntime(b.statePath);
+  const finalized = executeCli('finalize', ['--state', b.statePath], b.env);
+  assert.equal(finalized.status, 'incomplete');
+  assert.equal(finalized.reason, 'runner_failed');
+  const report = JSON.parse(await fsp.readFile(finalized.report, 'utf8'));
+  validateReport(report, b.cliRequest);
+  assert.equal(report.cleanup.private_output_deleted, true);
 });
