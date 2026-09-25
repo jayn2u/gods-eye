@@ -102,6 +102,7 @@ function evidence(pathname) {
 function request(run = FIXTURE.run) {
   return {
     schema_version: 1,
+    agent: 'copilot',
     repository: 'jayn2u/gods-eye',
     pr_number: 42,
     head: {

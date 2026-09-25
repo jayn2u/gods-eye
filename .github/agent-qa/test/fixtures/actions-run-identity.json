@@ -2,9 +2,9 @@
   "agent_qa_run": {
     "id": 34178688781,
     "run_attempt": 1,
-    "name": "Agent QA PR #53 head 7e85081d261b3a217b422c54b4f0b95f8ce9ffe7",
-    "display_title": "Agent QA PR #53 head 7e85081d261b3a217b422c54b4f0b95f8ce9ffe7",
-    "path": ".github/workflows/agent-qa.yml",
+    "name": "Copilot Agent QA PR #53 head 7e85081d261b3a217b422c54b4f0b95f8ce9ffe7",
+    "display_title": "Copilot Agent QA PR #53 head 7e85081d261b3a217b422c54b4f0b95f8ce9ffe7",
+    "path": ".github/workflows/copilot-agent-qa.yml",
     "event": "pull_request_target",
     "status": "completed",
     "conclusion": "failure",

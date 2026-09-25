@@ -397,7 +397,7 @@ test('inline reporter correlation accepts the actual run identity and rejects fo
 test('real admission, recheck, executor, and reporter preserve one typed identity', async (t) => {
   const state = structuredClone(events);
   const github = admissionGithub(state);
-  const admitted = await admitPullRequest({ github, ...state.event });
+  const admitted = await admitPullRequest({ github, ...state.event, agent: 'copilot' });
   assert.equal(admitted.status, 'admitted');
   const rechecked = await recheckPullRequest({ github, request: admitted.request });
   assert.equal(rechecked.status, 'admitted');
@@ -446,7 +446,7 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
     const state = structuredClone(events);
     mutate(state);
     let executorInvocations = 0;
-    const decision = await admitPullRequest({ github: admissionGithub(state), ...state.event });
+    const decision = await admitPullRequest({ github: admissionGithub(state), ...state.event, agent: 'copilot' });
     if (decision.status === 'admitted') executorInvocations += 1;
     assert.equal(decision.status, 'skipped', name);
     assert.equal(decision.reason, reason, name);

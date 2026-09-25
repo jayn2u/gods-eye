@@ -69,7 +69,7 @@ function artifact(run, pr, status) {
   const report = {
     schema_version: 1,
     request: {
-      schema_version: 1, repository: 'jayn2u/gods-eye', pr_number: pr.number,
+      schema_version: 1, agent: 'copilot', repository: 'jayn2u/gods-eye', pr_number: pr.number,
       head: { repository: 'jayn2u/gods-eye', id: 77, sha: pr.head.sha },
       base: { ref: pr.base.ref, sha: CONTROL_SHA }, controller_sha: CONTROL_SHA,
       run: { id: run.id, attempt: run.run_attempt }, author: 'jayn2u', admitted_at: '2026-09-07T00:00:00Z',

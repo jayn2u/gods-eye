@@ -1,15 +1,10 @@
 'use strict';
 
 const { validateRequest } = require('./contracts.cjs');
+const { ProfileError, profileFor, profileForWorkflowPath } = require('./agents/profiles.cjs');
 
 const EXPECTED_REPOSITORY = 'jayn2u/gods-eye';
-const AGENT_QA_WORKFLOW = 'agent-qa.yml';
-const AGENT_QA_WORKFLOW_NAME = 'Agent QA';
-const AGENT_QA_WORKFLOW_PATH = `.github/workflows/${AGENT_QA_WORKFLOW}`;
-const RELEASE_BASE_PATTERN = /^release\/[^/]+$/;
-const QA_LABEL = 'agent-qa';
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
-const RUN_NAME_PATTERN = /^Agent QA PR #([1-9][0-9]*) head ([0-9a-f]{40})$/;
 const PAGE_SIZE = 100;
 
 class ControllerError extends Error {
@@ -38,26 +33,27 @@ function isSha(value) {
   return typeof value === 'string' && SHA_PATTERN.test(value);
 }
 
-function formatRunName({ prNumber, headSha }) {
+function runNamePattern(profile) {
+  const escaped = profile.workflowName.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`^${escaped} PR #([1-9][0-9]*) head ([0-9a-f]{40})$`, 'u');
+}
+
+function formatRunName({ agent, prNumber, headSha }) {
+  const profile = profileFor(agent);
   if (!isPositiveInteger(prNumber) || !isSha(headSha)) {
     throw new ControllerError('invalid_run_identity', 'invalid PR number or head SHA');
   }
-  return `${AGENT_QA_WORKFLOW_NAME} PR #${prNumber} head ${headSha}`;
+  return `${profile.workflowName} PR #${prNumber} head ${headSha}`;
 }
 
-function parseRunName(displayTitle) {
-  if (typeof displayTitle !== 'string') {
-    return null;
-  }
-  const match = RUN_NAME_PATTERN.exec(displayTitle);
+function parseRunName(displayTitle, agent) {
+  if (typeof displayTitle !== 'string') return null;
+  const match = runNamePattern(profileFor(agent)).exec(displayTitle);
   if (!match) {
     return null;
   }
   const prNumber = Number(match[1]);
-  if (!isPositiveInteger(prNumber)) {
-    return null;
-  }
-  return Object.freeze({ prNumber, headSha: match[2] });
+  return isPositiveInteger(prNumber) ? Object.freeze({ prNumber, headSha: match[2] }) : null;
 }
 
 function parseWorkflowRunIdentity(run) {
@@ -65,13 +61,14 @@ function parseWorkflowRunIdentity(run) {
       || run.name !== run.display_title) {
     return null;
   }
-  return parseRunName(run.name);
+  const profile = profileForWorkflowPath(run.path);
+  if (!profile) return null;
+  const parsed = parseRunName(run.name, profile.agent);
+  return parsed ? Object.freeze({ agent: profile.agent, ...parsed }) : null;
 }
 
-function isTrustedWorkflowPath(value) {
-  return value === AGENT_QA_WORKFLOW_PATH
-    || (typeof value === 'string' && value.startsWith(`${AGENT_QA_WORKFLOW_PATH}@`)
-      && value.length > AGENT_QA_WORKFLOW_PATH.length + 1);
+function isTrustedWorkflowPath(value, agent) {
+  return profileForWorkflowPath(value)?.agent === profileFor(agent).agent;
 }
 
 function apiMethod(github, group, method) {
@@ -98,6 +95,7 @@ function validateAdmissionInput(input) {
     if (!input || typeof input !== 'object') {
       throw new ControllerError('invalid_input', 'admission input must be an object');
     }
+    profileFor(input.agent);
     const repositoryParts = splitExpectedRepository(input.repository);
     if (
       !isPositiveInteger(input.pullNumber) ||
@@ -112,7 +110,7 @@ function validateAdmissionInput(input) {
     }
     return repositoryParts;
   } catch (error) {
-    if (error instanceof ControllerError) {
+    if (error instanceof ControllerError || error instanceof ProfileError) {
       return null;
     }
     throw error;
@@ -149,18 +147,15 @@ function repositoryRejection(repository) {
   return null;
 }
 
-function hasQaLabel(pullRequest) {
+function requestsAgentQa(pullRequest, agent) {
+  const { label } = profileFor(agent);
   return Array.isArray(pullRequest.labels)
-    && pullRequest.labels.some((label) => label !== null
-      && typeof label === 'object'
-      && label.name === QA_LABEL);
+    && pullRequest.labels.some((item) => item !== null
+      && typeof item === 'object'
+      && item.name === label);
 }
 
-function requestsAgentQa(pullRequest) {
-  return RELEASE_BASE_PATTERN.test(pullRequest.base.ref) || hasQaLabel(pullRequest);
-}
-
-function pullRequestRejection(pullRequest, pullNumber, expectedIdentity) {
+function pullRequestRejection(pullRequest, pullNumber, expectedIdentity, agent) {
   if (!pullRequest || pullRequest.number !== pullNumber) {
     return 'pull_request_malformed';
   }
@@ -173,7 +168,7 @@ function pullRequestRejection(pullRequest, pullNumber, expectedIdentity) {
   if (!pullRequest.base || typeof pullRequest.base.ref !== 'string') {
     return 'pull_request_malformed';
   }
-  if (!requestsAgentQa(pullRequest)) {
+  if (!requestsAgentQa(pullRequest, agent)) {
     return 'qa_not_requested';
   }
   if (!isSha(pullRequest.base.sha)) {
@@ -253,7 +248,7 @@ async function assessPullRequest(input, expectedIdentity) {
     return result('incomplete', 'pull_request_lookup_failed');
   }
   const pullRequest = pullResponse?.data;
-  const pullReason = pullRequestRejection(pullRequest, input.pullNumber, expectedIdentity);
+  const pullReason = pullRequestRejection(pullRequest, input.pullNumber, expectedIdentity, input.agent);
   if (pullReason) {
     return result('skipped', pullReason);
   }
@@ -275,6 +270,7 @@ async function assessPullRequest(input, expectedIdentity) {
 
   const request = {
     schema_version: 1,
+    agent: input.agent,
     repository: EXPECTED_REPOSITORY,
     pr_number: pullRequest.number,
     head: {
@@ -309,6 +305,7 @@ async function recheckPullRequest({ github, request }) {
   }
   const input = {
     github,
+    agent: request.agent,
     repository: request.repository,
     pullNumber: request.pr_number,
     eventHeadSha: request.head.sha,
@@ -360,8 +357,9 @@ function selectLatestGeneration(runs, identity) {
     if (
       run?.event !== 'pull_request_target' ||
       run?.repository?.full_name !== EXPECTED_REPOSITORY ||
-      !isTrustedWorkflowPath(run?.path) ||
+      !isTrustedWorkflowPath(run?.path, identity.agent) ||
       !parsed ||
+      parsed.agent !== identity.agent ||
       parsed.prNumber !== identity.prNumber ||
       parsed.headSha !== identity.headSha ||
       !runGeneration(run)
@@ -378,16 +376,14 @@ function selectLatestGeneration(runs, identity) {
 async function listCorrelatedWorkflowRuns({
   github,
   repository = EXPECTED_REPOSITORY,
-  workflowId = AGENT_QA_WORKFLOW,
+  agent,
   prNumber,
   headSha,
 }) {
   const { owner, repo } = splitExpectedRepository(repository);
-  const identity = { prNumber, headSha };
+  const profile = profileFor(agent);
+  const identity = { agent, prNumber, headSha };
   formatRunName(identity);
-  if (workflowId !== AGENT_QA_WORKFLOW) {
-    throw new ControllerError('invalid_workflow', `workflow must be ${AGENT_QA_WORKFLOW}`);
-  }
   const listWorkflowRuns = apiMethod(github, 'actions', 'listWorkflowRuns');
   const matching = [];
   for (let page = 1; ; page += 1) {
@@ -396,7 +392,7 @@ async function listCorrelatedWorkflowRuns({
       response = await listWorkflowRuns({
         owner,
         repo,
-        workflow_id: workflowId,
+        workflow_id: profile.workflowFile,
         event: 'pull_request_target',
         per_page: PAGE_SIZE,
         page,
@@ -404,7 +400,7 @@ async function listCorrelatedWorkflowRuns({
     } catch (error) {
       throw new ControllerError(
         'workflow_runs_lookup_failed',
-        'failed to list trusted Agent QA workflow runs',
+        `failed to list trusted ${profile.workflowName} workflow runs`,
         { cause: error },
       );
     }
@@ -429,6 +425,7 @@ async function listCorrelatedWorkflowRuns({
 async function findLatestGeneration(input) {
   const runs = await listCorrelatedWorkflowRuns(input);
   return selectLatestGeneration(runs, {
+    agent: input.agent,
     prNumber: input.prNumber,
     headSha: input.headSha,
   });
@@ -442,13 +439,8 @@ function isLatestGeneration(currentRun, latestRun) {
 }
 
 module.exports = {
-  AGENT_QA_WORKFLOW,
-  AGENT_QA_WORKFLOW_NAME,
-  AGENT_QA_WORKFLOW_PATH,
   ControllerError,
   EXPECTED_REPOSITORY,
-  QA_LABEL,
-  RELEASE_BASE_PATTERN,
   admitPullRequest,
   compareGenerations,
   findLatestGeneration,

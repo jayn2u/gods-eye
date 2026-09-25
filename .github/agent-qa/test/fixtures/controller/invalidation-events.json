@@ -1,14 +1,10 @@
 [
-  { "name": "develop target", "changes": { "base.ref": "develop" }, "status": "skipped", "reason": "qa_not_requested" },
-  { "name": "empty release suffix", "changes": { "base.ref": "release/" }, "status": "skipped", "reason": "qa_not_requested" },
-  { "name": "nested release suffix", "changes": { "base.ref": "release/x/y" }, "status": "skipped", "reason": "qa_not_requested" },
   { "name": "develop target with an unrelated label", "changes": { "base.ref": "develop", "labels": [{ "name": "bug" }, { "name": "agent-qa-please" }] }, "status": "skipped", "reason": "qa_not_requested" },
   { "name": "develop target with malformed label entries", "changes": { "base.ref": "develop", "labels": [null, "agent-qa", 7] }, "status": "skipped", "reason": "qa_not_requested" },
   { "name": "develop target with a non-array labels field", "changes": { "base.ref": "develop", "labels": { "name": "agent-qa" } }, "status": "skipped", "reason": "qa_not_requested" },
   { "name": "draft conversion", "changes": { "draft": true }, "status": "skipped", "reason": "pull_request_draft" },
-  { "name": "labelled draft stays rejected", "changes": { "base.ref": "develop", "draft": true, "labels": [{ "name": "agent-qa" }] }, "status": "skipped", "reason": "pull_request_draft" },
+  { "name": "labelled draft stays rejected", "changes": { "base.ref": "develop", "draft": true, "labels": [{ "name": "copilot-agent-qa" }] }, "status": "skipped", "reason": "pull_request_draft" },
   { "name": "closed pull request", "changes": { "state": "closed" }, "status": "skipped", "reason": "pull_request_closed" },
-  { "name": "labelled closed pull request stays rejected", "changes": { "base.ref": "develop", "state": "closed", "labels": [{ "name": "agent-qa" }] }, "status": "skipped", "reason": "pull_request_closed" },
-  { "name": "retarget away", "changes": { "base.ref": "develop" }, "status": "skipped", "reason": "qa_not_requested" },
+  { "name": "labelled closed pull request stays rejected", "changes": { "base.ref": "develop", "state": "closed", "labels": [{ "name": "copilot-agent-qa" }] }, "status": "skipped", "reason": "pull_request_closed" },
   { "name": "new head", "changes": { "head.sha": "dddddddddddddddddddddddddddddddddddddddd" }, "status": "skipped", "reason": "source_changed" }
 ]

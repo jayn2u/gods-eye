@@ -29,6 +29,7 @@ const sha = '1'.repeat(40);
 const baseSha = '2'.repeat(40);
 const request = {
   schema_version: 1,
+  agent: 'copilot',
   repository: 'jayn2u/gods-eye',
   pr_number: 41,
   head: { repository: 'jayn2u/gods-eye', id: 12345, sha },
