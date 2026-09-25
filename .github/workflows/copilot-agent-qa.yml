@@ -191,6 +191,7 @@ jobs:
           # the agent cannot reach the repository API even though it now holds a Copilot credential.
           QA_COPILOT_TOKEN: ${{ secrets.AGENT_QA_COPILOT_TOKEN }}
           QA_AGENT_MODEL: ${{ vars.AGENT_QA_MODEL }}
+          STATE_PATH: ${{ steps.prepare.outputs.state }}
           GITHUB_TOKEN: ""
           GH_TOKEN: ""
           OPENAI_API_KEY: ""
@@ -198,7 +199,7 @@ jobs:
           CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
         shell: bash
-        run: node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" agent --state "${{ steps.prepare.outputs.state }}"
+        run: node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" agent --state "$STATE_PATH"
 
       - name: Verify the journal, write the report, and stop the runtime
         id: finalize
@@ -207,6 +208,7 @@ jobs:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
           NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
           JOB_STATUS: ${{ job.status }}
+          STATE_PATH: ${{ steps.prepare.outputs.state }}
           GITHUB_TOKEN: ""
           GH_TOKEN: ""
         shell: bash
@@ -214,7 +216,7 @@ jobs:
           cancelled=()
           if [ "$JOB_STATUS" = "cancelled" ]; then cancelled=(--cancelled); fi
           node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" finalize \
-            --state "${{ steps.prepare.outputs.state }}" "${cancelled[@]}"
+            --state "$STATE_PATH" "${cancelled[@]}"
 
       - name: Stage validated public evidence
         id: stage

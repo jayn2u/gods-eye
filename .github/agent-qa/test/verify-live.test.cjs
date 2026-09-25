@@ -179,6 +179,17 @@ test('missing default workflows and unknown required checks cannot be inferred s
   assert.ok(result.missing.includes('required_checks_not_observable'));
 });
 
+test('preflight rejects a Copilot profile that differs from the default branch', async () => {
+  const pathname = '.github/agent-qa/agents/profiles.cjs';
+  const { adapter } = adapterFixture({
+    async trustedBlob(candidate) { return { sha: candidate === pathname ? 'b'.repeat(40) : SHA }; },
+  });
+  const result = await preflight(adapter);
+  assert.equal(result.ok, false);
+  assert.ok(result.missing.includes(`local_${pathname}_does_not_match_default`));
+  assert.equal(result.checks.find(({ name }) => name === 'trusted_profiles.cjs')?.ok, false);
+});
+
 test('required Copilot Agent QA check is rejected because the workflow must remain advisory', async () => {
   const { adapter } = adapterFixture({
     async requiredChecks() { return { observable: true, contexts: ['Copilot Agent QA / Fixture browser QA'], checks: [] }; },

@@ -147,6 +147,7 @@ async function executeAdmittedRequest(t, request) {
   await fsp.writeFile(requestPath, JSON.stringify(request));
   const order = [];
   const adapters = {
+    env: { QA_COPILOT_TOKEN: 'a'.repeat(40) },
     candidateHead: () => request.head.sha,
     candidateTrackedClean: () => true,
     snapshotTrackedFiles: () => ({ source: 'unchanged' }),
@@ -165,9 +166,14 @@ async function executeAdmittedRequest(t, request) {
     }),
     startRuntime: async () => ({
       origin: 'http://127.0.0.1:41731',
-      supervisor: { runRoot: root, runToDeadline: async () => ({ code: 0, signal: null }) },
+      supervisor: {
+        runRoot: root,
+        runToDeadline: async () => ({ code: 0, signal: null }),
+        handOff: async () => ({ manifestPath: path.join(root, 'processes.json'), runRoot: root }),
+      },
       stop: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
     }),
+    stopHandedOffRuntime: async () => ({ allProcessesStopped: true, processes: [{ outcome: 'stopped' }] }),
     runBaseline: async () => ({
       name: 'candidate-playwright', status: 'passed', harness_started: true, app_started: true, duration_ms: 12,
     }),
@@ -306,16 +312,41 @@ test('only the agent step holds the Copilot token', () => {
   const steps = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps;
   const holders = steps.filter((s) => JSON.stringify(s.env ?? {}).includes('secrets.AGENT_QA_COPILOT_TOKEN'));
   assert.deepEqual(holders.map((s) => s.id), ['agent']);
-  assert.equal(steps.find((s) => s.id === 'agent')['timeout-minutes'], 22);
+  const prepare = steps.find((s) => s.id === 'prepare');
+  const agent = steps.find((s) => s.id === 'agent');
+  const finalize = steps.find((s) => s.id === 'finalize');
+  assert.equal(agent['timeout-minutes'], 22);
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
+    assert.equal(agent.env[key], '');
+  }
+  for (const step of [prepare, finalize]) {
+    assert.equal(step.env.GITHUB_TOKEN, '');
+    assert.equal(step.env.GH_TOKEN, '');
+  }
+  for (const step of steps) {
+    assert.equal(Object.values(step.env ?? {}).some((value) => /secrets\.GITHUB_TOKEN/u.test(String(value))), false);
+  }
+  assert.equal(agent.env.QA_COPILOT_TOKEN, '${{ secrets.AGENT_QA_COPILOT_TOKEN }}');
+  assert.equal(prepare.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.match(prepare.run, /execute\.cjs" prepare/u);
+  assert.match(prepare.run, /--job-start "\$JOB_START"/u);
 });
 
 test('prepare, agent, finalize run in order and finalize always runs after an admitted recheck', () => {
   const steps = parseWorkflow('copilot-agent-qa.yml').jobs.qa.steps;
   const ids = steps.map((s) => s.id).filter(Boolean);
   assert.ok(ids.indexOf('prepare') < ids.indexOf('agent') && ids.indexOf('agent') < ids.indexOf('finalize'));
+  const agent = steps.find((s) => s.id === 'agent');
   const finalize = steps.find((s) => s.id === 'finalize');
   assert.match(finalize.if, /always\(\)/u);
   assert.match(finalize.run, /execute\.cjs" finalize/u);
+  for (const step of [agent, finalize]) {
+    assert.equal(step.env.STATE_PATH, '${{ steps.prepare.outputs.state }}');
+    assert.match(step.run, /--state "\$STATE_PATH"/u);
+  }
+  for (const step of steps.filter((s) => typeof s.run === 'string')) {
+    assert.doesNotMatch(step.run, /\$\{\{\s*steps\./u, `${step.name} interpolates step outputs in run`);
+  }
 });
 
 test('admission names the copilot agent and no workflow mentions the legacy label or release', () => {
@@ -338,6 +369,7 @@ test('parsed workflow dependency environment loads trusted controller modules fr
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
   const trustedRoot = path.join(root, 'trusted-control', '.github', 'agent-qa');
   await fsp.mkdir(trustedRoot, { recursive: true });
+  await fsp.mkdir(path.join(trustedRoot, 'agents'), { recursive: true });
   for (const filename of [
     'controller.cjs',
     'contracts.cjs',
@@ -348,6 +380,10 @@ test('parsed workflow dependency environment loads trusted controller modules fr
   ]) {
     await fsp.copyFile(path.join(workflowRoot, '..', 'agent-qa', filename), path.join(trustedRoot, filename));
   }
+  await fsp.copyFile(
+    path.join(workflowRoot, '..', 'agent-qa', 'agents', 'profiles.cjs'),
+    path.join(trustedRoot, 'agents', 'profiles.cjs'),
+  );
   const toolchainModules = path.join(root, 'qa-root', 'toolchain', 'node_modules');
   await fsp.mkdir(toolchainModules, { recursive: true });
   for (const dependency of ['ajv', 'fast-deep-equal', 'fast-uri', 'json-schema-traverse', 'require-from-string']) {

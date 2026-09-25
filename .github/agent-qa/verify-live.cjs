@@ -377,6 +377,7 @@ async function preflight(adapter) {
   const trustedPaths = [
     '.github/agent-qa/verify-live.cjs', '.github/agent-qa/controller.cjs',
     '.github/agent-qa/reporter.cjs', '.github/agent-qa/contracts.cjs',
+    '.github/agent-qa/agents/profiles.cjs',
   ];
   for (const pathname of trustedPaths) {
     const blob = await adapter.trustedBlob(pathname, DEFAULT_BRANCH);
