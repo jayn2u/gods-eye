@@ -227,3 +227,4 @@ playwright-report/
 test-results/
 .omo/
 .github/agent-qa/.omo/
+.claude/

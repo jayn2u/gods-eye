@@ -15,6 +15,7 @@ const {
   COMMENT_MARKER,
   ReporterError,
   inspectArtifactZip,
+  prepareEvidencePublication,
   publishWorkflowRun,
   renderComment,
 } = require('../reporter.cjs');
@@ -133,7 +134,7 @@ function report(run = FIXTURE.run, status = 'no_findings') {
     controller_sha: 'c'.repeat(40),
     started_at: '2026-09-07T00:00:01Z',
     finished_at: '2026-09-07T00:01:00Z',
-    tools: { node: '24.12.0', codex: '0.153.3', playwright_mcp: '0.0.80', chromium: '1.0' },
+    tools: { node: '24.12.0', agent: { name: 'copilot', version: '1.0.83' }, playwright_mcp: '0.0.80', chromium: '1.0' },
     status: 'no_findings',
     reason: 'none',
     deterministic_results: [{
@@ -531,4 +532,72 @@ test('rendered comments remain byte-bounded for multibyte model text', () => {
   });
   assert.ok(Buffer.byteLength(body) <= 60 * 1024);
   assert.match(body, /Details truncated/);
+});
+
+test('a published report carries the scenario table so a reviewer sees what ran', async () => {
+  const { github, state } = fakeGithub();
+  setArtifact(state, FIXTURE.run, artifactZip(report()));
+  await publishWorkflowRun({ github, workflowRun: eventFor(FIXTURE.run) });
+  const body = state.comments.at(-1).body;
+  assert.match(body, /\| Scenario \| Result \| Browser calls \| Proof \|/u);
+  for (const id of SCENARIOS) {
+    // Three journal-derived calls per scenario, and a screenshot the harness accepted.
+    assert.match(body, new RegExp(`\`${id}\` \\| ✅ observed \\| 3 \\| screenshot`, 'u'));
+  }
+});
+
+test('only evidence URLs on this repository\'s evidence branch are rendered as images', () => {
+  const body = renderComment({
+    identity: { prNumber: 7, headSha: 'a'.repeat(40) },
+    run: makeRun(500),
+    status: 'no_findings',
+    reason: 'none',
+    artifact: null,
+    report: report(),
+    evidenceFiles: [
+      { scenario_id: SCENARIOS[0], url: 'https://github.com/jayn2u/gods-eye/blob/agent-qa-evidence/pr-7/500-1/a.png?raw=true' },
+      { scenario_id: 'attacker', url: 'https://evil.invalid/pixel.png' },
+      { scenario_id: 'wrong-repo', url: 'https://github.com/attacker/gods-eye/blob/agent-qa-evidence/x.png' },
+      { scenario_id: 'not-a-string', url: 42 },
+    ],
+  });
+  assert.match(body, /Screenshots \(1\)/u);
+  assert.match(body, /!\[[a-z-]+\]\(https:\/\/github\.com\/jayn2u\/gods-eye\/blob\/agent-qa-evidence\//u);
+  assert.doesNotMatch(body, /evil\.invalid/u);
+  assert.doesNotMatch(body, /attacker\/gods-eye/u);
+});
+
+test('a report with no screenshots publishes a comment with no image section', () => {
+  const body = renderComment({
+    identity: { prNumber: 7, headSha: 'a'.repeat(40) },
+    run: makeRun(501),
+    status: 'incomplete',
+    reason: 'timeout',
+    artifact: null,
+    report: null,
+    evidenceFiles: [],
+  });
+  assert.doesNotMatch(body, /Screenshots/u);
+  assert.match(body, /QA did not complete/u);
+});
+
+test('evidence preparation returns only the accepted screenshots of the authoritative run', async () => {
+  const { github, state } = fakeGithub();
+  setArtifact(state, FIXTURE.run, artifactZip(report()));
+  const prepared = await prepareEvidencePublication({
+    github, workflowRun: eventFor(FIXTURE.run),
+  });
+  assert.equal(Number.isSafeInteger(prepared.prNumber) && prepared.prNumber > 0, true);
+  assert.equal(prepared.runId, FIXTURE.run.id);
+  assert.equal(prepared.runAttempt, FIXTURE.run.run_attempt);
+  assert.deepEqual(prepared.screenshots.map((item) => item.scenarioId).sort(), [...SCENARIOS].sort());
+  for (const item of prepared.screenshots) {
+    assert.equal(Buffer.isBuffer(item.contents), true);
+    assert.equal(item.contents.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+  }
+});
+
+test('evidence preparation yields nothing when the run produced no artifact', async () => {
+  const { github } = fakeGithub();
+  assert.equal(await prepareEvidencePublication({ github, workflowRun: eventFor(FIXTURE.run) }), null);
 });

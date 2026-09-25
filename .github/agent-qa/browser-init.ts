@@ -18,6 +18,20 @@ type InitOptions = {
   readonly unexpectedSearchStatus?: number
 }
 
+type ObservedTarget = {
+  readonly tag: string
+  readonly id: string
+  readonly type: string
+  readonly ariaLabel: string
+  readonly text: string
+}
+
+type PageEvent = {
+  readonly kind: 'input' | 'change' | 'click' | 'key'
+  readonly target: ObservedTarget
+  readonly value: string
+}
+
 class BrowserHarnessInputError extends Error {
   constructor(message: string) {
     super(message)
@@ -76,6 +90,67 @@ function queryAndModel(route: Route): { readonly query: string; readonly modelId
   }
 }
 
+/**
+ * The journal is the only evidence channel the report pipeline trusts. It is written here — inside
+ * the MCP server process, by harness code the browser agent cannot reach — so an entry is proof that
+ * the page observed the event, not a claim that the agent made a tool call.
+ */
+function createJournal(): {
+  readonly append: (kind: string, payload: Record<string, unknown>) => void
+  readonly enabled: boolean
+} {
+  const target = process.env.QA_BROWSER_JOURNAL
+  if (target === undefined || target.length === 0) {
+    return { append: () => {}, enabled: false }
+  }
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { appendFileSync } = require('node:fs') as typeof import('node:fs')
+  let seq = 0
+  return {
+    enabled: true,
+    append: (kind, payload) => {
+      seq += 1
+      appendFileSync(target, `${JSON.stringify({ seq, at: new Date().toISOString(), kind, ...payload })}\n`, { mode: 0o600 })
+    },
+  }
+}
+
+const scenarioContract = (): ReadonlyMap<string, { readonly profile: Profile; readonly receipt: string }> => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const contract = require('./scenarios.json') as { scenarios: { id: string; profile: string; receipt: string }[] }
+  return new Map(contract.scenarios.map((scenario) => [
+    scenario.id,
+    { profile: parseProfile(scenario.profile), receipt: scenario.receipt },
+  ]))
+}
+
+function collectPageEvents(): void {
+  const describe = (node: unknown): ObservedTarget => {
+    const element = node instanceof Element ? node : null
+    const actionable = element?.closest('button, a, select, textarea, input') ?? element
+    return {
+      tag: actionable?.tagName ?? '',
+      id: actionable?.id ?? '',
+      type: actionable?.getAttribute('type') ?? '',
+      ariaLabel: actionable?.getAttribute('aria-label') ?? '',
+      text: (actionable?.textContent ?? '').replace(/\s+/gu, ' ').trim().slice(0, 200),
+    }
+  }
+  const valueOf = (node: unknown): string => {
+    const element = node as { value?: unknown } | null
+    return typeof element?.value === 'string' ? element.value.slice(0, 4000) : ''
+  }
+  const record = (kind: PageEvent['kind'], event: Event): void => {
+    const binding = Reflect.get(window, '__godsEyeQaRecord')
+    if (typeof binding !== 'function') return
+    const node = event.target
+    void binding({ kind, target: describe(node), value: valueOf(node) })
+  }
+  for (const [kind, name] of [['input', 'input'], ['change', 'change'], ['click', 'click'], ['key', 'keydown']] as const) {
+    window.addEventListener(name, (event) => record(kind, event), true)
+  }
+}
+
 async function installBrowserHarness(options: InitOptions): Promise<void> {
   const { page, unexpectedSearchStatus } = options
   const state: HarnessState = {
@@ -83,6 +158,19 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
     search409Count: 0, lateFirstReplyAttempted: false, unexpectedFailures: 0,
   }
   let firstSearch: Route | null = null
+  const journal = createJournal()
+  const scenarios = scenarioContract()
+  let currentScenario: string | null = null
+  let pendingType: { target: ObservedTarget; value: string } | null = null
+
+  const targetKey = (target: ObservedTarget): string => `${target.tag}#${target.id}`
+
+  const flushPendingType = (): void => {
+    if (pendingType === null) return
+    const flushed = pendingType
+    pendingType = null
+    journal.append('action', { action: 'type', target: flushed.target, value: flushed.value })
+  }
 
   const reset = (profile: Profile): void => {
     state.profile = profile
@@ -93,6 +181,7 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
     state.lateFirstReplyAttempted = false
     state.unexpectedFailures = 0
     firstSearch = null
+    pendingType = null
   }
 
   await page.route('**/api/models', async (route) => {
@@ -145,12 +234,65 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
     await route.continue()
   })
 
-  await page.exposeBinding('__godsEyeQaControl', (_source, command: unknown, value: unknown) => {
-    if (command === 'selectProfile') {
-      reset(parseProfile(value))
-      return { ...state }
+  page.on('framenavigated', (frame) => {
+    if (frame !== page.mainFrame()) return
+    flushPendingType()
+    journal.append('navigate', { url: frame.url() })
+  })
+
+  await page.exposeBinding('__godsEyeQaRecord', (_source, observed: unknown) => {
+    const event = observed as PageEvent | null
+    if (event === null || typeof event !== 'object' || typeof event.kind !== 'string') return
+    if (event.kind === 'input') {
+      // Playwright types one character at a time; keep only the committed value per element.
+      if (pendingType !== null && targetKey(pendingType.target) !== targetKey(event.target)) flushPendingType()
+      pendingType = { target: event.target, value: event.value }
+      return
     }
-    if (command === 'state') return { ...state }
+    if (event.kind === 'change' && event.target.tag === 'SELECT') {
+      flushPendingType()
+      journal.append('action', { action: 'select', target: event.target, value: event.value })
+      return
+    }
+    if (event.kind === 'change') return
+    flushPendingType()
+    if (event.kind === 'click') {
+      journal.append('action', { action: 'click', target: event.target, value: '' })
+      return
+    }
+    journal.append('action', { action: 'key', target: event.target, value: event.value })
+  })
+
+  await page.exposeBinding('__godsEyeQaControl', async (source, command: unknown, value: unknown) => {
+    if (command === 'selectScenario') {
+      // Three scenarios share the `normal` fault profile, so a profile name cannot identify which
+      // one is starting and a retry would look like the next scenario beginning.
+      if (typeof value !== 'string' || !scenarios.has(value)) {
+        journal.append('harness_error', { message: 'scenario selection named an unknown scenario' })
+        throw new BrowserHarnessInputError('Unknown scenario')
+      }
+      const declared = scenarios.get(value) as { profile: Profile; receipt: string }
+      reset(declared.profile)
+      currentScenario = value
+      // Record where the page already is. An agent naturally loads the application before selecting
+      // the first scenario, and that visit is as good a proof of origin as a later navigation.
+      journal.append('profile', { scenario: value, profile: declared.profile, url: source.page.url() })
+      return { scenario: value, profile: declared.profile, selections: state.selections }
+    }
+    if (command === 'receipt') {
+      if (typeof value !== 'string' || !scenarios.has(value)) {
+        journal.append('harness_error', { message: 'receipt requested for an unknown scenario' })
+        throw new BrowserHarnessInputError('Unknown scenario receipt')
+      }
+      flushPendingType()
+      // The predicate is harness text evaluated here, never supplied or relayed by the agent.
+      const predicate = (scenarios.get(value) as { receipt: string }).receipt
+      const satisfied = await source.page.evaluate(`(${predicate})(${JSON.stringify(state)})`) === true
+      currentScenario = value
+      journal.append('receipt', { scenario: value, token: `qa-receipt:${value}`, satisfied, state: { ...state } })
+      if (!satisfied) throw new BrowserHarnessInputError(`QA receipt failed: ${value}`)
+      return `qa-receipt:${value}`
+    }
     throw new BrowserHarnessInputError('Unknown browser harness command')
   })
 
@@ -158,12 +300,15 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
     const binding = Reflect.get(window, '__godsEyeQaControl')
     if (typeof binding !== 'function') throw new TypeError('Browser QA binding is unavailable')
     Reflect.set(window, '__GODS_EYE_QA__', Object.freeze({
-      selectProfile: (profile: unknown) => binding('selectProfile', profile),
-      state: () => binding('state', null),
+      selectScenario: (scenario: unknown) => binding('selectScenario', scenario),
+      receipt: (scenario: unknown) => binding('receipt', scenario),
     }))
   }
   await page.addInitScript(exposeControl)
+  await page.addInitScript(collectPageEvents)
   await page.evaluate(exposeControl)
+  await page.evaluate(collectPageEvents)
+  void currentScenario
 }
 
 declare const module: {
@@ -172,6 +317,8 @@ declare const module: {
     installBrowserHarness?: typeof installBrowserHarness
   }
 }
+declare const process: { readonly env: Record<string, string | undefined> }
+declare const require: (id: string) => unknown
 
 module.exports.default = installBrowserHarness
 module.exports.installBrowserHarness = installBrowserHarness

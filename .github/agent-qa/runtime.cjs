@@ -489,20 +489,54 @@ function evidenceLocations(evidence) {
   return { evidenceDir: absolute, resultPath: path.join(absolute, 'runtime.json') }
 }
 
-async function prepareCandidate({ candidate, supervisor, environment }) {
-  const venv = path.join(supervisor.runRoot, 'venv')
-  const pnpmStore = path.join(supervisor.runRoot, 'cache', 'pnpm-store')
-  supervisor.registerOwnedPath(venv, 'python-venv')
-  supervisor.registerOwnedPath(path.join(supervisor.runRoot, 'cache'), 'dependency-cache')
-  await ensurePrivateDirectory(path.join(supervisor.runRoot, 'cache'))
+/**
+ * `uv.lock` with `--frozen` fully determines the environment, so an environment built from the same
+ * lock is reusable. Downloading it again per run costs minutes on a slow link and is what exhausted
+ * the internal deadline; the lock digest is the only thing that may key that reuse.
+ */
+function lockKey(candidate) {
+  const digest = crypto.createHash('sha256')
+  for (const relative of ['uv.lock', 'pyproject.toml']) {
+    digest.update(fs.readFileSync(path.join(candidate, relative)))
+  }
+  return digest.digest('hex').slice(0, 32)
+}
+
+async function prepareCandidate({ candidate, supervisor, environment, cacheRoot }) {
+  // The download caches and the resolved environment are shared: QA runs one job at a time, so
+  // neither has a concurrent writer, and both are rebuilt whenever the candidate's lock changes.
+  const caches = cacheRoot ?? path.join(supervisor.runRoot, 'cache')
+  const shared = cacheRoot !== undefined
+  const venv = shared
+    ? path.join(caches, 'envs', `py-${lockKey(candidate)}`)
+    : path.join(supervisor.runRoot, 'venv')
+  const pnpmStore = path.join(caches, 'pnpm-store')
+  if (!shared) supervisor.registerOwnedPath(venv, 'python-venv')
+  if (isWithin(supervisor.runRoot, caches)) {
+    supervisor.registerOwnedPath(caches, 'dependency-cache')
+  }
+  await ensurePrivateDirectory(caches)
+  if (shared) await ensurePrivateDirectory(path.join(caches, 'envs'))
   await supervisor.runToDeadline('uv-sync', 'uv', ['sync', '--frozen', '--no-dev'], {
     cwd: candidate,
-    env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(supervisor.runRoot, 'cache', 'uv') },
+    env: { ...environment, UV_PROJECT_ENVIRONMENT: venv, UV_CACHE_DIR: path.join(caches, 'uv') },
   })
-  await supervisor.runToDeadline('pnpm-install', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
-    cwd: candidate,
-    env: environment,
-  })
+  // A shared store keeps whatever a killed run left behind: a deadline that lands mid-download leaves
+  // partial package state that every later install then trips over. The store is a cache, so the
+  // recovery is to discard it once and retry rather than to require an operator.
+  try {
+    await supervisor.runToDeadline('pnpm-install', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
+      cwd: candidate,
+      env: environment,
+    })
+  } catch (error) {
+    if (!shared || error.code === 'CANCELLED' || error.code === 'DEADLINE_EXCEEDED') throw error
+    await fsPromises.rm(pnpmStore, { recursive: true, force: true })
+    await supervisor.runToDeadline('pnpm-install-retry', 'pnpm', ['install', '--frozen-lockfile', '--store-dir', pnpmStore], {
+      cwd: candidate,
+      env: environment,
+    })
+  }
   return { venv, pnpmStore }
 }
 
@@ -511,6 +545,7 @@ async function startRuntime({
   evidence,
   deadline = monotonicDeadlineAfter(DEFAULT_RUNTIME_MS),
   skipInstall = false,
+  cacheRoot,
   signal,
 }) {
   const candidateRoot = assertAbsolutePath(candidate, 'candidate')
@@ -530,8 +565,8 @@ async function startRuntime({
     }
     const baseEnvironment = sanitizedChildEnvironment(runRoot)
     const prepared = skipInstall
-      ? { venv: path.join(runRoot, 'venv'), pnpmStore: path.join(runRoot, 'cache', 'pnpm-store') }
-      : await prepareCandidate({ candidate: candidateRoot, supervisor, environment: baseEnvironment })
+      ? { venv: path.join(runRoot, 'venv'), pnpmStore: path.join(cacheRoot ?? path.join(runRoot, 'cache'), 'pnpm-store') }
+      : await prepareCandidate({ candidate: candidateRoot, supervisor, environment: baseEnvironment, cacheRoot })
     if (skipInstall) {
       const candidateVenv = path.join(candidateRoot, '.venv')
       prepared.venv = candidateVenv

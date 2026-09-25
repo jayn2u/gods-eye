@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 
 const EXPECTED = Object.freeze({
   runner: '2.337.0',
-  codex: '0.153.3',
+  copilot: '1.0.83',
   playwright_mcp: '0.0.80',
   node: '24.12.0',
   uv: '0.12.6',
@@ -75,15 +75,6 @@ function probePort() {
   });
 }
 
-function readAuthMode(authFile) {
-  try {
-    const value = parseJson(fs.readFileSync(authFile, 'utf8'));
-    return typeof value.auth_mode === 'string' ? value.auth_mode : null;
-  } catch {
-    return null;
-  }
-}
-
 function parseJson(text) {
   try {
     return JSON.parse(text.replace(/^\uFEFF/, ''));
@@ -95,33 +86,37 @@ function parseJson(text) {
 async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const home = env.HOME || os.homedir();
   const qaRoot = path.resolve(env.QA_ROOT || path.join(home, '.local/share/gods-eye-agent-qa'));
-  const checkout = path.resolve(env.QA_DEVELOPER_CHECKOUT || process.cwd());
+  const inWorkflow = env.GITHUB_ACTIONS === 'true';
+  // Inside a job the working directory is the runner workspace, which lives under QA_ROOT by design.
+  // Only a declared developer checkout can be compared against the CI state root.
+  const declaredCheckout = env.QA_DEVELOPER_CHECKOUT || (inWorkflow ? '' : process.cwd());
+  const checkout = declaredCheckout ? path.resolve(declaredCheckout) : '';
   const runnerDir = path.join(qaRoot, 'runner');
   const toolchainDir = path.join(qaRoot, 'toolchain');
-  const codexHome = path.join(qaRoot, 'codex-home');
-  const authFile = path.join(codexHome, 'auth.json');
-  const lockFile = path.join(qaRoot, 'auth.lock');
   const repo = env.QA_REPOSITORY || 'jayn2u/gods-eye';
   const checks = [];
 
   let realQaRoot = qaRoot;
   let realCheckout = checkout;
   try { realQaRoot = fs.realpathSync(qaRoot); } catch {}
-  try { realCheckout = fs.realpathSync(checkout); } catch {}
-  const pathSafe = path.isAbsolute(qaRoot) && !inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout)
-    && path.resolve(codexHome) !== path.resolve(path.join(home, '.codex'));
-  add(checks, 'paths', pathSafe, { outside_developer_checkout: pathSafe });
+  try { if (checkout) realCheckout = fs.realpathSync(checkout); } catch {}
+  const separateFromCheckout = checkout === ''
+    || (!inside(realCheckout, realQaRoot) && !inside(realQaRoot, realCheckout));
+  const pathSafe = path.isAbsolute(qaRoot) && separateFromCheckout
+    && path.resolve(qaRoot) !== path.resolve(path.join(home, '.copilot'));
+  add(checks, 'paths', pathSafe, {
+    outside_developer_checkout: pathSafe,
+    developer_checkout: checkout ? 'declared' : 'not-applicable',
+  });
 
   const rootMode = modeOf(qaRoot);
-  const codexMode = modeOf(codexHome);
-  const authModeBits = modeOf(authFile);
-  const ownershipOk = [qaRoot, runnerDir, toolchainDir, codexHome, authFile, lockFile]
+  const toolchainMode = modeOf(toolchainDir);
+  const ownershipOk = [qaRoot, runnerDir, toolchainDir]
     .every((target) => ownedByCurrentUser(target));
   add(checks, 'ownership', ownershipOk, { current_user: ownershipOk });
-  add(checks, 'permissions', rootMode === '0700' && codexMode === '0700' && authModeBits === '0600', {
+  add(checks, 'permissions', rootMode === '0700' && toolchainMode === '0700', {
     qa_root_mode: rootMode,
-    codex_home_mode: codexMode,
-    auth_file_mode: authModeBits,
+    toolchain_mode: toolchainMode,
   });
 
   const runnerVersion = (() => {
@@ -133,20 +128,23 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   });
 
   const bins = {
-    codex: env.QA_CODEX_BIN || path.join(toolchainDir, 'node_modules/.bin/codex'),
+    copilot: env.QA_COPILOT_BIN || path.join(toolchainDir, 'node_modules/.bin/copilot'),
     playwright_mcp: env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchainDir, 'node_modules/.bin/playwright-mcp'),
     uv: env.QA_UV_BIN || 'uv',
     pnpm: env.QA_PNPM_BIN || 'pnpm',
   };
   const versions = { node: process.versions.node };
   let versionCommandsOk = true;
-  for (const [name, args] of [['codex', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
+  for (const [name, args] of [['copilot', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
     const result = command(bins[name], args, { env });
     versionCommandsOk &&= result.ok;
     versions[name] = versionFrom(`${result.stdout}\n${result.stderr}`);
   }
-  const versionsOk = versionCommandsOk && Object.entries(versions).every(([name, version]) => version === EXPECTED[name]);
-  add(checks, 'tool_versions', versionsOk, versions);
+  const pinned = ['node', 'copilot', 'playwright_mcp'];
+  const versionsOk = versionCommandsOk
+    && pinned.every((name) => versions[name] === EXPECTED[name])
+    && ['uv', 'pnpm'].every((name) => typeof versions[name] === 'string' && versions[name].length > 0);
+  add(checks, 'tool_versions', versionsOk, { ...versions, pinned: pinned.join(',') });
 
   const browserProbe = env.QA_BROWSER_PROBE_BIN
     ? command(env.QA_BROWSER_PROBE_BIN, [], { cwd: toolchainDir, env, timeout: 30_000 })
@@ -194,25 +192,26 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   const lingerEnabled = lingerResult.ok && lingerResult.stdout.trim() === 'yes';
   add(checks, 'user_linger', lingerEnabled, { enabled: lingerEnabled });
 
-  const apiVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY'];
-  const apiEnvironment = apiVariables.some((name) => Boolean(env[name]));
-  const storedAuthMode = readAuthMode(authFile);
-  const loginEnv = { ...env, CODEX_HOME: codexHome };
-  for (const name of apiVariables) delete loginEnv[name];
-  const loginStatus = command(bins.codex, ['login', 'status'], { env: loginEnv });
-  const subscriptionStatus = loginStatus.ok && /logged in using chatgpt/i.test(`${loginStatus.stdout}\n${loginStatus.stderr}`);
-  const subscriptionAuth = !apiEnvironment && storedAuthMode === 'chatgpt' && subscriptionStatus;
-  add(checks, 'subscription_auth', subscriptionAuth, {
-    auth_file_present: fs.existsSync(authFile),
-    auth_file_mode: authModeBits,
-    mode: storedAuthMode === 'chatgpt' ? 'chatgpt' : storedAuthMode === null ? 'missing' : 'rejected',
-    login_status_verified: subscriptionStatus,
-    api_environment_present: apiEnvironment,
+  // Copilot CLI authenticates from COPILOT_GITHUB_TOKEN and exposes no read-only login-status
+  // command, so readiness is the presence of a non-empty repository-scoped token plus the absence of
+  // competing provider credentials. A token that is present is not proof that Copilot will answer;
+  // the first run reports auth_required if it does not.
+  const foreignVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY'];
+  const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
+  const token = env.QA_COPILOT_TOKEN || '';
+  // A secret stored from a file or `echo` keeps a trailing newline and GitHub rejects it as bad
+  // credentials, which costs a whole job to discover. Refuse a token carrying surrounding whitespace.
+  const tokenWellFormed = token === token.trim() && !/\s/u.test(token);
+  const tokenPresent = token.trim().length >= 20 && tokenWellFormed;
+  // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
+  // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
+  add(checks, 'subscription_auth', (tokenPresent || !inWorkflow) && !foreignEnvironment, {
+    token_present: tokenPresent,
+    token_well_formed: token.length === 0 || tokenWellFormed,
+    token_source: tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
+    required: inWorkflow,
+    foreign_provider_environment: foreignEnvironment,
   });
-
-  const flockBin = env.QA_FLOCK_BIN || 'flock';
-  const lockResult = command(flockBin, ['-n', lockFile, 'true'], { env });
-  add(checks, 'auth_lock', lockResult.ok, { available: lockResult.ok });
 
   const ok = checks.every((check) => check.ok || (phase === 'start' && check.name === 'runner_service'));
   return { schema_version: 1, ok, phase, checks };

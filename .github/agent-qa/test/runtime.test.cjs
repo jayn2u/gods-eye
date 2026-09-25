@@ -53,6 +53,57 @@ async function listen(port = 0) {
   return server
 }
 
+test('a shared cache root is used for downloads and never cleaned with the run', async (t) => {
+  const { startRuntime } = require('../runtime.cjs');
+  assert.equal(typeof startRuntime, 'function');
+  const { readFileSync } = require('node:fs');
+  const source = readFileSync(require('node:path').join(__dirname, '..', 'runtime.cjs'), 'utf8');
+  assert.match(source, /const caches = cacheRoot \?\? path\.join\(supervisor\.runRoot, 'cache'\)/u);
+  assert.match(source, /if \(isWithin\(supervisor\.runRoot, caches\)\) \{/u);
+  assert.match(source, /UV_CACHE_DIR: path\.join\(caches, 'uv'\)/u);
+  // A shared environment is keyed by the candidate's own lock, and only a per-run one is cleaned.
+  assert.match(source, /py-\$\{lockKey\(candidate\)\}/u);
+  assert.match(source, /if \(!shared\) supervisor\.registerOwnedPath\(venv, 'python-venv'\)/u);
+});
+
+test('a poisoned shared store is discarded once and the install retried', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'runtime.cjs'), 'utf8');
+  const block = source.slice(source.indexOf("'pnpm-install'"), source.indexOf('return { venv, pnpmStore }'));
+  // Only a shared store is discarded, and never in place of honouring a cancellation or a deadline.
+  assert.match(block, /if \(!shared \|\| error\.code === 'CANCELLED' \|\| error\.code === 'DEADLINE_EXCEEDED'\) throw error/u);
+  assert.match(block, /await fsPromises\.rm\(pnpmStore, \{ recursive: true, force: true \}\)/u);
+  assert.match(block, /'pnpm-install-retry'/u);
+  // Exactly one retry: a second failure must surface.
+  assert.equal((block.match(/pnpm-install-retry/gu) || []).length, 1);
+});
+
+test('the environment key changes with the lock and not with anything else', async (t) => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { createHash } = require('node:crypto');
+  const key = (dir) => {
+    const digest = createHash('sha256');
+    for (const relative of ['uv.lock', 'pyproject.toml']) {
+      digest.update(require('node:fs').readFileSync(path.join(dir, relative)));
+    }
+    return digest.digest('hex').slice(0, 32);
+  };
+  const make = (lock, project, extra) => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'gods-eye-lock-'));
+    writeFileSync(path.join(dir, 'uv.lock'), lock);
+    writeFileSync(path.join(dir, 'pyproject.toml'), project);
+    if (extra) { mkdirSync(path.join(dir, 'web'), { recursive: true }); writeFileSync(path.join(dir, 'web', 'x'), extra); }
+    return dir;
+  };
+  const base = make('lock-a', 'project-a');
+  assert.equal(key(base), key(make('lock-a', 'project-a')), 'the same lock reuses one environment');
+  assert.notEqual(key(base), key(make('lock-b', 'project-a')), 'a changed lock rebuilds');
+  assert.notEqual(key(base), key(make('lock-a', 'project-b')), 'a changed manifest rebuilds');
+  assert.equal(key(base), key(make('lock-a', 'project-a', 'unrelated source change')),
+    'unrelated candidate source must not rebuild the environment');
+});
+
 test('monotonic deadlines have explicit millisecond semantics', () => {
   const deadline = monotonicDeadlineAfter(500)
   assert.ok(remainingMilliseconds(deadline) <= 500)

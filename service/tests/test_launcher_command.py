@@ -311,24 +311,6 @@ def test_prepare_imports_before_preparing_deduplicated_requested_models(
     assert checkpoint_root_for(project / ".cache" / "huggingface").is_dir()
 
 
-def test_prepare_rejects_checkpoint_import_in_fixture_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from gods_eye.launcher_cli import EXIT_USAGE, main
-
-    source = tmp_path / "candidate.pt"
-    source.write_bytes(b"checkpoint fixture")
-    monkeypatch.setenv("GODS_EYE_USE_FIXTURES", "true")
-    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(tmp_path / "project"))
-
-    with pytest.raises(SystemExit) as error:
-        main(["prepare", "--checkpoint", str(source)])
-
-    assert error.value.code == EXIT_USAGE
-    assert "fixture" in capsys.readouterr().err.lower()
-    assert not (tmp_path / "project" / ".gods-eye" / "state.json").exists()
-
-
 def test_prepare_import_error_stops_before_model_preparation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

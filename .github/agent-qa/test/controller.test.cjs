@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const {
   ControllerError,
+  QA_LABEL,
   admitPullRequest,
   findLatestGeneration,
   formatRunName,
@@ -170,6 +171,50 @@ test('enforces the base, state, and head invalidation matrix', async (t) => {
   }
 });
 
+test('admits a labelled default-branch PR and invalidates it when the label is removed', async () => {
+  const { state, input } = admissionFixture();
+  state.pull_request.base.ref = 'develop';
+  state.pull_request.labels = [{ name: 'bug' }, { name: QA_LABEL }];
+
+  const decision = await admitPullRequest({ ...input, github: githubFor(state) });
+  assert.equal(decision.status, 'admitted');
+  assert.equal(decision.reason, 'eligible');
+  assert.equal(decision.request.base.ref, 'develop');
+
+  const stillLabelled = await recheckPullRequest({
+    github: githubFor(state),
+    request: clone(decision.request),
+  });
+  assert.equal(stillLabelled.status, 'admitted');
+
+  state.pull_request.labels = [{ name: 'bug' }];
+  const unlabelled = await recheckPullRequest({
+    github: githubFor(state),
+    request: clone(decision.request),
+  });
+  assert.equal(unlabelled.status, 'skipped');
+  assert.equal(unlabelled.reason, 'qa_not_requested');
+  assert.equal(unlabelled.request, undefined);
+});
+
+test('admits an unlabelled release PR so the release trigger stays independent of the label', async () => {
+  const { state, input } = admissionFixture();
+  delete state.pull_request.labels;
+  const decision = await admitPullRequest({ ...input, github: githubFor(state) });
+  assert.equal(decision.status, 'admitted');
+  assert.equal(decision.request.base.ref, 'release/1.2.0');
+});
+
+test('a label never substitutes for author write permission', async () => {
+  const { state, input } = admissionFixture();
+  state.pull_request.base.ref = 'develop';
+  state.pull_request.labels = [{ name: QA_LABEL }];
+  state.permission = { permission: 'read' };
+  const decision = await admitPullRequest({ ...input, github: githubFor(state) });
+  assert.equal(decision.status, 'skipped');
+  assert.equal(decision.reason, 'permission_insufficient');
+});
+
 test('maps repository roles through the permission endpoint base permission', async (t) => {
   const roles = [
     ['read', 'read', 'skipped'],
@@ -256,7 +301,7 @@ test('pre-execution recheck invalidates revoked permission, changed source, reta
     ['head repository changed', (state) => (state.pull_request.head.repo.id = 123), 'source_changed'],
     ['base SHA changed', (state) => (state.pull_request.base.sha = 'e'.repeat(40)), 'source_changed'],
     ['retargeted to another release', (state) => (state.pull_request.base.ref = 'release/2.0.0'), 'source_changed'],
-    ['retargeted', (state) => (state.pull_request.base.ref = 'develop'), 'base_not_release'],
+    ['retargeted', (state) => (state.pull_request.base.ref = 'develop'), 'qa_not_requested'],
     ['drafted', (state) => (state.pull_request.draft = true), 'pull_request_draft'],
   ];
   for (const [name, alter, reason] of scenarios) {

@@ -1,0 +1,299 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+const { validateEvidenceFile } = require('./evidence-contracts.cjs');
+const scenarioContract = require('./scenarios.json');
+
+const MAX_JOURNAL_BYTES = 8 * 1024 * 1024;
+const MAX_ENTRIES = 5000;
+const MAX_ACTIONS = 500;
+const MODEL_IDS = Object.freeze({
+  b32: 'openai/clip-vit-base-patch32',
+  b16: 'openai/clip-vit-base-patch16',
+  l14: 'openai/clip-vit-large-patch14',
+  l14336: 'openai/clip-vit-large-patch14-336',
+});
+const SCENARIO_IDS = Object.freeze(scenarioContract.scenarios.map(({ id }) => id));
+const scenariosById = new Map(scenarioContract.scenarios.map((scenario) => [scenario.id, scenario]));
+
+class JournalError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.name = 'JournalError';
+    this.code = code;
+  }
+}
+
+// The journal is written by trusted Node code inside the Playwright MCP server process, so an
+// action is proof that the page observed it. The public vocabulary stays the browser-tool vocabulary
+// the report schema and `hasCompleteBrowserProof` already speak.
+const ACTION_TOOL = Object.freeze({
+  type: 'browser_type',
+  select: 'browser_select_option',
+  click: 'browser_click',
+  key: 'browser_press_key',
+});
+
+function readJournal(file) {
+  const stats = fs.statSync(file, { throwIfNoEntry: false });
+  if (!stats || !stats.isFile() || stats.size > MAX_JOURNAL_BYTES) {
+    throw new JournalError('INVALID_JOURNAL', 'browser journal is absent or oversized');
+  }
+  // An empty journal is a legitimate observation: the agent produced no page evidence at all.
+  if (stats.size === 0) return [];
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter((line) => line.trim());
+  if (lines.length > MAX_ENTRIES) throw new JournalError('INVALID_JOURNAL', 'browser journal has too many entries');
+  return lines.map((line) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw new JournalError('INVALID_JOURNAL', 'browser journal contains invalid JSONL');
+    }
+  });
+}
+
+function targetName(target) {
+  if (!target || typeof target !== 'object') return '';
+  return `${target.ariaLabel ?? ''} ${target.text ?? ''} ${target.id ?? ''}`;
+}
+
+function requirement(label, matches) {
+  return { label, matches };
+}
+
+function typeInto(value) {
+  return requirement(`enter ${JSON.stringify(value)} in the description`, (entry) => entry.action === 'type'
+    && entry.target?.id === 'query'
+    && entry.value === value);
+}
+
+function selectModel(value) {
+  return requirement(`select ${value}`, (entry) => entry.action === 'select'
+    && entry.target?.id === 'model-id'
+    && entry.value === value);
+}
+
+function clickNamed(label, pattern) {
+  return requirement(label, (entry) => entry.action === 'click' && pattern.test(targetName(entry.target)));
+}
+
+function scenarioActionRequirements(scenario) {
+  switch (scenario.id) {
+    case 'search-detail-return': return [
+      typeInto(scenario.description),
+      clickNamed('activate Search gallery', /search gallery/iu),
+      clickNamed('open a result', /open result/iu),
+      clickNamed('activate Back to results', /back to results/iu),
+    ];
+    case 'model-provenance': return [
+      selectModel(MODEL_IDS.l14),
+      typeInto(scenario.description),
+      clickNamed('activate Search gallery', /search gallery/iu),
+      clickNamed('open a result', /open result/iu),
+    ];
+    case 'cancel-replace': return [
+      selectModel(MODEL_IDS.l14),
+      typeInto(scenario.description),
+      clickNamed('activate Search gallery', /search gallery/iu),
+      clickNamed('activate Cancel search', /cancel search/iu),
+      selectModel(MODEL_IDS.b16),
+      typeInto(scenario.replacement_description),
+      clickNamed('activate Search gallery for the replacement', /search gallery/iu),
+    ];
+    case 'unprepared-model': return [requirement(
+      'select any prepared model while the unprepared one stays disabled',
+      (entry) => entry.action === 'select'
+        && entry.target?.id === 'model-id'
+        && entry.value !== MODEL_IDS.l14336
+        && Object.values(MODEL_IDS).includes(entry.value),
+    )];
+    case 'recover-409': return [
+      selectModel(MODEL_IDS.l14336),
+      typeInto(scenario.description),
+      clickNamed('activate Search gallery for the deliberate 409', /search gallery/iu),
+      typeInto(scenario.replacement_description),
+      clickNamed('activate Retry search', /retry search/iu),
+    ];
+    case 'blank-input': return [
+      clickNamed('activate Search gallery with the empty description', /search gallery/iu),
+    ];
+    default: throw new JournalError('INVALID_SCENARIO', `No action requirements for ${scenario.id}`);
+  }
+}
+
+function isMainOrigin(url, origin) {
+  try {
+    const target = new URL(url);
+    return target.origin === origin && target.pathname === '/' && !target.search && !target.hash;
+  } catch {
+    return false;
+  }
+}
+
+function screenshotProof(screenshotsRoot, scenarioId, receiptAt) {
+  const relative = `screenshots/${scenarioId}.png`;
+  const absolute = path.join(screenshotsRoot, `${scenarioId}.png`);
+  const stats = fs.statSync(absolute, { throwIfNoEntry: false });
+  if (!stats || !stats.isFile()) return null;
+  // The screenshot must have been taken after the trusted receipt observed the expected page state.
+  if (!Number.isFinite(receiptAt) || stats.mtimeMs + 1000 < receiptAt) return null;
+  try {
+    validateEvidenceFile(path.dirname(screenshotsRoot), relative, { allowedExtensions: ['.png'] });
+  } catch {
+    return null;
+  }
+  return relative;
+}
+
+/**
+ * Turn a trusted browser journal into the same proof shape the report pipeline consumes.
+ * No field of the returned value comes from the agent's own narration.
+ */
+function parseBrowserJournal(entries, { origin, screenshotsRoot }) {
+  const proof = new Map(SCENARIO_IDS.map((id) => [id, {
+    // `navigate`, `nextAction` and `receipt` describe the current attempt; `proven` and `provenAt`
+    // are what the scenario has already earned and survive a later re-selection.
+    navigate: false, nextAction: 0, receipt: false,
+    proven: false, provenAt: NaN, screenshot: null,
+    receiptAttempts: 0, lastReceiptState: null,
+  }]));
+  const toolCalls = [];
+  let scenarioIndex = -1;
+  let current = null;
+  let invalid = false;
+  let errorText = '';
+  let lastSeq = 0;
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || !Number.isSafeInteger(entry.seq) || entry.seq <= lastSeq) {
+      invalid = true;
+      continue;
+    }
+    lastSeq = entry.seq;
+
+    if (entry.kind === 'harness_error') {
+      errorText += ` ${typeof entry.message === 'string' ? entry.message : ''}`;
+      invalid = true;
+      continue;
+    }
+
+    if (entry.kind === 'profile') {
+      // The marker names the scenario, not its fault profile: three scenarios share `normal`, so a
+      // profile name could not tell a retry of one from the start of the next.
+      if (current !== null && entry.scenario === current) {
+        // Re-selecting the current scenario is idempotent bookkeeping. Discarding the actions already
+        // observed only threw away evidence the agent had genuinely produced, and it is unnecessary:
+        // the receipt predicate reads the live page and the harness's own counters, which this
+        // re-selection resets, so no stale state can satisfy it.
+        if (isMainOrigin(entry.url, origin)) proof.get(current).navigate = true;
+        continue;
+      }
+      const next = scenarioContract.scenarios[scenarioIndex + 1];
+      if (!next || entry.scenario !== next.id || entry.profile !== next.profile) {
+        invalid = true;
+        continue;
+      }
+      scenarioIndex += 1;
+      current = next.id;
+      // The page the marker was issued from counts as this scenario's origin proof.
+      if (isMainOrigin(entry.url, origin)) proof.get(current).navigate = true;
+      continue;
+    }
+
+    if (current === null) {
+      // Loading the application before the first scenario is selected is expected; anything else
+      // observable before a trusted selection is not.
+      if (!(entry.kind === 'navigate' && isMainOrigin(entry.url, origin))) invalid = true;
+      continue;
+    }
+
+    const scenario = scenariosById.get(current);
+    const scenarioProof = proof.get(current);
+
+    if (entry.kind === 'navigate') {
+      if (!isMainOrigin(entry.url, origin)) {
+        invalid = true;
+        continue;
+      }
+      scenarioProof.navigate = true;
+      toolCalls.push({ scenario_id: current, tool: 'browser_navigate', status: 'completed' });
+      continue;
+    }
+
+    if (entry.kind === 'action') {
+      const tool = ACTION_TOOL[entry.action];
+      if (!tool) {
+        invalid = true;
+        continue;
+      }
+      if (scenarioProof.navigate && !scenarioProof.receipt) {
+        const next = scenarioActionRequirements(scenario)[scenarioProof.nextAction];
+        if (next?.matches(entry)) scenarioProof.nextAction += 1;
+      }
+      toolCalls.push({ scenario_id: current, tool, status: 'completed' });
+      continue;
+    }
+
+    if (entry.kind === 'receipt') {
+      const requirements = scenarioActionRequirements(scenario);
+      const at = Date.parse(entry.at);
+      if (entry.scenario !== current || entry.token !== `qa-receipt:${current}` || !Number.isFinite(at)) {
+        // A receipt for another scenario or with a borrowed token is a forged claim.
+        invalid = true;
+        continue;
+      }
+      scenarioProof.receiptAttempts += 1;
+      if (entry.satisfied !== true) {
+        // The harness itself refused this claim. That is an observation, not a forgery: the agent may
+        // retry, and the scenario simply stays unproven until a satisfied receipt arrives.
+        scenarioProof.lastReceiptState = entry.state ?? null;
+        continue;
+      }
+      if (scenarioProof.nextAction !== requirements.length) {
+        invalid = true;
+        continue;
+      }
+      scenarioProof.receipt = true;
+      scenarioProof.proven = true;
+      // The first proof is what a screenshot must postdate; re-proving must not invalidate one.
+      if (!Number.isFinite(scenarioProof.provenAt)) scenarioProof.provenAt = at;
+      continue;
+    }
+
+    invalid = true;
+  }
+
+  if (scenarioIndex !== SCENARIO_IDS.length - 1) invalid = true;
+  if (toolCalls.length > MAX_ACTIONS) invalid = true;
+
+  for (const scenario of scenarioContract.scenarios) {
+    const scenarioProof = proof.get(scenario.id);
+    if (!scenarioProof.proven) continue;
+    const relative = screenshotProof(screenshotsRoot, scenario.id, scenarioProof.provenAt);
+    if (!relative) continue;
+    scenarioProof.screenshot = relative;
+    toolCalls.push({
+      scenario_id: scenario.id, tool: 'browser_take_screenshot', status: 'completed', evidence: relative,
+    });
+  }
+
+  // A satisfied receipt already required this scenario's origin and every declared action, so proof
+  // plus a screenshot that postdates it is the whole condition.
+  const complete = !invalid && scenarioContract.scenarios.every((scenario) => {
+    const item = proof.get(scenario.id);
+    return item.proven && item.screenshot;
+  });
+  return { complete, errorText: errorText.trim(), proof, toolCalls: toolCalls.slice(0, MAX_ACTIONS) };
+}
+
+module.exports = Object.freeze({
+  ACTION_TOOL,
+  JournalError,
+  MODEL_IDS,
+  SCENARIO_IDS,
+  parseBrowserJournal,
+  readJournal,
+  scenarioActionRequirements,
+});

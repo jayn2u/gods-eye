@@ -20,7 +20,6 @@ from gods_eye.clip_models import (
     checkpoint_root_for,
     is_known_model_id_shape,
 )
-from gods_eye.fixture_preparation import prepare_fixture
 from gods_eye.launcher_cli import _parser
 from gods_eye.preparation import (
     PreparationError,
@@ -222,19 +221,6 @@ def test_launcher_accepts_registered_baseline_and_checkpoint_id_shapes() -> None
         "openclip/ViT-B-16@openai:384x128-reid",
         "labclip:cuhk-pedes:012345abcdef",
     ]
-
-
-def test_fixture_preparation_records_verified_evaluation_for_checkpoint(tmp_path: Path) -> None:
-    state_path = _state_path(tmp_path)
-    model_id, _revision = _register_checkpoint(tmp_path)
-
-    prepare_fixture(tmp_path, state_path, model_ids=[model_id])
-
-    state = json.loads(state_path.read_text())
-    evaluation = model_preparation(state["preparation"], model_id)["evaluation"]
-    assert evaluation["status"] == "verified"
-    assert evaluation["fixture"] is True
-    assert evaluation["index_version"] == "fixture"
 
 
 def test_legacy_schema_1_b16_is_normalized_without_losing_unpinned_provenance() -> None:

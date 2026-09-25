@@ -72,12 +72,6 @@ def prepared_missing(layout: RuntimeLayout) -> list[str]:
 
 
 def _default_model_cache_error(model_cache: Path, preparation: dict) -> str | None:
-    if os.getenv("GODS_EYE_USE_FIXTURES") == "true":
-        try:
-            populated = model_cache.is_dir() and any(model_cache.iterdir())
-        except OSError:
-            populated = False
-        return None if populated else "is empty or not readable"
     model = model_preparation(preparation, DEFAULT_MODEL_ID).get("model", {})
     revision = model.get("resolved_revision")
     repo = model_cache / f"models--{DEFAULT_MODEL_ID.replace('/', '--')}"
@@ -243,7 +237,7 @@ def _compose_project_name(host_root: Path) -> str:
     would make every checkout share one project.  A path-derived name keeps
     multiple checkouts isolated and remains valid when the checkout path
     contains spaces.  Explicit project names remain supported for advanced
-    Compose workflows and fixture tests.
+    Compose workflows and tests.
     """
 
     configured = os.getenv("GODS_EYE_COMPOSE_PROJECT_NAME") or os.getenv("COMPOSE_PROJECT_NAME")
@@ -417,11 +411,10 @@ def _prepared_asset_errors(layout: RuntimeLayout, host_root: Path) -> list[str]:
                 f"({_asset_location(effective_pointer, pointer)}) is not visible"
             )
         elif pointer.is_dir():
-            if os.getenv("GODS_EYE_USE_FIXTURES") != "true":
-                errors.append(
-                    "active retrieval index pointer: indexes/active "
-                    f"({_asset_location(effective_pointer, pointer)}) must be a file"
-                )
+            errors.append(
+                "active retrieval index pointer: indexes/active "
+                f"({_asset_location(effective_pointer, pointer)}) must be a file"
+            )
         else:
             target, error = _active_index_target(
                 pointer,

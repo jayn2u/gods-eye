@@ -470,7 +470,7 @@ Also test: `load_test_captions` on a tiny `reid_raw.json` in `tmp_path` (train/v
 ### Task 6: Preparation pipeline — registry-aware models, evaluation stage, worker operations
 
 **Files:**
-- Modify: `service/gods_eye/preparation.py`, `preparation_state.py`, `preparation_worker.py`, `fixture_preparation.py`, `index_store.py` (build CLI dispatch uses `create_embedder`)
+- Modify: `service/gods_eye/preparation.py`, `preparation_state.py`, `preparation_worker.py`, `index_store.py` (build CLI dispatch uses `create_embedder`)
 - Test: `service/tests/test_preparation_models.py` (extend), `service/tests/test_preparation_worker.py` (new, fakes)
 
 **Interfaces:**
@@ -483,7 +483,6 @@ Also test: `load_test_captions` on a tiny `reid_raw.json` in `tmp_path` (train/v
   - Stage labels become "Stage N/8"; smoke is 8.
   - Worker: `prepare-model/verify-model` dispatch by backend: HF unchanged; openclip baseline downloads/validates the pinned file and prints `{"model_id", "resolved_revision": <40-hex snapshot>}`; checkpoint verifies `model.safetensors` sha256 and prints `resolved_revision: "sha256:<hex>"`. `build-index` and `smoke-search` use `create_embedder`. New ops `build-benchmark-queries` and `evaluate` (text embedding in batches of 256; OOM exit code preserved).
   - Metadata path for CUHK-PEDES: `dataset_root / "CUHK-PEDES" / "reid_raw.json"` (from `dataset_registry.json` `metadata`).
-  - `fixture_preparation.prepare_fixture` writes a fixture evaluation stage record too.
 
 - [ ] **Step 1: Write failing tests** following the existing `FakeRunner` pattern in `test_preparation_models.py`: (a) preparing a checkpoint id runs operations in order `prepare-model, verify-manifest/build-manifest, build-index, validate-index, activate-index, build-benchmark-queries, evaluate, smoke-search` and stores `evaluation` state with `status: verified`; (b) a reference HF model whose `evaluate` fails still completes smoke and records `evaluation.status == "failed"`; (c) a checkpoint whose `evaluate` fails raises `PreparationError`; (d) `sha256:` receipts are accepted, malformed ones rejected; (e) re-running reuses verified evaluation (no second `evaluate` call). In `test_preparation_worker.py` call `preparation_worker.main([...])` with monkeypatched `create_embedder` returning a deterministic fake and a numpy-backed index fixture to cover `build-benchmark-queries` and `evaluate` writing files.
 - [ ] **Step 2: Run** → FAIL. **Step 3: Implement.** **Step 4: Run** the whole suite → PASS (existing preparation/launcher tests must stay green; update expected "Stage N/7" strings to "/8" where asserted).

@@ -17,7 +17,6 @@ const {
 const EXPECTED_REPOSITORY = 'jayn2u/gods-eye';
 const DEFAULT_BRANCH = 'develop';
 const QA_WORKFLOW_FILE = 'agent-qa.yml';
-const COMPOSE_JOB_NAME = 'Demo Runtime Compose smoke';
 const REPORT_WORKFLOW_FILE = 'agent-qa-report.yml';
 const RUNNER_NAME = 'gods-eye-agent-qa';
 const MAX_PAGES = 20;
@@ -324,10 +323,6 @@ class GhAdapter {
   async cancelRun(runId) {
     return this.api(`repos/${this.repository}/actions/runs/${runId}/cancel`, { method: 'POST' });
   }
-
-  async testsRuns(headSha) {
-    return this.paginate(`repos/${this.repository}/actions/workflows/tests.yml/runs?event=pull_request&head_sha=${headSha}`, 'workflow_runs');
-  }
 }
 
 function checkDoctor(report) {
@@ -581,18 +576,6 @@ async function inspectRunEvidence(adapter, run, pr, evidenceRoot, expectedStatus
   };
 }
 
-async function assertComposeSkipped(adapter, headSha) {
-  const runs = await adapter.testsRuns(headSha);
-  const run = runs.find((candidate) => candidate.head_sha === headSha && candidate.event === 'pull_request');
-  if (!run) throw new LiveVerificationError('tests_run_missing', 'pull-request Tests workflow run missing');
-  const jobs = await adapter.jobs(run.id, run.run_attempt);
-  const compose = jobs.find((job) => job.name === COMPOSE_JOB_NAME);
-  if (!compose || compose.conclusion !== 'skipped') {
-    throw new LiveVerificationError('compose_not_skipped', `${COMPOSE_JOB_NAME} did not skip on pull_request`);
-  }
-  return { run_id: run.id, job_id: compose.id, conclusion: compose.conclusion };
-}
-
 async function cleanupOwned(adapter, registry, { deadlineMs = 2 * 60_000, now = Date.now } = {}) {
   const actions = [];
   const deadline = now() + deadlineMs;
@@ -734,8 +717,7 @@ async function executeMatrix(adapter, repo, evidenceRoot, registry, options = {}
   const cleanProof = await inspectRunEvidence(adapter, cleanRun, cleanPr, evidenceRoot, 'no_findings');
   const cleanComment = await managedComment(adapter, cleanPr.number,
     (comment) => comment.body.includes(cleanPr.head.sha) && comment.body.includes(`/runs/${cleanRun.id}/`), options.poll);
-  scenarios.a_clean = { ...cleanProof, pr: cleanPr.number, comment_id: cleanComment.id,
-    compose: await assertComposeSkipped(adapter, cleanPr.head.sha) };
+  scenarios.a_clean = { ...cleanProof, pr: cleanPr.number, comment_id: cleanComment.id };
 
   ensureActive(options.signal);
   const secondSha = await adapter.commit({ branch: names.clean, message: 'Agent QA live: repeat clean generation' });
@@ -954,7 +936,6 @@ module.exports = Object.freeze({
   GhAdapter,
   LiveVerificationError,
   adversarialLedger,
-  assertComposeSkipped,
   branchNames,
   cleanupOwned,
   createOwnedBranch,

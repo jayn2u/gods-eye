@@ -27,8 +27,8 @@ function fixture(t) {
   const testHome = path.join(temp, 'home');
   fs.mkdirSync(source);
   fs.mkdirSync(state);
-  fs.mkdirSync(path.join(testHome, '.codex'), { recursive: true });
-  fs.writeFileSync(path.join(testHome, '.codex/auth.json'), 'DEVELOPER_AUTH_SENTINEL');
+  fs.mkdirSync(path.join(testHome, '.copilot'), { recursive: true });
+  fs.writeFileSync(path.join(testHome, '.copilot/mcp-config.json'), 'DEVELOPER_CONFIG_SENTINEL');
   fs.writeFileSync(path.join(source, 'package.json'), '{"private":true}\n');
   fs.writeFileSync(path.join(source, 'package-lock.json'), '{"lockfileVersion":3,"packages":{}}\n');
 
@@ -61,19 +61,13 @@ chmod 600 .credentials_rsaparams`);
 prefix=''
 while (($#)); do if [[ "$1" == '--prefix' ]]; then prefix="$2"; shift 2; else shift; fi; done
 mkdir -p "$prefix/node_modules/.bin"
-cat >"$prefix/node_modules/.bin/codex" <<'EOF'
+cat >"$prefix/node_modules/.bin/copilot" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == '--version' ]]; then echo 'codex-cli 0.153.3'; exit; fi
-if [[ "$1" == 'login' && "$#" -ge 2 && "$2" == 'status' ]]; then echo 'Logged in using ChatGPT'; exit; fi
-if [[ "$1" == 'login' ]]; then
-  if [[ -v OPENAI_API_KEY ]]; then api_key='set'; else api_key='unset'; fi
-  printf '%s\t%s\t%s\n' "$CODEX_HOME" "$*" "$api_key" >>"$QA_TEST_STATE/codex-login-calls"
-  printf '{"auth_mode":"chatgpt","tokens":{"access_token":"LOGIN_CANARY"}}' >"$CODEX_HOME/auth.json"
-  exit
-fi
+if [[ "$1" == '--version' ]]; then printf 'GitHub Copilot CLI 1.0.83.\nRun '\\''copilot update'\\'' to check for updates.\n'; exit; fi
+printf '%s\n' "$*" >>"$QA_TEST_STATE/copilot-calls"
 exit 1
 EOF
-chmod 700 "$prefix/node_modules/.bin/codex"`);
+chmod 700 "$prefix/node_modules/.bin/copilot"`);
   const browserInstall = path.join(temp, 'browser-install');
   executable(browserInstall, String.raw`mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"; : >"$PLAYWRIGHT_BROWSERS_PATH/installed"`);
 
@@ -87,7 +81,13 @@ else
   printf '{"runners":[]}\n'
 fi`);
   const systemctl = path.join(temp, 'systemctl');
-  executable(systemctl, `printf 'active\\n'`);
+  executable(systemctl, String.raw`
+printf '%s
+' "$*" >>"$QA_TEST_STATE/systemctl-calls"
+printf 'active
+'`);
+  const pinnedNode = path.join(temp, 'node');
+  executable(pinnedNode, `if [[ "\${1:-}" == '--version' ]]; then echo 'v24.12.0'; exit; fi; exit 1`);
   const loginctl = path.join(temp, 'loginctl');
   executable(loginctl, `printf 'yes\\n'`);
   const uv = path.join(temp, 'uv');
@@ -114,33 +114,31 @@ fi`);
     QA_GH_BIN: gh,
     QA_SYSTEMCTL_BIN: systemctl,
     QA_LOGINCTL_BIN: loginctl,
+    QA_NODE_BIN: pinnedNode,
     QA_UV_BIN: uv,
     QA_PNPM_BIN: pnpm,
     QA_BROWSER_PROBE_BIN: browserProbe,
     QA_PLAYWRIGHT_MCP_BIN: mcp,
     QA_TEST_STATE: state,
   };
-  return { temp, qaRoot, source, systemd, state, testHome, archive, env };
+  return { temp, qaRoot, pinnedNode, source, systemd, state, testHome, archive, env };
 }
 
-test('install is idempotent and preserves CI auth and unrelated files', (t) => {
+test('install is idempotent, stores no agent credential, and preserves unrelated files', (t) => {
   const f = fixture(t);
   const first = execFileSync('bash', [setup, 'install'], { env: f.env, encoding: 'utf8' });
-  fs.writeFileSync(path.join(f.qaRoot, 'codex-home/auth.json'), '{"auth_mode":"chatgpt","sentinel":"AUTH_CANARY"}', { mode: 0o600 });
   fs.writeFileSync(path.join(f.qaRoot, 'unrelated-sentinel'), 'keep-me');
-  fs.writeFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'keep-refreshed');
   const second = execFileSync('bash', [setup, 'install'], { env: f.env, encoding: 'utf8' });
 
   assert.match(first, /Installed runner 2\.337\.0/);
   assert.match(second, /Installed runner 2\.337\.0/);
-  assert.doesNotMatch(`${first}${second}`, /DEVELOPER_AUTH_SENTINEL/);
+  assert.doesNotMatch(`${first}${second}`, /DEVELOPER_CONFIG_SENTINEL/);
   assert.equal(fs.readFileSync(path.join(f.qaRoot, 'unrelated-sentinel'), 'utf8'), 'keep-me');
-  assert.equal(fs.readFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'utf8'), 'keep-refreshed');
-  assert.match(fs.readFileSync(path.join(f.qaRoot, 'codex-home/auth.json'), 'utf8'), /AUTH_CANARY/);
-  assert.equal(fs.readFileSync(path.join(f.testHome, '.codex/auth.json'), 'utf8'), 'DEVELOPER_AUTH_SENTINEL');
-  assert.notEqual(fs.readFileSync(path.join(f.qaRoot, 'codex-home/auth.json'), 'utf8'), 'DEVELOPER_AUTH_SENTINEL');
+  // The agent authenticates from the workflow secret, so no credential directory is created here.
+  assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home')), false);
+  assert.equal(fs.existsSync(path.join(f.qaRoot, 'copilot-home')), false);
+  assert.equal(fs.readFileSync(path.join(f.testHome, '.copilot/mcp-config.json'), 'utf8'), 'DEVELOPER_CONFIG_SENTINEL');
   assert.equal(fs.statSync(f.qaRoot).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(path.join(f.qaRoot, 'codex-home/auth.json')).mode & 0o777, 0o600);
   const unit = fs.readFileSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service'), 'utf8');
   assert.match(unit, new RegExp(`WorkingDirectory=${f.qaRoot}/runner`));
   assert.match(unit, /TimeoutStopSec=60/);
@@ -183,13 +181,15 @@ test('register uses the exact repository, name, and label once without exposing 
   for (const stateFile of ['.runner', '.credentials', '.credentials_rsaparams']) {
     assert.equal(fs.statSync(path.join(f.qaRoot, 'runner', stateFile)).mode & 0o777, 0o600);
   }
-  fs.writeFileSync(path.join(f.qaRoot, 'codex-home/auth.json'),
-    '{"auth_mode":"chatgpt","tokens":{"access_token":"STATUS_SECRET_CANARY"}}', { mode: 0o600 });
-  fs.writeFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'refreshed');
+  fs.writeFileSync(path.join(f.qaRoot, 'register-auth-sentinel'),
+    '{"sentinel":"STATUS_SECRET_CANARY"}', { mode: 0o600 });
+  fs.writeFileSync(path.join(f.qaRoot, 'register-refreshed-sentinel'), 'refreshed');
   const status = spawnSync('bash', [setup, 'status'], { env: f.env, encoding: 'utf8' });
-  assert.equal(status.status, 0);
-  assert.equal(JSON.parse(status.stdout).ok, true);
-  assert.equal(fs.readFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'utf8'), 'refreshed');
+  assert.equal(status.status, 0, `${status.stdout}${status.stderr}`);
+  const report = JSON.parse(status.stdout);
+  // Name the failed prerequisite: a bare false says nothing about which one broke.
+  assert.equal(report.ok, true, report.checks.filter(({ ok }) => !ok).map(({ name }) => name).join(', '));
+  assert.equal(fs.readFileSync(path.join(f.qaRoot, 'register-refreshed-sentinel'), 'utf8'), 'refreshed');
   assert.doesNotMatch(`${status.stdout}${status.stderr}`, /STATUS_SECRET_CANARY/);
 });
 
@@ -203,58 +203,89 @@ test('register rejects a conflicting remote runner without requesting a token', 
   assert.doesNotMatch(`${result.stdout}${result.stderr}`, /REGISTRATION_TOKEN_CANARY/);
 });
 
-test('device-auth login fails on an occupied auth lock before invoking Codex', (t) => {
-  const f = fixture(t);
-  execFileSync('bash', [setup, 'install'], { env: f.env });
-  const flock = path.join(f.temp, 'busy-flock');
-  executable(flock, 'exit 1');
-  const result = spawnSync('bash', [setup, 'login', '--device-auth'], {
-    env: { ...f.env, QA_FLOCK_BIN: flock }, encoding: 'utf8',
-  });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /auth lock is occupied/);
-  assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home/auth.json')), false);
-  assert.equal(fs.existsSync(path.join(f.state, 'codex-login-calls')), false);
-});
-
-test('bare and device-auth login use only the CI auth home after all preflight checks pass', (t) => {
+test('there is no login subcommand and no agent credential is ever written', (t) => {
   const f = fixture(t);
   execFileSync('bash', [setup, 'install'], { env: f.env });
   execFileSync('bash', [setup, 'register'], { env: f.env });
-  fs.writeFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'preserve-me');
-  execFileSync('bash', [setup, 'login'], { env: { ...f.env, OPENAI_API_KEY: 'API_KEY_SENTINEL' } });
-  execFileSync('bash', [setup, 'login', '--device-auth'], { env: { ...f.env, OPENAI_API_KEY: 'API_KEY_SENTINEL' } });
-  const ciAuth = fs.readFileSync(path.join(f.qaRoot, 'codex-home/auth.json'), 'utf8');
-  assert.match(ciAuth, /"auth_mode":"chatgpt"/);
-  assert.equal(fs.statSync(path.join(f.qaRoot, 'codex-home/auth.json')).mode & 0o777, 0o600);
-  assert.equal(fs.readFileSync(path.join(f.qaRoot, 'codex-home/refreshed-sentinel'), 'utf8'), 'preserve-me');
-  assert.equal(fs.readFileSync(path.join(f.testHome, '.codex/auth.json'), 'utf8'), 'DEVELOPER_AUTH_SENTINEL');
-  assert.deepEqual(
-    fs.readFileSync(path.join(f.state, 'codex-login-calls'), 'utf8').trim().split('\n'),
-    [`${path.join(f.qaRoot, 'codex-home')}\tlogin\tunset`, `${path.join(f.qaRoot, 'codex-home')}\tlogin --device-auth\tunset`],
-  );
+  for (const args of [['login'], ['login', '--device-auth'], ['login', '--with-api-key'], ['token', 'x']]) {
+    const result = spawnSync('bash', [setup, ...args], { env: f.env, encoding: 'utf8' });
+    assert.notEqual(result.status, 0, args.join(' '));
+  }
+  assert.equal(fs.existsSync(path.join(f.state, 'copilot-calls')), false);
+  assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home')), false);
+  assert.equal(fs.readFileSync(path.join(f.testHome, '.copilot/mcp-config.json'), 'utf8'), 'DEVELOPER_CONFIG_SENTINEL');
   const started = execFileSync('bash', [setup, 'start'], { env: f.env, encoding: 'utf8' });
   assert.match(started, /Started gods-eye-agent-qa-runner\.service/);
 });
 
-test('login rejects unallowlisted and extra options without invoking Codex', (t) => {
+test('the unit unsets every competing provider credential and pins the copilot binary', (t) => {
   const f = fixture(t);
   execFileSync('bash', [setup, 'install'], { env: f.env });
-  for (const args of [
-    ['login', '--with-api-key'],
-    ['login', '--device-auth', '--enable', 'unsafe'],
-  ]) {
-    const result = spawnSync('bash', [setup, ...args], { env: f.env, encoding: 'utf8' });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /only accepts|at most one option/);
+  const unit = fs.readFileSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service'), 'utf8');
+  for (const name of ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY', 'COPILOT_GITHUB_TOKEN']) {
+    assert.match(unit, new RegExp(`UnsetEnvironment=.*\\b${name}\\b`), name);
   }
-  assert.equal(fs.existsSync(path.join(f.state, 'codex-login-calls')), false);
-  assert.equal(fs.existsSync(path.join(f.qaRoot, 'codex-home/auth.json')), false);
+  assert.match(unit, /QA_COPILOT_BIN=.*node_modules\/\.bin\/copilot/);
+  assert.doesNotMatch(unit, /CODEX_HOME|QA_CODEX_BIN/);
+});
+
+test('the unit pins the verified Node directory on PATH instead of inheriting an ambient one', (t) => {
+  const f = fixture(t);
+  execFileSync('bash', [setup, 'install'], { env: f.env });
+  const unit = fs.readFileSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service'), 'utf8');
+  const pinnedDir = path.dirname(f.pinnedNode);
+  // A version-managed Node is invisible to the systemd user manager, so the pin must be explicit.
+  assert.match(unit, new RegExp(`Environment="PATH=${pinnedDir}:`));
+  assert.match(unit, /Environment="PATH=[^"]*:\/usr\/bin:/);
+  // Pinning only Node would hide uv and pnpm, which live wherever their own installers put them.
+  const declared = /Environment="PATH=([^"]*)"/u.exec(unit)[1].split(':');
+  for (const tool of [f.env.QA_UV_BIN, f.env.QA_PNPM_BIN]) {
+    assert.ok(declared.includes(path.dirname(tool)), `${tool} directory must be on the unit PATH`);
+  }
+  assert.equal(new Set(declared).size, declared.length, 'the unit PATH must not repeat a directory');
+});
+
+test('install refuses to write a unit when a required host tool is absent', async (t) => {
+  for (const missing of ['QA_UV_BIN', 'QA_PNPM_BIN']) {
+    await t.test(missing, (subtest) => {
+      const f = fixture(subtest);
+      const result = spawnSync('bash', [setup, 'install'], {
+        env: { ...f.env, [missing]: path.join(f.temp, 'absent-tool') }, encoding: 'utf8',
+      });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /is not executable|is not on PATH/);
+      assert.equal(fs.existsSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service')), false);
+    });
+  }
+});
+
+test('install refuses a Node that does not satisfy the pin', (t) => {
+  const f = fixture(t);
+  const wrong = path.join(f.temp, 'wrong-node');
+  executable(wrong, `if [[ "\${1:-}" == '--version' ]]; then echo 'v20.20.2'; exit; fi; exit 1`);
+  const result = spawnSync('bash', [setup, 'install'], {
+    env: { ...f.env, QA_NODE_BIN: wrong }, encoding: 'utf8',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /node 24\.12\.0 is required/);
+  assert.equal(fs.existsSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service')), false);
+});
+
+test('start restarts the service so a rewritten unit cannot keep running the old environment', (t) => {
+  const f = fixture(t);
+  execFileSync('bash', [setup, 'install'], { env: f.env });
+  execFileSync('bash', [setup, 'register'], { env: f.env });
+  execFileSync('bash', [setup, 'start'], { env: f.env });
+  const calls = fs.readFileSync(path.join(f.state, 'systemctl-calls'), 'utf8');
+  assert.match(calls, /daemon-reload/);
+  assert.match(calls, /restart gods-eye-agent-qa-runner\.service/);
 });
 
 test('help exposes only the non-destructive lifecycle commands', () => {
   const output = execFileSync('bash', [setup, '--help'], { encoding: 'utf8' });
-  for (const command of ['install', 'register', 'login', 'start', 'status']) assert.match(output, new RegExp(command));
+  for (const command of ['install', 'register', 'start', 'status']) assert.match(output, new RegExp(command));
+  assert.doesNotMatch(output, /^\s*login\b/mu);
+  assert.match(output, /AGENT_QA_COPILOT_TOKEN/);
   assert.doesNotMatch(output, /reset|reinstall/);
 });
 
@@ -290,6 +321,6 @@ test('install resumes after repeated process-group interruptions', async (t) => 
   fs.writeFileSync(f.env.QA_NPM_BIN, npmBody, { mode: 0o700 });
   const resumed = execFileSync('bash', [setup, 'install'], { env: f.env, encoding: 'utf8' });
   assert.match(resumed, /Installed runner 2\.337\.0/);
-  assert.equal(fs.readFileSync(path.join(f.testHome, '.codex/auth.json'), 'utf8'), 'DEVELOPER_AUTH_SENTINEL');
+  assert.equal(fs.readFileSync(path.join(f.testHome, '.copilot/mcp-config.json'), 'utf8'), 'DEVELOPER_CONFIG_SENTINEL');
   assert.deepEqual(fs.readdirSync(f.qaRoot).filter((name) => name.startsWith('.runner.')), []);
 });

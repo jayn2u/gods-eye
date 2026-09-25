@@ -157,7 +157,7 @@ async function executeAdmittedRequest(t, request) {
       ok: true,
       phase: 'status',
       checks: [
-        { name: 'tool_versions', ok: true, node: process.versions.node, codex: '0.153.3', playwright_mcp: '0.0.80' },
+        { name: 'tool_versions', ok: true, node: process.versions.node, copilot: '1.0.83', playwright_mcp: '0.0.80' },
         { name: 'subscription_auth', ok: true },
         { name: 'browser', ok: true },
         { name: 'auth_lock', ok: true },
@@ -171,26 +171,20 @@ async function executeAdmittedRequest(t, request) {
     runBaseline: async () => ({
       name: 'candidate-playwright', status: 'passed', harness_started: true, app_started: true, duration_ms: 12,
     }),
-    runCodex: async ({ paths }) => {
+    runAgent: async ({ paths }) => {
       order.push('executor');
-      const browserEvents = (await fsp.readFile(path.join(fixtureRoot, 'execution', 'success.jsonl'), 'utf8'))
-        .trim().split('\n').map(JSON.parse);
-      for (const event of browserEvents) {
-        if (event.item?.tool === 'browser_take_screenshot') {
-          event.item.arguments.filename = path.join(paths.screenshotsRoot, path.basename(event.item.arguments.filename));
-        }
-      }
-      await fsp.writeFile(
-        path.join(path.dirname(paths.privateResult), 'events.jsonl'),
-        `${browserEvents.map(JSON.stringify).join('\n')}\n`,
-      );
+      const { faithfulJournalEntries } = require('./fixtures/journal-builder.cjs');
+      const entries = faithfulJournalEntries(paths.origin);
+      await fsp.writeFile(paths.journal, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
       await fsp.copyFile(path.join(fixtureRoot, 'execution', 'agent-result.json'), paths.privateResult);
       await fsp.mkdir(paths.screenshotsRoot, { recursive: true });
       await Promise.all(scenarioIds.map((id) => fsp.writeFile(path.join(paths.screenshotsRoot, `${id}.png`), png)));
       const privateRoot = path.dirname(paths.privateResult);
-      const stderrPath = path.join(privateRoot, 'stderr.log');
+      const stdoutPath = path.join(privateRoot, 'copilot.stdout.log');
+      const stderrPath = path.join(privateRoot, 'copilot.stderr.log');
+      await fsp.writeFile(stdoutPath, 'reported');
       await fsp.writeFile(stderrPath, '');
-      return { eventsPath: path.join(privateRoot, 'events.jsonl'), stderrPath, privateResult: paths.privateResult };
+      return { journalPath: paths.journal, stdoutPath, stderrPath, privateResult: paths.privateResult };
     },
   };
   const result = await runExecution({
@@ -244,6 +238,7 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   const trigger = qa.true.pull_request_target;
   assert.deepEqual(trigger.types, [
     'opened', 'synchronize', 'reopened', 'ready_for_review', 'edited', 'converted_to_draft', 'closed',
+    'labeled', 'unlabeled',
   ]);
   assert.equal(Object.hasOwn(trigger, 'branches'), false);
   assert.equal(qa['run-name'], 'Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}');
@@ -254,12 +249,21 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
     'cancel-in-progress': true,
   });
   assert.deepEqual(qa.jobs.qa['runs-on'], ['self-hosted', 'linux', 'x64', 'gods-eye-agent-qa']);
-  assert.equal(qa.jobs.qa['timeout-minutes'], 15);
+  // The job cap must stay above the internal deadline so the harness, not GitHub, ends a run and a
+  // report is still written.
+  assert.equal(qa.jobs.qa['timeout-minutes'], 30);
+  assert.ok(qa.jobs.qa['timeout-minutes'] * 60_000 > require('../execute.cjs').INTERNAL_DEADLINE_MS);
   assert.equal(qa.jobs.admission['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.correlate['runs-on'], 'ubuntu-24.04');
   assert.equal(reporter.jobs.publish['runs-on'], 'ubuntu-24.04');
+  assert.equal(reporter.jobs['publish-evidence']['runs-on'], 'ubuntu-24.04');
   assert.deepEqual(qa.jobs.qa.permissions, { actions: 'read', contents: 'read', 'pull-requests': 'read' });
   assert.deepEqual(reporter.jobs.publish.permissions, { actions: 'read', contents: 'read', 'pull-requests': 'write' });
+  // The only job that may write to the repository must hold no pull-request access, so a defect in
+  // one publication path cannot reach the other.
+  assert.deepEqual(reporter.jobs['publish-evidence'].permissions, { actions: 'read', contents: 'write' });
+  assert.equal(Object.hasOwn(reporter.jobs['publish-evidence'].permissions, 'pull-requests'), false);
+  assert.equal(Object.hasOwn(reporter.jobs['publish-evidence'], 'concurrency'), false);
   assert.deepEqual(qa.jobs.qa.concurrency, {
     group: 'gods-eye-agent-qa-global', 'cancel-in-progress': false, queue: 'max',
   });
@@ -270,12 +274,12 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   });
   const allJobs = [...Object.values(qa.jobs), ...Object.values(reporter.jobs)];
   assert.equal(allJobs.filter((job) => Array.isArray(job['runs-on'])).length, 1);
-  assert.equal(allJobs.flatMap((job) => stepUses(job, checkout)).length, 5);
-  assert.equal(allJobs.flatMap((job) => stepUses(job, githubScript)).length, 4);
+  assert.equal(allJobs.flatMap((job) => stepUses(job, checkout)).length, 6);
+  assert.equal(allJobs.flatMap((job) => stepUses(job, githubScript)).length, 5);
   assert.equal(stepUses(qa.jobs.qa, uploadArtifact).length, 1);
   const trustedCheckouts = allJobs.flatMap((job) => stepUses(job, checkout))
     .filter((step) => step.name !== 'Fetch the candidate through the base repository PR ref');
-  assert.equal(trustedCheckouts.length, 4);
+  assert.equal(trustedCheckouts.length, 5);
   for (const step of trustedCheckouts) {
     assert.equal(step.with.ref, '${{ github.workflow_sha }}');
     assert.equal(step.with['persist-credentials'], false);
@@ -285,13 +289,16 @@ test('workflow structure preserves trusted boundaries, least privilege, pins, an
   assert.equal(candidateCheckout.with.path, 'candidate-${{ github.run_id }}-${{ github.run_attempt }}');
   assert.equal(candidateCheckout.with['persist-credentials'], false);
   assert.equal(qa.jobs.qa.steps[0].name, 'Capture the running-job start time');
-  const executeStep = qa.jobs.qa.steps.find((step) => step.name === 'Run bounded subscription Agent QA');
+  const executeStep = qa.jobs.qa.steps.find((step) => step.name === 'Run bounded Copilot browser QA');
   assert.match(executeStep.run, /execute\.cjs" run/u);
   assert.match(executeStep.run, /--job-start "\$JOB_START"/u);
   assert.equal(executeStep.env.CANDIDATE_PATH, '${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}');
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY']) {
+  // The agent holds a Copilot credential and nothing else: no repository token, no other provider.
+  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
     assert.equal(executeStep.env[key], '');
   }
+  assert.equal(executeStep.env.QA_COPILOT_TOKEN, '${{ secrets.AGENT_QA_COPILOT_TOKEN }}');
+  assert.equal(Object.values(executeStep.env).some((value) => /secrets\.GITHUB_TOKEN/u.test(String(value))), false);
   const upload = qa.jobs.qa.steps.find((step) => step.name === 'Upload validated public evidence');
   assert.equal(upload.if, "always() && steps.stage.outputs.ready == 'true'");
   assert.equal(upload.with['retention-days'], 14);
@@ -429,7 +436,11 @@ test('ineligible metadata never reaches candidate execution and missing cancelle
   const observed = [];
   for (const [name, mutate, reason] of [
     ['draft', (state) => { state.pull_request.draft = true; }, 'pull_request_draft'],
-    ['develop', (state) => { state.pull_request.base.ref = 'develop'; }, 'base_not_release'],
+    ['develop', (state) => { state.pull_request.base.ref = 'develop'; }, 'qa_not_requested'],
+    ['develop with an unrelated label', (state) => {
+      state.pull_request.base.ref = 'develop';
+      state.pull_request.labels = [{ name: 'documentation' }];
+    }, 'qa_not_requested'],
     ['permission', (state) => { state.permission.permission = 'read'; }, 'permission_insufficient'],
   ]) {
     const state = structuredClone(events);

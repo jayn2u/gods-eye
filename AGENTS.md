@@ -39,7 +39,7 @@ service/tests/           Python unit, contract, and opt-in integration tests
 web/                     React UI, Vitest logic tests, Playwright browser tests
 deploy/nginx.conf        Container SPA serving and /api proxy
 docs/                    ADRs, operator/contributor guides, specs, validation evidence
-compose*.yaml            Development, release, offline, and fixture-smoke modes
+compose*.yaml            Development, release, and offline modes
 Dockerfile.*             Launcher, service, and browser image builds
 ```
 
@@ -54,7 +54,7 @@ Dockerfile.*             Launcher, service, and browser image builds
 | Operator preparation/runtime | `docs/setup/full-demo.md` | Primary Docker lifecycle |
 | Dataset or model/index operations | `docs/setup/datasets.md`, `docs/setup/model-and-index.md` | Explicit asset workflows |
 | Offline or real-gallery validation | `docs/setup/offline-and-validation.md`, `docs/full-gallery-validation.md` | Asset-dependent acceptance |
-| CI and releases | `.github/workflows/` | Python suite, Compose smoke, tag-triggered image publishing |
+| CI and releases | `.github/workflows/` | Python suite, tag-triggered image publishing |
 
 ## Code map
 
@@ -92,12 +92,10 @@ pnpm install --frozen-lockfile
 pnpm test:web
 pnpm build:web
 pnpm test:e2e
-docker compose -f compose.yaml -f compose.smoke.yaml config
 ```
 
 ## Verification notes
 
 - `/api/health` is liveness; `/api/readiness` is search capability. A live process can correctly be unready.
 - Routine fixture checks need no external Dataset Installation, model download, or GPU.
-- CI runs Python tests and a separate fixture-backed Compose smoke; web checks remain separate commands.
-- Fixture smoke success is not evidence of a Prepared Demo using the real galleries.
+- CI runs the Python tests; web checks remain separate commands.

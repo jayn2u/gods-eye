@@ -85,6 +85,5 @@ The README retains only the project warning, supported requirements, three-comma
 
 - Launcher command and state transitions use a fake Docker process in fast tests.
 - Tests cover failed preflight aggregation, explicit terms acceptance, resumable stages, cancellation, locking, port selection, readiness timeout, offline failure, reset confirmation, JSON output, and exit codes.
-- A fixture-backed Compose smoke test verifies preparation-to-browser readiness without external datasets or model downloads.
 - Full Dataset Acquisition, GPU indexing, and real-search validation remain explicit opt-in checks rather than routine CI work.
 - Logs must not contain access tokens, raw natural-language queries, or host personal information.

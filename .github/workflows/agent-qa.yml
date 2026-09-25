@@ -11,6 +11,8 @@ on:
       - edited
       - converted_to_draft
       - closed
+      - labeled
+      - unlabeled
 
 permissions: {}
 
@@ -20,7 +22,7 @@ concurrency:
 
 jobs:
   admission:
-    name: Admit trusted release PR
+    name: Admit trusted requested PR
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -80,7 +82,7 @@ jobs:
     needs: admission
     if: needs.admission.outputs.status == 'admitted'
     runs-on: [self-hosted, linux, x64, gods-eye-agent-qa]
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -158,7 +160,7 @@ jobs:
             core.setOutput('status', decision.status);
             core.info(`Agent QA recheck: ${decision.status}/${decision.reason}`);
 
-      - name: Run bounded subscription Agent QA
+      - name: Run bounded Copilot browser QA
         if: steps.recheck.outputs.status == 'admitted'
         env:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
@@ -167,10 +169,15 @@ jobs:
           CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
           EVIDENCE_PATH: ${{ steps.paths.outputs.evidence }}
           JOB_START: ${{ steps.clock.outputs.started_at }}
+          # Copilot CLI authenticates from this token only. GITHUB_TOKEN and GH_TOKEN stay empty so
+          # the agent cannot reach the repository API even though it now holds a Copilot credential.
+          QA_COPILOT_TOKEN: ${{ secrets.AGENT_QA_COPILOT_TOKEN }}
+          QA_AGENT_MODEL: ${{ vars.AGENT_QA_MODEL }}
           GITHUB_TOKEN: ""
           GH_TOKEN: ""
           OPENAI_API_KEY: ""
           ANTHROPIC_API_KEY: ""
+          CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
         shell: bash
         run: |
@@ -218,6 +225,27 @@ jobs:
           NODE
           printf 'ready=true\n' >> "$GITHUB_OUTPUT"
           printf 'path=%s\n' "$upload_root" >> "$GITHUB_OUTPUT"
+
+      # The comment can only carry a summary. The run page is where an operator lands from it, so the
+      # same validated report is rendered here in full, including the phase timings that were
+      # previously recoverable only by reading stderr.
+      - name: Write the reviewer job summary
+        if: always() && steps.stage.outputs.ready == 'true'
+        env:
+          CONTROL_ROOT: ${{ github.workspace }}/trusted-control/.github/agent-qa
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
+          EVIDENCE_ROOT: ${{ steps.paths.outputs.evidence }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        shell: bash
+        run: |
+          node >> "$GITHUB_STEP_SUMMARY" <<'NODE'
+          const path = require('node:path');
+          const { readBoundedJson, validateReport } = require(path.join(process.env.CONTROL_ROOT, 'contracts.cjs'));
+          const { renderJobSummary } = require(path.join(process.env.CONTROL_ROOT, 'summary.cjs'));
+          const report = readBoundedJson(path.join(process.env.EVIDENCE_ROOT, 'report.json'));
+          validateReport(report, report.request);
+          process.stdout.write(`${renderJobSummary({ report, runUrl: process.env.RUN_URL })}\n`);
+          NODE
 
       - name: Upload validated public evidence
         if: always() && steps.stage.outputs.ready == 'true'

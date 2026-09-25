@@ -780,30 +780,6 @@ def test_real_docker_smoke_cleans_image_when_initial_build_fails(
     assert calls[-1] == ["docker", "image", "rm", "-f", image]
 
 
-@pytest.mark.integration
-def test_real_root_doctor_uses_compose_inside_launcher() -> None:
-    if os.getenv("RUN_LAUNCHER_COMPOSE_SMOKE") != "1":
-        pytest.skip("set RUN_LAUNCHER_COMPOSE_SMOKE=1 to exercise Launcher Compose mounting")
-    if shutil.which("docker") is None:
-        pytest.skip("Docker CLI is not installed")
-
-    result = subprocess.run(
-        [str(ROOT / "gods-eye"), "doctor", "--json"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    # Overall doctor status is not the subject here: the supported platform
-    # needs an NVIDIA GPU, which CI runners do not have, so the GPU checks
-    # fail there and doctor exits non-zero. What must hold is that Compose is
-    # usable from inside the Launcher container.
-    checks = json.loads(result.stdout)["checks"]
-    compose = next(check for check in checks if check["name"] == "compose")
-    assert compose["status"] == "pass", result.stderr
-
-
 def test_launcher_dockerfile_fingerprints_after_the_dependency_layers() -> None:
     """Fingerprint metadata must trail every layer that installs anything.
 

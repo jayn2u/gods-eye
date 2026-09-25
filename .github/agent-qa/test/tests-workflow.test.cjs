@@ -28,19 +28,10 @@ function parseWorkflow() {
   return JSON.parse(parse.stdout);
 }
 
-function runsForEvent(predicate, eventName) {
-  assert.equal(predicate, "github.event_name != 'pull_request'");
-  return eventName !== 'pull_request';
-}
-
-test('Compose smoke skips pull requests and remains enabled for the configured develop push', () => {
+test('the Tests workflow runs only the Python suite on pull requests and develop pushes', () => {
   const workflow = parseWorkflow();
-  const jobs = workflow.jobs;
-  const compose = jobs['compose-smoke'];
 
-  assert.equal(compose.if, "github.event_name != 'pull_request'");
-  assert.equal(runsForEvent(compose.if, 'pull_request'), false);
-  assert.equal(runsForEvent(compose.if, 'push'), true);
+  assert.deepEqual(Object.keys(workflow.jobs), ['suite']);
   assert.deepEqual(workflow.true.push.branches, ['develop']);
   assert.deepEqual(workflow.true.pull_request, null);
 });

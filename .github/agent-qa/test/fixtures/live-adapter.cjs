@@ -76,7 +76,7 @@ function artifact(run, pr, status) {
     },
     tested_head_sha: pr.head.sha, controller_sha: CONTROL_SHA,
     started_at: '2026-09-07T00:00:01Z', finished_at: '2026-09-07T00:00:59Z',
-    tools: { node: '24.12.0', codex: '0.153.3', playwright_mcp: '0.0.80', chromium: 'fixture' },
+    tools: { node: '24.12.0', agent: { name: 'copilot', version: '1.0.83' }, playwright_mcp: '0.0.80', chromium: 'fixture' },
     status, reason: 'none',
     deterministic_results: [{ name: 'fixture', status: 'passed', harness_started: true, app_started: true, duration_ms: 5 }],
     scenarios, findings,
@@ -208,9 +208,7 @@ class LiveMatrixAdapter {
     return [{ id: 7000 + prNumber, user: { login: BOT_LOGIN },
       body: `${COMMENT_MARKER}\n**Status:** ${status}\n**Tested head:** ${pr.head.sha}\n/actions/runs/${latest.id}/attempts/1` }];
   }
-  async testsRuns(headSha) { return [{ id: 9000, run_attempt: 1, head_sha: headSha, event: 'pull_request' }]; }
   async jobs(runId) {
-    if (runId === 9000) return [{ id: 9001, name: 'Demo Runtime Compose smoke', conclusion: 'skipped' }];
     const value = this.runs.find((item) => item.id === runId);
     if (!value) return [];
     if (value.invalidation) return [{ id: runId * 10, run_id: runId, name: 'Fixture browser QA', status: 'completed', conclusion: 'skipped' }];

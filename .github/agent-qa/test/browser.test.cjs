@@ -79,17 +79,73 @@ test('Given the trusted agent prompt, when inspected, then source edits and retr
   assert.match(prompt, /loopback/i);
 });
 
-test('Given an unknown fault profile, when the trusted control parses it, then the request is rejected', async () => {
-  let binding;
+function fakePage({ evaluate = async () => undefined } = {}) {
+  const bindings = new Map();
+  const journal = [];
+  const frame = { url: () => 'http://127.0.0.1:41111/' };
+  const pageUrl = 'http://127.0.0.1:41111/';
   const page = {
     route: async () => undefined,
-    exposeBinding: async (_name, callback) => { binding = callback; },
+    exposeBinding: async (name, callback) => { bindings.set(name, callback); },
     addInitScript: async () => undefined,
-    evaluate: async () => undefined,
+    evaluate,
+    on: (event, handler) => { journal.push([event, handler]); },
+    mainFrame: () => frame,
+    url: () => pageUrl,
   };
+  return { page, bindings, listeners: journal, frame };
+}
+
+test('Given an unknown scenario, when the trusted control parses it, then the request is rejected', async () => {
+  const { page, bindings } = fakePage();
   const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
   await installBrowserHarness({ page });
-  await assert.rejects(async () => binding({}, 'selectProfile', 'external-navigation'), /Unknown browser fault profile/);
+  const control = bindings.get('__godsEyeQaControl');
+  await assert.rejects(async () => control({}, 'selectScenario', 'external-navigation'), /Unknown scenario/);
+  await assert.rejects(async () => control({}, 'selectProfile', 'normal'), /Unknown browser harness command/);
+});
+
+test('Given a receipt request, when the harness serves it, then the predicate is contract text the agent never supplies', async () => {
+  const evaluated = [];
+  const { page, bindings } = fakePage({
+    evaluate: async (expression) => {
+      if (typeof expression === 'string') evaluated.push(expression);
+      return true;
+    },
+  });
+  const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+  await installBrowserHarness({ page });
+  const control = bindings.get('__godsEyeQaControl');
+  const source = { page };
+
+  await assert.rejects(async () => control(source, 'receipt', 'not-a-scenario'), /Unknown scenario receipt/);
+  await assert.rejects(
+    async () => control(source, 'receipt', '(s) => true'),
+    /Unknown scenario receipt/,
+    'an agent-supplied predicate must not be accepted as a scenario id',
+  );
+
+  await control(source, 'selectScenario', 'blank-input');
+  const token = await control(source, 'receipt', 'blank-input');
+  assert.equal(token, 'qa-receipt:blank-input');
+  const contract = require(resolve(qaRoot, 'scenarios.json'));
+  const declared = contract.scenarios.find(({ id }) => id === 'blank-input').receipt;
+  assert.equal(evaluated.length, 1);
+  assert.ok(evaluated[0].startsWith(`(${declared})(`), 'the evaluated expression must be the declared predicate');
+});
+
+test('Given observed page events, when they reach the harness, then typing is coalesced into one committed action', async () => {
+  const { page, bindings } = fakePage();
+  const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+  await installBrowserHarness({ page });
+  const record = bindings.get('__godsEyeQaRecord');
+  assert.equal(typeof record, 'function');
+  const textarea = { tag: 'TEXTAREA', id: 'query', type: '', ariaLabel: '', text: '' };
+  // Without QA_BROWSER_JOURNAL the recorder is inert, so this asserts the shape contract only.
+  record({}, { kind: 'input', target: textarea, value: 'A' });
+  record({}, { kind: 'input', target: textarea, value: 'A person' });
+  record({}, { kind: 'click', target: { tag: 'BUTTON', id: '', type: 'button', ariaLabel: 'Search gallery', text: 'Search gallery' }, value: '' });
+  record({}, null);
 });
 
 test('Given the trusted baseline config, when inspected, then it requires run boundaries and never manages servers', async () => {
@@ -111,6 +167,11 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
   t.after(() => runtime.stop());
 
   const { chromium } = require('playwright');
+  // Set before the harness is installed: it binds the journal target once, at install time.
+  const journalPath = resolve(browserEvidence, 'browser-journal.jsonl');
+  await writeFile(journalPath, '', { mode: 0o600 });
+  process.env.QA_BROWSER_JOURNAL = journalPath;
+  t.after(() => { delete process.env.QA_BROWSER_JOURNAL; });
   const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
@@ -118,13 +179,23 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
   const page = await context.newPage();
   await installBrowserHarness({ page });
 
-  const selectProfile = async (profile) => page.evaluate((selected) => Reflect.get(window, '__GODS_EYE_QA__').selectProfile(selected), profile);
-  const profileState = async () => page.evaluate(() => Reflect.get(window, '__GODS_EYE_QA__').state());
+  const selectScenario = async (id) => page.evaluate((selected) => Reflect.get(window, '__GODS_EYE_QA__').selectScenario(selected), id);
+  const receipt = async (id) => page.evaluate((selected) => Reflect.get(window, '__GODS_EYE_QA__').receipt(selected), id);
   const screenshot = async (name) => page.screenshot({ path: resolve(browserEvidence, `${name}.png`), fullPage: true });
-  const compose = async (profile) => { await selectProfile(profile); await page.goto(runtime.origin); await page.getByLabel('CLIP model').waitFor(); };
+  const compose = async (id) => { await selectScenario(id); await page.goto(runtime.origin); await page.getByLabel('CLIP model').waitFor(); };
+  // The harness no longer exposes its counters to the page: a scenario is asserted by asking for its
+  // receipt, which is what a real run does. A refused receipt still journals the state it saw, so a
+  // test that needs the raw counters reads them from the journal rather than from a test-only API.
+  const harnessState = async (id) => {
+    await receipt(id).catch(() => {});
+    const entries = (await readFile(journalPath, 'utf8')).split('\n').filter((line) => line.trim());
+    const last = entries.map((line) => JSON.parse(line)).filter((entry) => entry.kind === 'receipt').at(-1);
+    assert.ok(last, 'the harness must journal every receipt attempt');
+    return last.state;
+  };
 
   await t.test('normal search, detail, and return', async () => {
-    await compose('normal');
+    await compose('search-detail-return');
     await page.getByLabel('Person description').fill('A person wearing a blue coat');
     await page.getByRole('button', { name: 'Search gallery' }).click();
     const image = page.getByRole('img', { name: 'Gallery result ranked 1' });
@@ -135,16 +206,20 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
     await screenshot('search-detail-return');
     await page.getByRole('button', { name: 'Back to results' }).click();
     await page.getByRole('heading', { name: 'Closest visual matches' }).waitFor();
+    assert.equal(await receipt('search-detail-return'), 'qa-receipt:search-detail-return');
   });
 
   await t.test('model provenance', async () => {
-    await compose('normal');
+    await compose('model-provenance');
     await page.getByLabel('CLIP model').selectOption('openai/clip-vit-large-patch14');
     await page.getByLabel('Person description').fill('A person in a blue coat with a black shoulder bag');
     await page.getByRole('button', { name: 'Search gallery' }).click();
     await page.getByLabel('Search provenance').waitFor();
     assert.match(await page.getByLabel('Search provenance').innerText(), /fixture-clip-vit-l-14-v1/);
+    await page.getByRole('button', { name: 'Open result 1 from CUHK-PEDES' }).click();
+    await page.getByRole('heading', { name: 'Result #1' }).waitFor();
     await screenshot('model-provenance');
+    assert.equal(await receipt('model-provenance'), 'qa-receipt:model-provenance');
   });
 
   await t.test('cancelled delayed reply cannot replace the newer response', async () => {
@@ -161,8 +236,9 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
     const provenance = await page.getByLabel('Search provenance').innerText();
     assert.match(provenance, /qa-new-b16-v1/);
     assert.doesNotMatch(provenance, /qa-stale-l14-v1/);
-    assert.equal((await profileState()).lateFirstReplyAttempted, true);
     await screenshot('cancel-replace');
+    // The receipt is what proves the late reply was actually attempted and still lost the race.
+    assert.equal(await receipt('cancel-replace'), 'qa-receipt:cancel-replace');
   });
 
   await t.test('unprepared model is disabled with guidance', async () => {
@@ -175,6 +251,7 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
     assert.equal(await option.getAttribute('disabled'), '');
     assert.match(await page.getByLabel('Models needing preparation').innerText(), /\.\/gods-eye prepare --model-id openai\/clip-vit-large-patch14-336/);
     await screenshot('unprepared-model');
+    assert.equal(await receipt('unprepared-model'), 'qa-receipt:unprepared-model');
   });
 
   await t.test('one-time 409 refreshes the catalog and a later retry succeeds', async () => {
@@ -193,30 +270,29 @@ test('Given the real fixture page, when profiles are selected, then faults, rese
     await page.getByRole('button', { name: 'Search gallery' }).click();
     await page.getByLabel('Search provenance').waitFor();
     assert.match(await page.getByLabel('Search provenance').innerText(), /qa-recovered-b16-v1/);
-    const state = await profileState();
-    assert.equal(state.search409Count, 1);
-    assert.ok(state.catalogRequests >= 2);
     await screenshot('recover-409');
+    assert.equal(await receipt('recover-409'), 'qa-receipt:recover-409');
   });
 
   await t.test('blank input stays blank and sends no search', async () => {
-    await compose('normal');
+    await compose('blank-input');
     await page.getByLabel('Person description').fill('');
     await page.getByRole('button', { name: 'Search gallery' }).click();
     await page.getByRole('alert').waitFor();
     assert.equal(await page.getByLabel('Person description').inputValue(), '');
-    assert.equal((await profileState()).searchRequests, 0);
     await screenshot('blank-input');
+    assert.equal(await receipt('blank-input'), 'qa-receipt:blank-input');
   });
 
   await t.test('reset removes the prior fault profile', async () => {
-    await compose('normal');
+    await compose('search-detail-return');
     await page.waitForFunction(() => {
       const candidateOption = document.querySelector('option[value="openai/clip-vit-large-patch14-336"]');
       return candidateOption instanceof HTMLOptionElement && !candidateOption.disabled;
     });
     assert.equal(await page.getByLabel('CLIP model').locator('option[value="openai/clip-vit-large-patch14-336"]').isEnabled(), true);
-    const state = await profileState();
+    // Nothing has been done since the selection, so this receipt is refused and journals the state.
+    const state = await harnessState('search-detail-return');
     assert.equal(state.profile, 'normal');
     assert.equal(state.searchRequests, 0);
     assert.equal(state.search409Count, 0);

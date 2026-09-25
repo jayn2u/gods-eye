@@ -123,12 +123,6 @@ def _prepare(layout: RuntimeLayout, args: argparse.Namespace) -> int:
             return EXIT_USAGE
     try:
         with mutation_lock(layout, "prepare"):
-            if os.getenv("GODS_EYE_USE_FIXTURES") == "true":
-                from .fixture_preparation import prepare_fixture
-
-                layout.initialize()
-                prepare_fixture(layout.root, layout.state_path, model_ids=model_ids)
-                return EXIT_OK
             result = prepare_datasets(
                 layout, accept_data_terms=args.accept_data_terms, assume_yes=args.yes
             )
@@ -319,8 +313,6 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--label requires exactly one --checkpoint")
         if args.reference_metrics is not None and checkpoint_count != 1:
             parser.error("--reference-metrics requires exactly one --checkpoint")
-        if checkpoint_count and os.getenv("GODS_EYE_USE_FIXTURES") == "true":
-            parser.error("--checkpoint cannot be used with fixture preparation")
     layout = RuntimeLayout(Path(os.getenv("GODS_EYE_PROJECT_ROOT", "/workspace")))
     if args.command == "start":
         if (offered := offer_preparation(layout)) is not None:
