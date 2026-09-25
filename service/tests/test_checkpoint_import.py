@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from gods_eye import checkpoint_import
 from gods_eye.checkpoint_import import _build_openclip, import_checkpoint, load_reference_metrics
 from gods_eye.checkpoint_registry import CheckpointValidationError, validate_labclip_args
 
@@ -157,6 +159,20 @@ def test_import_captures_sibling_wandb_metadata(tmp_path: Path) -> None:
     assert result.registration.label == "FT · r7abc · val R@1 78.0"
 
 
+def test_registration_verified_flag_uses_shared_arch_gate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(checkpoint_import, "VERIFIED_ARCHS", frozenset())
+    source = tmp_path / "checkpoint.pt"
+    _save_checkpoint(source)
+
+    result = import_checkpoint(
+        source,
+        checkpoint_root=tmp_path / "registrations",
+        build_model=_build_model,
+    )
+
+    assert result.registration.verified is False
+
+
 def test_default_builder_delegates_to_cpu_openclip_builder(monkeypatch) -> None:
     arch = validate_labclip_args(VALID_ARGS)
     calls = []
@@ -172,6 +188,39 @@ def test_default_builder_delegates_to_cpu_openclip_builder(monkeypatch) -> None:
 
     assert _build_openclip(arch) is model
     assert calls == [(arch, "cpu")]
+
+
+def test_concurrent_publish_reuses_registration_published_first(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "checkpoint.pt"
+    _save_checkpoint(source)
+    checkpoint_root = tmp_path / "registrations"
+    published = import_checkpoint(source, checkpoint_root=checkpoint_root, build_model=_build_model)
+    concurrent_copy = tmp_path / "concurrent-copy"
+    shutil.copytree(published.directory, concurrent_copy)
+    shutil.rmtree(published.directory)
+
+    real_replace = checkpoint_import.os.replace
+    simulated_race = False
+
+    def publish_concurrently(source_path, destination_path):
+        nonlocal simulated_race
+        if Path(destination_path) == published.directory and not simulated_race:
+            shutil.copytree(concurrent_copy, destination_path)
+            simulated_race = True
+            raise FileExistsError("another importer published this digest first")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(checkpoint_import.os, "replace", publish_concurrently)
+
+    result = import_checkpoint(source, checkpoint_root=checkpoint_root, build_model=_build_model)
+
+    assert simulated_race is True
+    assert result.reused is True
+    assert result.registration == published.registration
+    assert result.directory == published.directory
+    assert list(checkpoint_root.iterdir()) == [published.directory]
 
 
 def test_import_rejects_test_split_args_without_writing(tmp_path: Path) -> None:

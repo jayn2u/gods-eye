@@ -19,7 +19,7 @@ from .checkpoint_registry import (
     validate_labclip_args,
     write_registration,
 )
-from .clip_models import OpenClipArch
+from .clip_models import VERIFIED_ARCHS, OpenClipArch
 
 if TYPE_CHECKING:
     import torch
@@ -176,11 +176,11 @@ def _stage_registration(
             model_id = checkpoint_model_id(weights_sha256)
             existing = find_registration(checkpoint_root, model_id)
             if existing is not None:
-                registration, directory = existing
-                if label is not None:
-                    registration = replace(registration, label=label)
-                    write_registration(checkpoint_root, registration)
-                return ImportResult(registration, directory, True)
+                return _reuse_registration(
+                    existing,
+                    checkpoint_root=checkpoint_root,
+                    label=label,
+                )
 
             wandb_metadata = _read_wandb_metadata(source.with_name("wandb_meta.json"))
             resolved_provenance = dict(provenance)
@@ -197,7 +197,7 @@ def _stage_registration(
                 source_sha256=source_sha256,
                 source_filename=source.name,
                 arch=arch,
-                verified=arch.model_name == "ViT-B-16" and arch.pretrained == "openai",
+                verified=(arch.model_name, arch.pretrained) in VERIFIED_ARCHS,
                 registered_at=_registered_at(now),
                 provenance=resolved_provenance,
                 reference_metrics=(
@@ -222,11 +222,11 @@ def _stage_registration(
             except OSError as exc:
                 concurrent = find_registration(checkpoint_root, model_id)
                 if concurrent is not None:
-                    registration, directory = concurrent
-                    if label is not None:
-                        registration = replace(registration, label=label)
-                        write_registration(checkpoint_root, registration)
-                    return ImportResult(registration, directory, True)
+                    return _reuse_registration(
+                        concurrent,
+                        checkpoint_root=checkpoint_root,
+                        label=label,
+                    )
                 raise CheckpointValidationError(
                     "Could not publish checkpoint registration."
                 ) from exc
@@ -246,6 +246,19 @@ def _read_wandb_metadata(path: Path) -> dict | None:
     if not isinstance(value, dict):
         raise CheckpointValidationError("wandb_meta.json must contain a JSON object.")
     return {key: value[key] for key in _WANDB_METADATA_KEYS if key in value}
+
+
+def _reuse_registration(
+    existing: tuple[Registration, Path],
+    *,
+    checkpoint_root: Path,
+    label: str | None,
+) -> ImportResult:
+    registration, directory = existing
+    if label is not None:
+        registration = replace(registration, label=label)
+        write_registration(checkpoint_root, registration)
+    return ImportResult(registration, directory, True)
 
 
 def _json_safe_copy(value: object, name: str) -> dict:
