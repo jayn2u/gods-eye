@@ -69,3 +69,19 @@ _Avoid_: Production service, deployment
 **Launcher**:
 The single operator-facing entry point that manages Demo Preparation and the Demo Runtime.
 _Avoid_: Python CLI, web app
+
+**Agent QA**:
+Advisory, fixture-backed browser QA of a pull request, run by one AI browser agent against the shared scenarios and judged only by the Browser Journal.
+_Avoid_: Automated test suite, required check
+
+**Agent Profile**:
+The single declaration of one agent's Agent QA identity: its QA Label, workflow, comment marker, artifact prefix, and evidence branch.
+_Avoid_: Agent config, workflow settings
+
+**QA Label**:
+The pull-request label that alone opts a pull request into Agent QA for one agent, such as `copilot-agent-qa` or `claude-agent-qa`.
+_Avoid_: Trigger label, `agent-qa`
+
+**Browser Journal**:
+The record of scenario selections, page-observed actions, and receipts written by harness code inside the browser session; the only evidence Agent QA accepts.
+_Avoid_: Agent transcript, agent log
