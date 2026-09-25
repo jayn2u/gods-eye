@@ -146,6 +146,9 @@ def _run(root: Path, *arguments: str, prepared: bool = True, extra_env=None, inp
     launcher = root / "gods-eye"
     shutil.copy2(ROOT / "gods-eye", launcher)
     launcher.chmod(0o755)
+    helper_directory = root / "scripts"
+    helper_directory.mkdir()
+    shutil.copy2(ROOT / "scripts" / "launcher-args.sh", helper_directory / "launcher-args.sh")
     bin_dir = root / "bin"
     bin_dir.mkdir()
     log = _fake_docker(bin_dir)

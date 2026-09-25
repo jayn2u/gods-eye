@@ -12,6 +12,26 @@ from gods_eye.launcher_doctor import required_capacity_bytes
 ROOT = Path(__file__).parents[2]
 
 
+def _checkpoint_registration(weights_character: str, label: str):
+    from gods_eye.checkpoint_registry import Registration, checkpoint_model_id
+    from gods_eye.clip_models import OpenClipArch
+
+    weights_sha256 = weights_character * 64
+    source_character = "c" if weights_character == "a" else "d"
+    return Registration(
+        model_id=checkpoint_model_id(weights_sha256),
+        label=label,
+        weights_sha256=weights_sha256,
+        source_sha256=source_character * 64,
+        source_filename=f"{label}.pt",
+        arch=OpenClipArch("ViT-B-16", "openai", 384, 128, "reid"),
+        verified=True,
+        registered_at="2026-09-25T00:00:00+00:00",
+        provenance={},
+        reference_metrics=None,
+    )
+
+
 def _fake_docker(bin_dir: Path) -> None:
     executable = bin_dir / "docker"
     executable.write_text(
@@ -203,6 +223,331 @@ def _prepare_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
         "GODS_EYE_DOCTOR_PORTS_AVAILABLE": "1",
     }
     return env, log
+
+
+def test_prepare_label_requires_exactly_one_checkpoint(capsys: pytest.CaptureFixture[str]) -> None:
+    from gods_eye.launcher_cli import main
+
+    with pytest.raises(SystemExit) as error:
+        main(
+            [
+                "prepare",
+                "--checkpoint",
+                "first.pt",
+                "--checkpoint",
+                "second.pt",
+                "--label",
+                "candidate",
+            ]
+        )
+
+    assert error.value.code == 64
+    assert "exactly one --checkpoint" in capsys.readouterr().err
+
+
+def test_prepare_imports_before_preparing_deduplicated_requested_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    import gods_eye.launcher_cli as launcher
+    from gods_eye.checkpoint_registry import write_registration
+    from gods_eye.clip_models import DEFAULT_MODEL_ID, checkpoint_root_for
+
+    registration = _checkpoint_registration("a", "candidate A")
+    project = tmp_path / "project"
+    source = tmp_path / "candidate.pt"
+    source.write_bytes(b"checkpoint fixture")
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+    monkeypatch.delenv("GODS_EYE_USE_FIXTURES", raising=False)
+    events: list[str] = []
+
+    def prepare_datasets(layout, **_kwargs):
+        events.append("datasets")
+        state = layout.read_state()
+        state.setdefault("preparation", {})["dataset_acquisition"] = {"status": "verified"}
+        layout.write_state(state)
+        return launcher.EXIT_OK
+
+    def import_checkpoint(source_path, *, checkpoint_root, **_kwargs):
+        events.append(f"import:{source_path.name}")
+        write_registration(checkpoint_root, registration)
+        return SimpleNamespace(registration=registration)
+
+    def prepare_model_index(_root, _state_path, *, model_id, **_kwargs):
+        events.append(f"prepare:{model_id}")
+
+    monkeypatch.setattr(launcher, "prepare_datasets", prepare_datasets)
+    monkeypatch.setattr(launcher, "import_checkpoint", import_checkpoint, raising=False)
+    monkeypatch.setattr("gods_eye.preparation.prepare_model_index", prepare_model_index)
+    monkeypatch.setattr(launcher, "optional_model_capacity_available", lambda *_args: None)
+    monkeypatch.setattr(launcher, "preparation_vram_mib", lambda: 16384)
+
+    result = launcher.main(
+        [
+            "prepare",
+            "--checkpoint",
+            str(source),
+            "--model-id",
+            registration.model_id,
+            "--model-id",
+            registration.paired_baseline_id,
+            "--model-id",
+            DEFAULT_MODEL_ID,
+        ]
+    )
+
+    assert result == launcher.EXIT_OK
+    assert events == [
+        "datasets",
+        "import:candidate.pt",
+        f"prepare:{registration.model_id}",
+        f"prepare:{registration.paired_baseline_id}",
+        f"prepare:{DEFAULT_MODEL_ID}",
+    ]
+    output = capsys.readouterr().out
+    assert registration.model_id in output
+    assert registration.label in output
+    assert checkpoint_root_for(project / ".cache" / "huggingface").is_dir()
+
+
+def test_prepare_rejects_checkpoint_import_in_fixture_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gods_eye.launcher_cli import EXIT_USAGE, main
+
+    source = tmp_path / "candidate.pt"
+    source.write_bytes(b"checkpoint fixture")
+    monkeypatch.setenv("GODS_EYE_USE_FIXTURES", "true")
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(tmp_path / "project"))
+
+    with pytest.raises(SystemExit) as error:
+        main(["prepare", "--checkpoint", str(source)])
+
+    assert error.value.code == EXIT_USAGE
+    assert "fixture" in capsys.readouterr().err.lower()
+    assert not (tmp_path / "project" / ".gods-eye" / "state.json").exists()
+
+
+def test_prepare_import_error_stops_before_model_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import gods_eye.launcher_cli as launcher
+
+    project = tmp_path / "project"
+    source = tmp_path / "invalid.pt"
+    source.write_bytes(b"invalid")
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+    monkeypatch.delenv("GODS_EYE_USE_FIXTURES", raising=False)
+    events: list[str] = []
+
+    def prepare_datasets(layout, **_kwargs):
+        state = layout.read_state()
+        state.setdefault("preparation", {})["dataset_acquisition"] = {"status": "verified"}
+        layout.write_state(state)
+        events.append("datasets")
+        return launcher.EXIT_OK
+
+    def import_checkpoint(*_args, **_kwargs):
+        events.append("import")
+        raise OSError("checkpoint file could not be read")
+
+    def prepare_model_index(*_args, **_kwargs):
+        events.append("prepare")
+
+    monkeypatch.setattr(launcher, "prepare_datasets", prepare_datasets)
+    monkeypatch.setattr(launcher, "import_checkpoint", import_checkpoint, raising=False)
+    monkeypatch.setattr("gods_eye.preparation.prepare_model_index", prepare_model_index)
+
+    result = launcher.main(["prepare", "--checkpoint", str(source)])
+
+    assert result == launcher.EXIT_PREPARATION
+    assert events == ["datasets", "import"]
+    assert "checkpoint file could not be read" in capsys.readouterr().err
+
+
+def test_checkpoint_list_json_and_human_output_show_preparation_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gods_eye.checkpoint_registry import write_registration
+    from gods_eye.clip_models import checkpoint_root_for
+    from gods_eye.launcher_cli import EXIT_OK, main
+
+    registration = _checkpoint_registration("a", "candidate\nA")
+    project = tmp_path / "project"
+    checkpoint_root = checkpoint_root_for(project / ".cache" / "huggingface")
+    write_registration(checkpoint_root, registration)
+    state_path = project / ".gods-eye" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "preparation": {
+                    "models": {
+                        registration.model_id: {
+                            "smoke_test": {"status": "verified"},
+                            "evaluation": {"status": "verified"},
+                        }
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+
+    assert main(["checkpoint", "list", "--json"]) == EXIT_OK
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [
+        {
+            "model_id": registration.model_id,
+            "label": registration.label,
+            "verified": True,
+            "paired_baseline_id": registration.paired_baseline_id,
+            "registered_at": registration.registered_at,
+            "prepared_status": "verified",
+            "evaluation_status": "verified",
+        }
+    ]
+
+    assert main(["checkpoint", "list"]) == EXIT_OK
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert registration.model_id in lines[0]
+    assert "candidate A" in lines[0]
+    assert registration.paired_baseline_id in lines[0]
+
+
+def test_checkpoint_list_without_registrations_prints_empty_array_without_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gods_eye.launcher_cli import EXIT_OK, main
+
+    project = tmp_path / "project"
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+
+    assert main(["checkpoint", "list", "--json"]) == EXIT_OK
+
+    assert capsys.readouterr().out == "[]\n"
+    assert not (project / ".gods-eye" / "state.json").exists()
+
+
+def test_checkpoint_remove_preserves_shared_baseline_until_last_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gods_eye.checkpoint_registry import find_registration, write_registration
+    from gods_eye.clip_models import ModelRegistry, checkpoint_root_for
+    from gods_eye.launcher_cli import EXIT_OK, main
+
+    project = tmp_path / "project"
+    checkpoint_root = checkpoint_root_for(project / ".cache" / "huggingface")
+    registrations = (
+        _checkpoint_registration("a", "candidate A"),
+        _checkpoint_registration("b", "candidate B"),
+    )
+    for registration in registrations:
+        write_registration(checkpoint_root, registration)
+
+    first, second = registrations
+    baseline = ModelRegistry(checkpoint_root).get(first.paired_baseline_id)
+    checkpoint_indexes = {
+        registration.model_id: project
+        / "indexes"
+        / "models"
+        / registration.to_spec(checkpoint_root / registration.weights_sha256).storage_key
+        for registration in registrations
+    }
+    baseline_index = project / "indexes" / "models" / baseline.storage_key
+    for index_root in (*checkpoint_indexes.values(), baseline_index):
+        (index_root / "evaluations").mkdir(parents=True)
+        (index_root / "evaluations" / "result.json").write_text("{}")
+    hf_snapshot = project / ".cache" / "huggingface" / "models--keep-me" / "snapshots" / "abc"
+    hf_snapshot.mkdir(parents=True)
+    (hf_snapshot / "config.json").write_text("{}")
+
+    state_path = project / ".gods-eye" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "preparation": {
+                    "models": {
+                        first.model_id: {"evaluation": {"status": "verified"}},
+                        second.model_id: {"evaluation": {"status": "verified"}},
+                        first.paired_baseline_id: {"evaluation": {"status": "verified"}},
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+
+    assert main(["checkpoint", "remove", first.model_id, "--yes"]) == EXIT_OK
+    state = json.loads(state_path.read_text())
+    assert find_registration(checkpoint_root, first.model_id) is None
+    assert not checkpoint_indexes[first.model_id].exists()
+    assert (checkpoint_indexes[second.model_id] / "evaluations" / "result.json").is_file()
+    assert (baseline_index / "evaluations" / "result.json").is_file()
+    assert first.model_id not in state["preparation"]["models"]
+    assert first.paired_baseline_id in state["preparation"]["models"]
+    assert (hf_snapshot / "config.json").is_file()
+
+    assert main(["checkpoint", "remove", second.model_id, "--yes"]) == EXIT_OK
+    state = json.loads(state_path.read_text())
+    assert not baseline_index.exists()
+    assert first.paired_baseline_id not in state["preparation"]["models"]
+    assert (hf_snapshot / "config.json").is_file()
+
+
+def test_checkpoint_remove_requires_confirmation_in_non_tty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    import gods_eye.launcher_cli as launcher
+    from gods_eye.checkpoint_registry import find_registration, write_registration
+    from gods_eye.clip_models import checkpoint_root_for
+
+    registration = _checkpoint_registration("a", "candidate A")
+    project = tmp_path / "project"
+    checkpoint_root = checkpoint_root_for(project / ".cache" / "huggingface")
+    write_registration(checkpoint_root, registration)
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+    monkeypatch.setattr(launcher.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+
+    result = launcher.main(["checkpoint", "remove", registration.model_id])
+
+    assert result == launcher.EXIT_CONFIRMATION
+    assert find_registration(checkpoint_root, registration.model_id) is not None
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_checkpoint_remove_prompts_on_tty_and_keeps_assets_when_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    import gods_eye.launcher_cli as launcher
+    from gods_eye.checkpoint_registry import find_registration, write_registration
+    from gods_eye.clip_models import checkpoint_root_for
+
+    registration = _checkpoint_registration("a", "candidate A")
+    project = tmp_path / "project"
+    checkpoint_root = checkpoint_root_for(project / ".cache" / "huggingface")
+    write_registration(checkpoint_root, registration)
+    monkeypatch.setenv("GODS_EYE_PROJECT_ROOT", str(project))
+    monkeypatch.setattr(launcher.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    prompts: list[str] = []
+    monkeypatch.setattr("builtins.input", lambda prompt: prompts.append(prompt) or "no")
+
+    result = launcher.main(["checkpoint", "remove", registration.model_id])
+
+    assert result == launcher.EXIT_OK
+    assert len(prompts) == 1
+    assert registration.model_id in prompts[0]
+    assert find_registration(checkpoint_root, registration.model_id) is not None
+    assert "cancelled" in capsys.readouterr().out
 
 
 def test_prepare_requires_separate_dataset_terms_acceptance(tmp_path: Path) -> None:
