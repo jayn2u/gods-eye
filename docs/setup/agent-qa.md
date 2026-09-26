@@ -5,31 +5,44 @@ upserted pull-request summary and bounded evidence artifacts; it does not add a 
 check or grant a merge. `--make-pr` can create a pull request when the invoking tool supports it,
 but it never grants merge permission or bypasses the repository review process.
 
-Agent QA runs per **Agent Profile**; Copilot is currently the only agent. For the per-agent design
-and migration rationale, see [ADR 0004](../adr/0004-label-opt-in-agent-qa-per-agent.md).
+Agent QA runs per **Agent Profile**: Copilot and Claude are available. Each run uses one AI browser
+agent against the shared scenarios and is judged only by the **Browser Journal**. For the per-agent
+design and migration rationale, see [ADR 0004](../adr/0004-label-opt-in-agent-qa-per-agent.md).
 
 ## Eligibility and activation
 
-The controller considers only an open, non-draft pull request that carries the `copilot-agent-qa`
-**QA Label**. This label is the sole opt-in: there is no base-branch restriction, and release pull
-requests no longer trigger automatically. The old `agent-qa` label is deprecated and does nothing.
-Only a collaborator with triage or higher permission can apply the QA Label, and the controller
-reads the label set from a fresh API response rather than from the event payload. The pull-request
-author must independently have repository write-equivalent permission. A label, a workflow actor,
-`author_association`, a title, or a body cannot substitute for that permission check. Pull requests
-without `copilot-agent-qa`, closed pull requests, and drafts do not start browser work.
+The controller considers only an open, non-draft pull request that carries either the
+`copilot-agent-qa` or `claude-agent-qa` **QA Label**. A label is the sole opt-in for its Agent Profile:
+there is no base-branch restriction, and release pull requests no longer trigger automatically. As
+part of this migration, the former `agent-qa` label and nine unused default labels were removed from
+the repository. Only a collaborator with triage or higher permission can apply a QA Label, and the
+controller reads the label set from a fresh API response rather than from the event payload. The
+pull-request author must independently have repository write-equivalent permission. A label, a
+workflow actor, `author_association`, a title, or a body cannot substitute for that permission check.
+Pull requests without either QA Label, closed pull requests, and drafts do not start browser work.
 
 A pull request keeps its opt-in across pushes: each `synchronize` event supersedes the previous
-generation while the QA Label remains. Removing `copilot-agent-qa`, converting the pull request to a
-draft, or retargeting it invalidates the request, and the reporter updates the existing advisory
-comment to `not_applicable`. Remove the QA Label when a pull request no longer needs QA on every
-push; the global one-job-at-a-time queue is shared with every eligible Agent Profile.
+generation while the QA Label remains. Removing an Agent Profile's QA Label, converting the pull
+request to a draft, or retargeting it invalidates that profile's request, and the reporter updates its
+existing advisory comment to `not_applicable`. Remove that QA Label when a pull request no longer
+needs the profile's QA on every push. Both labels together run both agents independently; they share
+the same global one-job-at-a-time queue.
 
-The trusted `Copilot Agent QA` and `Copilot Agent QA Report` workflows become active only after their
-reviewed change reaches the default `develop` branch through the normal team process. Do not
-directly push them to the default branch or treat this guide as merge authorization. Until that
-happens, a runner, the Copilot token secret, and local helper tests can be prepared, but the
-`pull_request_target` and `workflow_run` path cannot be accepted as live.
+Each workflow also receives label events for the other Agent Profile. Such an event gets a run name
+like `<Agent> Agent QA ignored label event <run id>` and its `admission` job is skipped. Its unique
+concurrency group means it neither cancels nor supersedes an in-progress Agent QA run. This is a
+behaviour change: an unrelated label event, such as adding the Claude QA Label, previously re-ran or
+cancelled Copilot QA and no longer does. The corresponding report workflow recognizes the trusted
+ignored-event run name, logs it, and skips cleanly: it publishes no screenshots, writes no comment,
+and does not fail. Any other run whose metadata or name it cannot trust still fails closed and writes
+nothing. No browser QA result was produced for an ignored label event.
+
+The trusted `Copilot Agent QA`, `Copilot Agent QA Report`, `Claude Agent QA`, and
+`Claude Agent QA Report` workflows become active only after their reviewed change reaches the default
+`develop` branch through the normal team process. Do not directly push them to the default branch or
+treat this guide as merge authorization. Until that happens, a runner, agent token secrets, and local
+helper tests can be prepared, but the `pull_request_target` and `workflow_run` path cannot be accepted
+as live.
 
 ## Runner and agent lifecycle
 
@@ -44,13 +57,30 @@ bash .github/agent-qa/setup-runner.sh register
 bash .github/agent-qa/setup-runner.sh start
 ```
 
-There is no `login` step and no persistent agent credential on this runner. The browser agent is the
-GitHub Copilot CLI, which authenticates from the `AGENT_QA_COPILOT_TOKEN` repository secret. The
-workflow passes it as `QA_COPILOT_TOKEN` only to the agent step. Create the secret from a token
-carrying the Copilot Requests permission. The user unit unsets `OPENAI_API_KEY`,
+There is no `login` step and no persistent agent credential on this runner. Copilot authenticates from
+the `AGENT_QA_COPILOT_TOKEN` repository secret, passed as `QA_COPILOT_TOKEN` only to its agent step;
+create it from a token carrying the Copilot Requests permission. Claude authenticates from the
+`CLAUDE_CODE_OAUTH_TOKEN` repository secret, passed only to its agent step. Create it with
+`claude setup-token`, then store it without printing the value:
+
+```bash
+claude_token="$(claude setup-token)"
+printf %s "$claude_token" | gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo jayn2u/gods-eye
+unset claude_token
+```
+
+Never echo the token or leave it in a terminal capture. The `printf %s` form avoids adding a newline
+when piping it. The user unit unsets `OPENAI_API_KEY`,
 `AZURE_OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, and `COPILOT_GITHUB_TOKEN`, so no
-ambient provider credential can be inherited, and the agent step keeps `GITHUB_TOKEN` and `GH_TOKEN`
-empty: the agent holds a Copilot credential and no repository access.
+ambient provider credential can be inherited; it also unsets `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `CLAUDE_CONFIG_DIR`. The Claude
+action step blanks `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL` and sets
+`ACTIONS_STEP_DEBUG` to `false`. It does not set `CLAUDE_CONFIG_DIR` at all: an empty value is not
+treated as unset, and the CLI would then ignore the run's `$HOME/.claude/settings.json`. Each agent
+step keeps `GITHUB_TOKEN` and `GH_TOKEN` empty, so an agent holds only its own provider credential
+and no repository access. The Claude token reaches only the action's `claude_code_oauth_token` input
+and, as `CLAUDE_TOKEN`, the token readiness step; `QA_CLAUDE_TOKEN` is only for a manual
+`doctor.cjs --json` check from a shell.
 
 `register` uses the already authenticated GitHub CLI to obtain a short-lived registration token; do
 not copy, print, or save that token.
@@ -63,9 +93,20 @@ bash .github/agent-qa/setup-runner.sh status
 ```
 
 The doctor output contains only non-secret readiness metadata. Its `subscription_auth` check reports
-`token_source: workflow-secret` outside Actions because the token is only provided to the agent step.
-The preparation check does not require the token; the agent step reports `auth_required` when the
-secret is missing or malformed. A token that is present is not proof that Copilot will answer.
+`token_source: workflow-secret` outside Actions because tokens are only provided to agent steps. The
+preparation check does not require a token; the agent step reports `auth_required` when its secret is
+missing or malformed. A token that is present is not proof that the agent will answer.
+
+After this Claude change, the runner operator must refresh the existing toolchain on the runner host,
+using the reviewed checkout:
+
+```bash
+bash .github/agent-qa/setup-runner.sh install
+bash .github/agent-qa/setup-runner.sh start
+```
+
+Until both commands have completed, Claude runs report `setup_failed` at the doctor's `tool_versions`
+check. The doctor checks only the active Agent Profile's tools, so Copilot is unaffected.
 
 Keep credentials, registration tokens, environment dumps, and raw agent output out of terminal
 captures and issue comments.
@@ -77,16 +118,47 @@ that user's access. Do not expand eligibility to untrusted contributors.
 
 ### Step layout
 
-The `Copilot Agent QA` job passes the execution-state file path to later steps as `STATE_PATH`.
-`prepare` runs the doctor with `phase: prepare`, starts the fixture runtime, runs the deterministic
-baseline, and writes the prompt. It does not receive `QA_COPILOT_TOKEN`. The agent step is the only
-step that receives `QA_COPILOT_TOKEN`. Its 25-minute GitHub step limit is a backstop behind the
-harness's 25-minute internal deadline, which starts at job start.
+Each agent workflow passes the execution-state file path to later steps as `STATE_PATH`. `prepare`
+runs the doctor with `phase: prepare`, starts the fixture runtime, runs the deterministic baseline,
+and writes the prompt. It does not receive an agent token; only the matching agent step receives its
+secret. The job has a 25-minute internal deadline from job start. The Copilot agent step enforces it
+itself, with a 25-minute GitHub step limit as a backstop. The Claude action cannot see the internal
+deadline, so `prepare` converts what remains of it into whole minutes (at least 1, at most 25) and the
+Claude step uses that as its `timeout-minutes`.
 
 `finalize` runs under `always()`. It verifies the Browser Journal, writes the report, and stops the
 handed-off runtime using its manifest. A run interrupted between steps is cleaned up by `finalize`;
 the runner's orphan-process cleanup handles anything still left at job end. The report's `phases`
 include `finalize`.
+
+### Claude profile and action
+
+Claude runs through
+`anthropics/claude-code-base-action@7456abb892dcd39cd63025550e1726fe65b7c5d2`. The workflow sets
+`NODE_VERSION` to `24.12.0` and bounds the action step with the remaining internal deadline in whole
+minutes, never more than 25. Claude Code `2.1.283`
+and Bun `1.3.14` come from the runner's locked toolchain. `setup-runner.sh install` uses `npm ci
+--ignore-scripts`, so it supplies the pinned platform executables directly to the action instead of
+letting the action's installer download Claude Code. The runner unit exposes them as `QA_CLAUDE_BIN`
+and `QA_BUN_BIN`. The action still runs its own `setup-node` and `bun install --production` in the
+runner's shared `_actions` directory on every run. Each Claude run therefore depends on the network and,
+for supply chain, on the pinned action's own lockfile.
+
+Each run has a run-scoped `HOME` and a `CLAUDE_WORKING_DIR` outside the candidate checkout. The
+prepared Claude directory contains a strict MCP configuration for the Playwright MCP server, and the
+workflow passes it with `--strict-mcp-config --mcp-config`. `--allowedTools` only pre-approves tools
+and `--disallowedTools` only removes the names it lists, so on their own the CLI would still expose its
+other built-in tools. The workflow therefore passes `--tools TodoWrite`, which narrows the built-in
+set to `TodoWrite`, and the denied list then removes `TodoWrite`, so no built-in tool remains. Only
+the 14 `mcp__playwright__<tool>` names declared by `scenarios.json` under `browser.allowed_tools`
+remain; they are also the `--allowedTools` list. The denied list is `Bash`, `Read`, `Write`, `Edit`,
+`MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `Task`, and `TodoWrite`.
+The permission mode is `dontAsk`, so a tool outside the allowed list is refused rather than prompted
+for, and `--max-turns 200` bounds the conversation. The allowed and denied lists are also written to
+the run's settings file; the result schema is passed inline with `--json-schema`.
+
+The workflow invokes `--model opus`. This is an intentional alias exception: it follows the newest
+Opus model, and the report records the model resolved by that run.
 
 ## Evidence channel
 
@@ -109,22 +181,24 @@ present there.
 
 Four surfaces carry the same validated `report.json`, in decreasing summary and increasing detail.
 
-**The pull-request comment.** One Copilot Agent QA bot comment per pull request, titled
-`Copilot Agent QA (advisory)`, identified by `<!-- gods-eye-copilot-agent-qa:v1 -->`, and rewritten
-in place on every push. It carries the status, the tested head, links to the run and the evidence
-artifact, a row per scenario, the findings, and the screenshots. The scenario table's `Browser calls`
-column is counted from the trusted Browser Journal and its `Proof` column reflects a screenshot the
-harness accepted, so neither number is the agent's own claim.
+**The pull-request comment.** Each Agent Profile owns one bot comment per pull request, rewritten in
+place on every push. Copilot uses title `Copilot Agent QA (advisory)` and marker
+`<!-- gods-eye-copilot-agent-qa:v1 -->`; Claude uses title `Claude Agent QA (advisory)` and marker
+`<!-- gods-eye-claude-agent-qa:v1 -->`. The comment carries the status, tested head, links to the run
+and evidence artifact, a row per scenario, findings, and screenshots. The scenario table's
+`Browser calls` column is counted from the trusted Browser Journal and its `Proof` column reflects a
+screenshot the harness accepted, so neither number is the agent's own claim.
 
 **The job summary.** The QA job renders the full report on its run page: tool and model versions,
 per-phase timings, the deterministic baseline result, the scenario table, the findings, and a
 collapsible block per scenario holding the agent's narrated steps beside the Browser Journal's call count and
 the evidence that was actually accepted. This is the surface the comment's run link lands on.
 
-**The evidence artifact.** `copilot-agent-qa-<pr>-<run>-<attempt>`, retained 14 days, holding
-`report.json` and the accepted screenshots. Only files listed in the report's evidence manifest,
-matched by size and sha256, are staged for upload, and screenshots for unproven scenarios are deleted
-before staging.
+**The evidence artifact.** Each artifact is retained 14 days and holds `report.json` and accepted
+screenshots. Its name is `copilot-agent-qa-<pr>-<run>-<attempt>` or
+`claude-agent-qa-<pr>-<run>-<attempt>`, according to the Agent Profile. Only files listed in the
+report's evidence manifest, matched by size and sha256, are staged for upload, and screenshots for
+unproven scenarios are deleted before staging.
 
 **The job log.** For a run that did not complete, stderr names what each unproven scenario was
 missing — origin, how many of its declared actions were observed, receipt attempts, screenshot — and
@@ -132,11 +206,13 @@ prints the harness's own state snapshot for a refused receipt.
 
 ### Screenshots in the pull request
 
-Accepted screenshots are pushed to the orphan branch `copilot-agent-qa-evidence` under
+Accepted screenshots are pushed to the orphan branch `copilot-agent-qa-evidence` or
+`claude-agent-qa-evidence`, according to the Agent Profile, under
 `pr-<number>/<run id>-<attempt>/<scenario>.png` and referenced from the comment. Older generations of
-the same pull request are removed in the same commit, so the branch holds one directory per pull
-request rather than one per push; other pull requests' paths are never touched. The branch shares no
-history with any source branch, and deleting it is safe — the next publication recreates it.
+the same pull request are removed from that profile's branch in the same commit, so each branch holds
+one directory per pull request rather than one per push; other pull requests' paths are never touched.
+The branch shares no history with any source branch, and deleting it is safe — the next publication
+recreates it.
 
 The old `agent-qa-evidence` branch and `<!-- gods-eye-agent-qa:v1 -->` comments are no longer
 updated. The old branch can be deleted.
@@ -165,9 +241,10 @@ a changed lock rebuilds it and unrelated source changes do not. A per-run cache 
 exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
 not cleaned with them; delete them by hand if a corrupt download has to be discarded.
 
-A run that reaches the agent step's 25-minute GitHub backstop still enters `finalize` before the job
-ends. The internal deadline starts at job start, so it ends work before this later step limit and
-leaves time for cleanup. The browser agent is invoked directly rather than through a lock wrapper,
+A run whose agent step reaches its GitHub step limit still enters `finalize` before the job ends. The
+internal deadline starts at job start and bounds both agents: Copilot's supervisor stops at it, and the
+Claude step's `timeout-minutes` is what remains of it when `prepare` finishes. Either way work ends
+within 25 minutes of job start and leaves time for cleanup. The browser agent is invoked directly rather than through a lock wrapper,
 so the supervisor terminates the agent's own process group and no lock survives to block later runs.
 The runner's orphan-process cleanup handles anything still left at job end. If a report says
 `setup_failed`, the job log names the failed prerequisite. The report's `phases` field records how
@@ -214,6 +291,17 @@ Node processes. For a superseded or cancelled run, allow the newer generation or
 reach its terminal summary before deciding whether a new eligible pull-request event is needed.
 Agent QA never uses Docker or Compose as a recovery step.
 
+Claude uses `auth_required` when its token is missing or invalid, including HTTP 401 or 403
+responses. Recreate the `CLAUDE_CODE_OAUTH_TOKEN` secret from `claude setup-token`
+and store it with `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo jayn2u/gods-eye`; if piping the token,
+use `printf %s`, never `echo`, and keep it out of logs and captures. `rate_limited` means Claude
+returned HTTP 429 or a usage limit response. `timeout` means the Claude step ran for its whole budget,
+the remaining internal deadline, without producing a result. A failed or cancelled Claude step that
+ends earlier than that without a result reports `setup_failed`, because the action failed before
+Claude produced anything (for example its own `setup-node` or `bun install`); a cancelled job still
+reports `cancelled`. `invalid_output` means Claude hit max turns, returned an agent error,
+or produced no result. These are Agent QA outcomes, not product findings.
+
 A `timeout` report names the phase that consumed the budget in the job log, as
 `phases: doctor=1s runtime=612s ... finalize=1s`. A large `runtime` figure is dependency
 installation, not the browser agent.
@@ -253,12 +341,21 @@ The Copilot CLI ships per-platform binary packages; `package-lock.json` pins eac
 integrity value and `npm ci` selects only `copilot-linux-x64` on this runner. `QA_AGENT_MODEL` may
 pin a model through the `AGENT_QA_MODEL` repository variable and is left unset by default.
 
-Node, the Copilot CLI, and Playwright MCP are the harness's own tools and are pinned exactly; the
-doctor rejects a drift. `uv` and `pnpm` build the candidate, and their versions are governed by that
-candidate's own `uv.lock` and `packageManager` field through corepack, so the doctor requires their
-presence and records the observed version rather than asserting a global one. The runner unit pins
-`PATH` to the directory of the Node that `install` verified, because the systemd user manager does
-not inherit a login shell's PATH and a version-managed interpreter would otherwise be invisible.
+Claude Code `2.1.283` and Bun `1.3.14` are also pinned in the locked toolchain. Because
+`setup-runner.sh install` uses `npm ci --ignore-scripts`, their platform packages provide the
+executables directly at
+`$QA_ROOT/toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude` and
+`$QA_ROOT/toolchain/node_modules/@oven/bun-linux-x64/bin/bun`; the runner unit exposes these as
+`QA_CLAUDE_BIN` and `QA_BUN_BIN`. The Claude workflow passes these paths to the pinned action instead
+of using its `curl | bash` installer.
+
+Node, Playwright MCP, and each active Agent Profile's tools are pinned exactly; the doctor rejects a
+drift in those tools. It checks only the active agent's binaries: Copilot, or Claude Code plus Bun.
+`uv` and `pnpm` build the candidate, and their versions are governed by that candidate's own
+`uv.lock` and `packageManager` field through corepack, so the doctor requires their presence and
+records the observed version rather than asserting a global one. The runner unit pins `PATH` to the
+directory of the Node that `install` verified, because the systemd user manager does not inherit a
+login shell's PATH and a version-managed interpreter would otherwise be invisible.
 
 The published Actions guide installs the CLI with an unpinned `npm install -g @github/copilot` on an
 ephemeral GitHub-hosted runner. This repository does not: a global install would mutate state shared

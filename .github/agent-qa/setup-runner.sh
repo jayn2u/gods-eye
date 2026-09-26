@@ -26,8 +26,11 @@ Usage:
   start     Verify prerequisites, then enable and start the user service.
   status    Print the non-secret JSON preflight report.
 
-  The browser agent authenticates from the AGENT_QA_COPILOT_TOKEN repository secret, which the
-  workflow passes in as QA_COPILOT_TOKEN. No agent credential is stored on this runner.
+  The browser agent authenticates from a repository secret; no agent credential is stored on this
+  runner. Copilot reads AGENT_QA_COPILOT_TOKEN, which the workflow passes in as QA_COPILOT_TOKEN.
+  Claude reads CLAUDE_CODE_OAUTH_TOKEN, which reaches only the Claude action's
+  claude_code_oauth_token input (and CLAUDE_TOKEN in the token readiness step), never
+  QA_CLAUDE_TOKEN. QA_CLAUDE_TOKEN is used only for a manual doctor.cjs --json check from a shell.
 EOF
 }
 
@@ -82,6 +85,7 @@ require_safe_root() {
   [[ "${QA_ROOT}" != "${DEVELOPER_CHECKOUT}"/* && "${DEVELOPER_CHECKOUT}" != "${QA_ROOT}"/* && "${QA_ROOT}" != "${DEVELOPER_CHECKOUT}" ]] \
     || die "QA_ROOT and the developer checkout must be separate"
   [[ "${QA_ROOT}" != "${HOME}/.copilot" ]] || die "QA_ROOT cannot be the developer Copilot home"
+  [[ "${QA_ROOT}" != "${HOME}/.claude" ]] || die "QA_ROOT cannot be the developer Claude Code home"
 }
 
 test_adapter_value() {
@@ -129,8 +133,10 @@ WorkingDirectory=${escaped_runner}
 Environment="PATH=${escaped_path}"
 Environment="PLAYWRIGHT_BROWSERS_PATH=${escaped_root}/toolchain/browsers"
 Environment="QA_COPILOT_BIN=${escaped_root}/toolchain/node_modules/.bin/copilot"
+Environment="QA_CLAUDE_BIN=${escaped_root}/toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+Environment="QA_BUN_BIN=${escaped_root}/toolchain/node_modules/@oven/bun-linux-x64/bin/bun"
 Environment="QA_PLAYWRIGHT_MCP_BIN=${escaped_root}/toolchain/node_modules/.bin/playwright-mcp"
-UnsetEnvironment=OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY COPILOT_GITHUB_TOKEN
+UnsetEnvironment=OPENAI_API_KEY AZURE_OPENAI_API_KEY CODEX_API_KEY ANTHROPIC_API_KEY COPILOT_GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CONFIG_DIR
 ExecStart=${escaped_runner}/run.sh
 Restart=always
 RestartSec=5

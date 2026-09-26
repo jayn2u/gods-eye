@@ -1,6 +1,6 @@
-name: Copilot Agent QA
+name: Claude Agent QA
 run-name: >-
-  ${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'copilot-agent-qa') && format('Copilot Agent QA ignored label event {0}', github.run_id) || format('Copilot Agent QA PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha) }}
+  ${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'claude-agent-qa') && format('Claude Agent QA ignored label event {0}', github.run_id) || format('Claude Agent QA PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha) }}
 
 on:
   pull_request_target:
@@ -18,13 +18,13 @@ on:
 permissions: {}
 
 concurrency:
-  group: gods-eye-copilot-agent-qa-pr-${{ github.event.pull_request.number }}${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'copilot-agent-qa') && format('-ignored-{0}', github.run_id) || '' }}
+  group: gods-eye-claude-agent-qa-pr-${{ github.event.pull_request.number }}${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'claude-agent-qa') && format('-ignored-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   admission:
     name: Admit trusted requested PR
-    if: ${{ !(contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'copilot-agent-qa') }}
+    if: ${{ !(contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'claude-agent-qa') }}
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -66,7 +66,7 @@ jobs:
             const decision = await controller.admitPullRequest({
               github,
               repository: process.env.EXPECTED_REPOSITORY,
-              agent: 'copilot',
+              agent: 'claude',
               pullNumber: Number(process.env.PULL_NUMBER),
               eventHeadSha: process.env.EVENT_HEAD_SHA,
               controllerSha: process.env.CONTROLLER_SHA,
@@ -75,7 +75,7 @@ jobs:
               admittedAt: new Date().toISOString(),
             });
             core.setOutput('status', decision.status);
-            core.info(`Copilot Agent QA admission: ${decision.status}/${decision.reason}`);
+            core.info(`Claude Agent QA admission: ${decision.status}/${decision.reason}`);
             if (decision.request) {
               core.setOutput('request', JSON.stringify(decision.request));
             }
@@ -161,7 +161,7 @@ jobs:
               request: JSON.parse(process.env.QA_REQUEST_JSON),
             });
             core.setOutput('status', decision.status);
-            core.info(`Copilot Agent QA recheck: ${decision.status}/${decision.reason}`);
+            core.info(`Claude Agent QA recheck: ${decision.status}/${decision.reason}`);
 
       - name: Prepare the fixture runtime and baseline
         id: prepare
@@ -196,28 +196,100 @@ jobs:
           if [ -n "$state_path" ]; then
             printf 'state=%s\n' "$state_path" >> "$GITHUB_OUTPUT"
           fi
+          if [ -s "$RUNNER_TEMP/agent-qa-prepare.json" ]; then
+            PREPARE_JSON_FILE="$RUNNER_TEMP/agent-qa-prepare.json" node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const prepared = JSON.parse(fs.readFileSync(process.env.PREPARE_JSON_FILE, 'utf8'));
+          for (const name of ['claude_args', 'prompt', 'agent_home', 'work_dir', 'settings', 'agent_timeout_minutes']) {
+            const value = Number.isInteger(prepared[name]) ? String(prepared[name]) : prepared[name];
+            if (typeof value !== 'string') continue;
+            let delimiter;
+            do { delimiter = `agent_qa_${crypto.randomUUID()}`; } while (value.includes(delimiter));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<${delimiter}\n${value}\n${delimiter}\n`);
+          }
+          NODE
+          fi
           exit "$prepare_status"
 
-      - name: Run bounded Copilot browser QA
-        id: agent
+      - name: Check Claude token readiness
+        id: token
         if: steps.prepare.outputs.state != ''
-        timeout-minutes: 25
+        env:
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
+        shell: bash
+        run: |
+          node -e '
+            const { agentTokenReadiness } = require(process.argv[1]);
+            const readiness = agentTokenReadiness(process.env.CLAUDE_TOKEN || "");
+            console.log("ready=" + (readiness.present ? "true" : "false"));
+          ' "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/doctor.cjs" >> "$GITHUB_OUTPUT"
+
+      # The record step compares the agent's run time with its budget to tell a timeout from an action
+      # that failed early, so the start is recorded immediately before the action runs.
+      - name: Mark the Claude agent start
+        id: agent_start
+        if: steps.token.outputs.ready == 'true' && steps.prepare.outputs.claude_args != ''
         env:
           QA_ROOT: ${{ steps.paths.outputs.qa_root }}
           NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
-          # Copilot CLI authenticates from this token only. GITHUB_TOKEN and GH_TOKEN stay empty so
-          # the agent cannot reach the repository API even though it now holds a Copilot credential.
-          QA_COPILOT_TOKEN: ${{ secrets.AGENT_QA_COPILOT_TOKEN }}
-          QA_AGENT_MODEL: ${{ vars.AGENT_QA_MODEL }}
           STATE_PATH: ${{ steps.prepare.outputs.state }}
           GITHUB_TOKEN: ""
           GH_TOKEN: ""
-          OPENAI_API_KEY: ""
+        shell: bash
+        run: node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" mark-agent-start --state "$STATE_PATH"
+
+      # The budget is what remains of the 25-minute internal deadline measured from job start.
+      - name: Run bounded Claude browser QA
+        id: agent
+        if: steps.token.outputs.ready == 'true' && steps.prepare.outputs.claude_args != ''
+        timeout-minutes: ${{ fromJSON(steps.prepare.outputs.agent_timeout_minutes || '25') }}
+        # anthropics/claude-code-base-action main 2026-09-25
+        uses: anthropics/claude-code-base-action@7456abb892dcd39cd63025550e1726fe65b7c5d2
+        env:
+          HOME: ${{ steps.prepare.outputs.agent_home }}
+          CLAUDE_WORKING_DIR: ${{ steps.prepare.outputs.work_dir }}
+          NODE_VERSION: '24.12.0'
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
           ANTHROPIC_API_KEY: ""
+          ANTHROPIC_AUTH_TOKEN: ""
+          ANTHROPIC_BASE_URL: ""
+          ANTHROPIC_MODEL: ""
+          OPENAI_API_KEY: ""
           CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
+          ACTIONS_STEP_DEBUG: "false"
+        with:
+          prompt_file: ${{ steps.prepare.outputs.prompt }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          path_to_claude_code_executable: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude
+          path_to_bun_executable: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules/@oven/bun-linux-x64/bin/bun
+          settings: ${{ steps.prepare.outputs.settings }}
+          claude_args: ${{ steps.prepare.outputs.claude_args }}
+          show_full_output: 'false'
+
+      - name: Record Claude agent outcome
+        id: record
+        if: always() && steps.prepare.outputs.state != ''
+        env:
+          QA_ROOT: ${{ steps.paths.outputs.qa_root }}
+          NODE_PATH: ${{ steps.paths.outputs.qa_root }}/toolchain/node_modules
+          STATE_PATH: ${{ steps.prepare.outputs.state }}
+          EXECUTION_FILE: ${{ steps.agent.outputs.execution_file }}
+          CONCLUSION: ${{ steps.agent.outputs.conclusion }}
+          AGENT_OUTCOME: ${{ steps.agent.outcome }}
+          TOKEN_READY: ${{ steps.token.outputs.ready }}
+          GITHUB_TOKEN: ""
+          GH_TOKEN: ""
         shell: bash
-        run: node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" agent --state "$STATE_PATH"
+        run: |
+          record_args=(--state "$STATE_PATH" --execution-file "$EXECUTION_FILE" \
+            --conclusion "$CONCLUSION" --step-outcome "$AGENT_OUTCOME")
+          if [ "$TOKEN_READY" = 'false' ]; then record_args+=(--token-missing); fi
+          node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" record-agent "${record_args[@]}"
 
       - name: Verify the journal, write the report, and stop the runtime
         id: finalize
@@ -301,7 +373,7 @@ jobs:
         # actions/upload-artifact v4
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: copilot-agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: claude-agent-qa-${{ github.event.pull_request.number }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.stage.outputs.path }}
           if-no-files-found: error
           retention-days: 14

@@ -1,9 +1,9 @@
-name: Copilot Agent QA Report
+name: Claude Agent QA Report
 
 on:
   workflow_run:
     workflows:
-      - Copilot Agent QA
+      - Claude Agent QA
     types:
       - completed
 
@@ -11,7 +11,7 @@ permissions: {}
 
 jobs:
   correlate:
-    name: Correlate trusted Copilot Agent QA run
+    name: Correlate trusted Claude Agent QA run
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -45,7 +45,7 @@ jobs:
             const { profileForWorkflowPath } = require(path.join(process.env.GITHUB_WORKSPACE, 'trusted-control/.github/agent-qa/agents/profiles.cjs'));
             const run = context.payload.workflow_run;
             const repository = context.payload.repository?.full_name;
-            const trustedPath = profileForWorkflowPath(run?.path)?.agent === 'copilot';
+            const trustedPath = profileForWorkflowPath(run?.path)?.agent === 'claude';
             if (
               repository !== 'jayn2u/gods-eye'
               || run?.repository?.full_name !== repository
@@ -57,12 +57,12 @@ jobs:
               || run.run_attempt <= 0
               || !trustedPath
             ) {
-              core.setFailed('Untrusted or malformed Copilot Agent QA workflow_run metadata');
+              core.setFailed('Untrusted or malformed Claude Agent QA workflow_run metadata');
               return;
             }
             // A label event for another label runs the QA workflow only to be ignored, so it has no
             // report to publish. Skip it cleanly instead of failing on its intentionally untyped name.
-            const ignored = /^Copilot Agent QA ignored label event ([0-9]+)$/u.exec(run.name ?? '');
+            const ignored = /^Claude Agent QA ignored label event ([0-9]+)$/u.exec(run.name ?? '');
             if (run.name === run.display_title && ignored && Number(ignored[1]) === run.id) {
               core.info(`Skipping ignored label event run: ${run.name}`);
               core.setOutput('skip', 'true');
@@ -70,7 +70,7 @@ jobs:
             }
             const identity = reporter.parseWorkflowRunIdentity(run);
             if (!identity) {
-              core.setFailed('Copilot Agent QA run name did not contain a trusted identity');
+              core.setFailed('Claude Agent QA run name did not contain a trusted identity');
               return;
             }
             core.setOutput('pr_number', String(identity.prNumber));
@@ -79,7 +79,7 @@ jobs:
   # that can write to the pull request. This one holds `contents: write` and no pull-request access,
   # runs only trusted control code, and pushes nothing but PNGs the harness already accepted.
   publish-evidence:
-    name: Publish accepted Copilot Agent QA screenshots
+    name: Publish accepted Claude Agent QA screenshots
     needs: correlate
     if: needs.correlate.outputs.skip != 'true'
     runs-on: ubuntu-24.04
@@ -117,15 +117,15 @@ jobs:
                 github, workflowRun: context.payload.workflow_run, repository,
               });
               if (!prepared) {
-                core.info('Copilot Agent QA published no screenshots: the run produced no accepted proof');
+                core.info('Claude Agent QA published no screenshots: the run produced no accepted proof');
                 core.setOutput('files', '[]');
                 return;
               }
               const published = await publishScreenshots({ github, repository, ...prepared });
-              core.info(`Copilot Agent QA evidence commit ${published.commitSha} on ${published.branch}`);
+              core.info(`Claude Agent QA evidence commit ${published.commitSha} on ${published.branch}`);
               core.setOutput('files', JSON.stringify(published.files));
             } catch (error) {
-              core.warning(`Copilot Agent QA screenshot publication skipped: ${error.code ?? error.message}`);
+              core.warning(`Claude Agent QA screenshot publication skipped: ${error.code ?? error.message}`);
               core.setOutput('files', '[]');
             }
 
@@ -141,7 +141,7 @@ jobs:
       contents: read
       pull-requests: write
     concurrency:
-      group: gods-eye-copilot-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}
+      group: gods-eye-claude-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}
       cancel-in-progress: false
       queue: max
     steps:
@@ -173,7 +173,7 @@ jobs:
               const parsed = JSON.parse(process.env.EVIDENCE_FILES || '[]');
               if (Array.isArray(parsed)) evidenceFiles = parsed;
             } catch {
-              core.warning('Copilot Agent QA evidence file list was unreadable; publishing without screenshots');
+              core.warning('Claude Agent QA evidence file list was unreadable; publishing without screenshots');
             }
             const outcome = await publishWorkflowRun({
               github,
@@ -181,7 +181,7 @@ jobs:
               repository: `${context.repo.owner}/${context.repo.repo}`,
               evidenceFiles,
             });
-            core.info(`Copilot Agent QA publication: ${JSON.stringify(outcome)}`);
+            core.info(`Claude Agent QA publication: ${JSON.stringify(outcome)}`);
             if (outcome.status === 'incomplete') {
-              core.setFailed(`Copilot Agent QA publication incomplete: ${outcome.reason}`);
+              core.setFailed(`Claude Agent QA publication incomplete: ${outcome.reason}`);
             }

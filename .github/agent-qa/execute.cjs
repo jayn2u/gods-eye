@@ -16,12 +16,15 @@ const {
 } = require('./contracts.cjs');
 const { agentTokenReadiness, runDoctor } = require('./doctor.cjs');
 const { parseBrowserJournal, readJournal, scenarioActionRequirements } = require('./journal.cjs');
+const { claudeArgs, claudeOutcome, readExecutionLog, writeClaudeInputs } = require('./agents/claude.cjs');
 const { runCopilot } = require('./agents/copilot.cjs');
+const { playwrightServer } = require('./agents/mcp.cjs');
 const {
   ProcessSupervisor, RuntimeError, reclaimStaleManifest, remainingMilliseconds,
   sanitizedChildEnvironment, startRuntime, stopHandedOffRuntime,
 } = require('./runtime.cjs');
 const { profileFor } = require('./agents/profiles.cjs');
+const { sanitizeText } = require('./redact.cjs');
 
 // Two consecutive runs of the same code took 230s and 546s for the same six scenarios, so the budget
 // has to cover agent variance rather than its best case. The runner is self-hosted, so the extra
@@ -29,8 +32,12 @@ const { profileFor } = require('./agents/profiles.cjs');
 const INTERNAL_DEADLINE_MS = 25 * 60 * 1000;
 const MAX_DIFF_BYTES = 100 * 1024;
 const MAX_EVENT_BYTES = 50 * 1024 * 1024;
+const MAX_AGENT_TIMEOUT_MINUTES = 25;
+// A step timeout fires at its budget, so a step that ran this close to it is treated as timed out.
+const AGENT_TIMEOUT_GRACE_SECONDS = 30;
 const qaRoot = fs.realpathSync(__dirname);
 const scenarioContract = require('./scenarios.json');
+const resultSchema = require('./agent-result.schema.json');
 const ALLOWED_TOOLS = Object.freeze([...scenarioContract.browser.allowed_tools]);
 const scenariosById = new Map(scenarioContract.scenarios.map((scenario) => [scenario.id, scenario]));
 
@@ -48,6 +55,8 @@ function usage() {
     'Usage:',
     '  node execute.cjs prepare --request <absolute-path> --candidate <absolute-path> --evidence <absolute-path> --job-start <timestamp>',
     '  node execute.cjs agent --state <absolute-path>',
+    '  node execute.cjs mark-agent-start --state <absolute-path>',
+    '  node execute.cjs record-agent --state <absolute-path> --execution-file <absolute-path|empty> --conclusion <success|failure|empty> --step-outcome <success|failure|cancelled|skipped|empty> [--token-missing]',
     '  node execute.cjs finalize --state <absolute-path> [--cancelled]',
     '',
   ].join('\n');
@@ -58,12 +67,15 @@ function parseCli(argv) {
   const flagsByCommand = {
     prepare: ['--request', '--candidate', '--evidence', '--job-start'],
     agent: ['--state'],
+    'mark-agent-start': ['--state'],
+    'record-agent': ['--state', '--execution-file', '--conclusion', '--step-outcome'],
     finalize: ['--state'],
   };
   const allowed = flagsByCommand[command];
   if (!allowed) throw new ExecutionError('USAGE', usage().trim());
   const values = {};
   let cancelled = false;
+  let tokenMissing = false;
   for (let index = 0; index < rest.length;) {
     const flag = rest[index];
     if (command === 'finalize' && flag === '--cancelled' && !cancelled) {
@@ -71,16 +83,33 @@ function parseCli(argv) {
       index += 1;
       continue;
     }
-    if (!allowed.includes(flag) || !rest[index + 1] || values[flag]) {
+    if (command === 'record-agent' && flag === '--token-missing' && !tokenMissing) {
+      tokenMissing = true;
+      index += 1;
+      continue;
+    }
+    const permitsEmpty = command === 'record-agent'
+      && ['--execution-file', '--conclusion', '--step-outcome'].includes(flag);
+    if (!allowed.includes(flag) || rest[index + 1] === undefined
+        || (!permitsEmpty && !rest[index + 1]) || Object.hasOwn(values, flag)) {
       throw new ExecutionError('USAGE', usage().trim());
     }
     values[flag] = rest[index + 1];
     index += 2;
   }
-  if (allowed.some((flag) => !values[flag])) throw new ExecutionError('USAGE', usage().trim());
+  if (allowed.some((flag) => !Object.hasOwn(values, flag))) throw new ExecutionError('USAGE', usage().trim());
   const pathFlags = command === 'prepare' ? ['--request', '--candidate', '--evidence'] : ['--state'];
   for (const flag of pathFlags) {
     if (!path.isAbsolute(values[flag])) throw new ExecutionError('INVALID_PATH', `${flag} must be an absolute path`);
+  }
+  if (command === 'record-agent') {
+    if (values['--execution-file'] && !path.isAbsolute(values['--execution-file'])) {
+      throw new ExecutionError('INVALID_PATH', '--execution-file must be an absolute path or empty');
+    }
+    if (!['', 'success', 'failure'].includes(values['--conclusion'])
+        || !['', 'success', 'failure', 'cancelled', 'skipped'].includes(values['--step-outcome'])) {
+      throw new ExecutionError('USAGE', usage().trim());
+    }
   }
   if (command === 'prepare') return {
     command,
@@ -89,7 +118,43 @@ function parseCli(argv) {
     evidence: path.resolve(values['--evidence']),
     jobStart: values['--job-start'],
   };
+  if (command === 'record-agent') return {
+    command,
+    statePath: path.resolve(values['--state']),
+    executionFile: values['--execution-file'] ? path.resolve(values['--execution-file']) : '',
+    conclusion: values['--conclusion'],
+    stepOutcome: values['--step-outcome'],
+    tokenMissing,
+  };
   return { command, statePath: path.resolve(values['--state']), cancelled };
+}
+
+function preparationOutput({ statePath, state }) {
+  const output = { state: statePath, ready: Boolean(state.runtime) };
+  const claude = state.agent_paths?.claude;
+  if (claude) {
+    Object.assign(output, {
+      claude_args: claudeArgs({ mcpConfigPath: claude.mcp_config, resultSchema }),
+      prompt: state.prompt_path,
+      agent_home: state.agent_paths.agent_home,
+      work_dir: state.agent_paths.work_dir,
+      settings: claude.settings,
+      agent_timeout_minutes: state.agent_timeout_minutes,
+    });
+  }
+  return output;
+}
+
+// The Claude action runs as a workflow step, so the internal deadline measured from job start can only
+// bound it through the step's timeout-minutes, which takes whole minutes.
+function agentTimeoutMinutes(deadlineEpochMs, now = Date.now()) {
+  const minutes = Math.floor((deadlineEpochMs - now) / 60_000);
+  return Math.min(MAX_AGENT_TIMEOUT_MINUTES, Math.max(1, Number.isFinite(minutes) ? minutes : 1));
+}
+
+function validAgentTimeoutMinutes(value) {
+  return Number.isInteger(value) && value >= 1 && value <= MAX_AGENT_TIMEOUT_MINUTES
+    ? value : MAX_AGENT_TIMEOUT_MINUTES;
 }
 
 function deadlineFromJobStart(jobStart, clocks = {}) {
@@ -198,18 +263,6 @@ function boundedDiffContext(candidate, request) {
   };
 }
 
-function sanitizeText(value, fallback = 'Details unavailable.') {
-  let text = typeof value === 'string' ? value : fallback;
-  text = text
-    .replace(/\b(?:sk|sess|ghp|github_pat)_[A-Za-z0-9_-]{6,}\b/gu, '[redacted]')
-    .replace(/\b(?:OPENAI_API_KEY|AZURE_OPENAI_API_KEY|CODEX_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*[:=]\s*[^\s,;]+/giu, '[redacted]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{6,}/giu, 'Bearer [redacted]')
-    .replace(/(?:TOKEN|SECRET|AUTH)[_-]?CANARY[A-Za-z0-9_-]*/giu, '[redacted]')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, ' ')
-    .trim();
-  return (text || fallback).slice(0, 4000);
-}
-
 function incompleteScenarios() {
   return SCENARIO_IDS.map((id) => ({
     id, status: 'incomplete',
@@ -286,6 +339,9 @@ function mapFailure(error, text = '') {
   const combined = `${error?.message ?? ''} ${error?.details ?? ''} ${text}`;
   if (error?.code === 'AUTH_REQUIRED') return 'auth_required';
   if (error?.code === 'CANCELLED') return 'cancelled';
+  if (error?.code === 'RATE_LIMITED') return 'rate_limited';
+  if (error?.code === 'AGENT_SETUP_FAILED') return 'setup_failed';
+  if (['MAX_TURNS', 'AGENT_FAILED', 'AGENT_NO_OUTPUT'].includes(error?.code)) return 'invalid_output';
   if (error?.code === 'DEADLINE_EXCEEDED' || /timed?\s*out|deadline/iu.test(combined)) return 'timeout';
   if (/rate.?limit|too many requests|\b429\b|quota/iu.test(combined)) return 'rate_limited';
   if (/not logged in|login required|authentication|unauthorized|\b401\b/iu.test(combined)) return 'auth_required';
@@ -580,7 +636,7 @@ async function prepareExecution(options, adapters = {}) {
       throw new ExecutionError('STALE_CANDIDATE', 'Candidate is not a clean checkout of the admitted head');
     }
     state.before = deps.snapshotTrackedFiles(roots.candidate);
-    doctor = await deps.runDoctor({ env: deps.env, phase: 'prepare' });
+    doctor = await deps.runDoctor({ env: deps.env, phase: 'prepare', agent: request.agent });
     tracker.mark('doctor');
     state.tools = toolsFromDoctor(doctor, deps.chromiumVersion(toolchain), request.agent, deps.env);
     if (!doctor.ok) {
@@ -624,6 +680,28 @@ async function prepareExecution(options, adapters = {}) {
     const promptPath = path.join(privateRoot, 'prompt.txt');
     await fsp.writeFile(promptPath, prompt, { mode: 0o600 });
     await fsp.chmod(promptPath, 0o600);
+    if (request.agent === 'claude') {
+      await fsp.mkdir(agentPaths.agent_home, { recursive: true, mode: 0o700 });
+      await fsp.chmod(agentPaths.agent_home, 0o700);
+      const server = playwrightServer({
+        mcpBin: deps.env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchain, 'node_modules', '.bin', 'playwright-mcp'),
+        origin: runtime.origin,
+        screenshotsRoot,
+        initPage: path.join(qaRoot, 'browser-init.ts'),
+        journal: agentPaths.journal,
+        browsers: path.join(toolchain, 'browsers'),
+      });
+      const claude = await writeClaudeInputs({
+        claudeDir: path.join(privateRoot, 'claude'),
+        server,
+        resultSchema,
+      });
+      agentPaths.claude = {
+        mcp_config: claude.mcpConfigPath,
+        settings: claude.settingsPath,
+        schema: claude.schemaPath,
+      };
+    }
     const handoff = await runtime.supervisor.handOff();
     handedOff = true;
     state.runtime = {
@@ -633,6 +711,7 @@ async function prepareExecution(options, adapters = {}) {
     };
     state.prompt_path = promptPath;
     state.agent_paths = agentPaths;
+    if (agentPaths.claude) state.agent_timeout_minutes = agentTimeoutMinutes(state.deadline_epoch_ms);
   } catch (error) {
     if (error?.code === 'STALE_CANDIDATE') state.stale = true;
     if (options.signal?.aborted || error?.code === 'CANCELLED') {
@@ -666,7 +745,7 @@ async function prepareExecution(options, adapters = {}) {
     await fsp.rm(privateRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  return { statePath, state };
+  return { statePath, state, output: preparationOutput({ statePath, state }) };
 }
 
 async function runAgentStep({ statePath, signal }, adapters = {}) {
@@ -676,12 +755,18 @@ async function runAgentStep({ statePath, signal }, adapters = {}) {
   const profile = profileFor(request.agent);
   const outcomePath = path.join(state.private_root, 'agent-outcome.json');
   const agentPaths = state.agent_paths;
+  const logRoot = path.join(state.private_root, 'agent-supervisor', 'logs');
+  const claudeConfig = privateChildPath(state.private_root, agentPaths?.claude?.mcp_config);
   const outcome = {
     process_error: null,
     journal_path: agentPaths?.journal ?? null,
-    stdout_path: agentPaths ? path.join(state.private_root, 'agent-supervisor', 'logs', 'copilot.stdout.log') : null,
-    stderr_path: agentPaths ? path.join(state.private_root, 'agent-supervisor', 'logs', 'copilot.stderr.log') : null,
-    config_path: agentPaths ? path.join(agentPaths.agent_home, '.copilot', 'mcp-config.json') : null,
+    stdout_path: agentPaths ? path.join(logRoot, `${profile.agent}.stdout.log`) : null,
+    stderr_path: agentPaths ? path.join(logRoot, `${profile.agent}.stderr.log`) : null,
+    config_path: agentPaths
+      ? (profile.agent === 'claude'
+        ? (claudeConfig ?? path.join(state.private_root, 'claude', 'mcp-config.json'))
+        : path.join(agentPaths.agent_home, '.copilot', 'mcp-config.json'))
+      : null,
     private_result: agentPaths?.private_result ?? null,
     phases: [],
   };
@@ -709,10 +794,10 @@ async function runAgentStep({ statePath, signal }, adapters = {}) {
       const token = typeof deps.env.QA_COPILOT_TOKEN === 'string' ? deps.env.QA_COPILOT_TOKEN : '';
       if (interrupted) {
         outcome.process_error = { code: 'CANCELLED', message: 'Agent execution was cancelled', details: null };
-      } else if (!agentTokenReadiness(token).present) {
-        outcome.process_error = { code: 'AUTH_REQUIRED', message: 'Agent token missing or malformed', details: null };
       } else if (profile.agent !== 'copilot') {
         outcome.process_error = { code: 'UNKNOWN_AGENT', message: 'Agent profile has no runner adapter', details: null };
+      } else if (!agentTokenReadiness(token).present) {
+        outcome.process_error = { code: 'AUTH_REQUIRED', message: 'Agent token missing or malformed', details: null };
       } else {
         const deadline = deadlineFromEpoch(state.deadline_epoch_ms, deps.clocks);
         const runRoot = path.join(state.private_root, 'agent-supervisor');
@@ -775,6 +860,88 @@ async function runAgentStep({ statePath, signal }, adapters = {}) {
   return outcome;
 }
 
+async function markAgentStart({ statePath, now = Date.now() }) {
+  const state = readExecutionState(statePath);
+  const marker = path.join(state.private_root, 'agent-start.json');
+  await writeExecutionState(marker, { started_epoch_ms: now });
+  return marker;
+}
+
+// True only when the Claude step started and then ran for its whole timeout-minutes budget.
+function agentStepTimedOut(state, now) {
+  const marker = path.join(state.private_root, 'agent-start.json');
+  let started;
+  try {
+    started = readBoundedJson(marker)?.started_epoch_ms;
+  } catch {
+    return false;
+  }
+  if (!Number.isFinite(started)) return false;
+  const budgetSeconds = validAgentTimeoutMinutes(state.agent_timeout_minutes) * 60;
+  return (now - started) / 1000 >= budgetSeconds - AGENT_TIMEOUT_GRACE_SECONDS;
+}
+
+async function recordAgentOutcome({
+  statePath, executionFile = '', conclusion = '', stepOutcome = '', tokenMissing = false, now = Date.now(),
+}) {
+  const state = readExecutionState(statePath);
+  if (executionFile && !path.isAbsolute(executionFile)) {
+    throw new ExecutionError('INVALID_PATH', '--execution-file must be an absolute path or empty');
+  }
+  let messages = [];
+  let readErrorDetails = null;
+  if (executionFile) {
+    try {
+      messages = await readExecutionLog(path.resolve(executionFile));
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // Error messages can contain private log contents or paths; retain only the error code.
+        const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code : 'READ_FAILED';
+        readErrorDetails = sanitizeText(`Claude execution log could not be read (${code}).`);
+      }
+    }
+  }
+  const claude = claudeOutcome({
+    messages,
+    conclusion,
+    stepOutcome,
+    tokenReady: !tokenMissing,
+    timedOut: agentStepTimedOut(state, now),
+  });
+  if (readErrorDetails && claude.process_error) claude.process_error.details = readErrorDetails;
+  const privatePath = (value, fallback) => privateChildPath(state.private_root, value)
+    ?? privateChildPath(state.private_root, path.join(state.private_root, fallback));
+  const journalPath = privatePath(state.agent_paths?.journal, 'browser-journal.jsonl');
+  const configPath = privatePath(state.agent_paths?.claude?.mcp_config, path.join('claude', 'mcp-config.json'));
+  const privateResult = privatePath(state.agent_paths?.private_result, 'agent-result.json');
+  const outcomePath = privatePath(null, 'agent-outcome.json');
+  if (!journalPath || !configPath || !privateResult || !outcomePath) {
+    throw new ExecutionError('INVALID_STATE', 'Claude outcome paths do not match the private root');
+  }
+  if (claude.result) {
+    await fsp.writeFile(privateResult, `${JSON.stringify(claude.result)}\n`, { mode: 0o600 });
+    await fsp.chmod(privateResult, 0o600);
+  } else {
+    await fsp.rm(privateResult, { force: true });
+  }
+  const duration = [...messages].reverse().find((message) => (
+    Number.isFinite(message?.duration_ms) && message.duration_ms >= 0
+  ));
+  const outcome = {
+    process_error: claude.process_error,
+    journal_path: journalPath,
+    private_result: privateResult,
+    model: claude.model,
+    stdout_path: null,
+    stderr_path: null,
+    config_path: configPath,
+    phases: [{ name: 'agent', seconds: duration ? Math.round(duration.duration_ms / 1000) : 0 }],
+  };
+  await writeExecutionState(outcomePath, outcome);
+  return outcome;
+}
+
 async function finalizeExecution({ statePath, cancelled = false, signal }, adapters = {}) {
   const deps = executionDependencies(adapters);
   const started = performance.now();
@@ -789,6 +956,8 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
   if (fs.existsSync(outcomePath)) {
     try { outcome = readBoundedJson(outcomePath, { maxBytes: MAX_EVENT_BYTES }); } catch (error) { outcomeReadError = error; }
   }
+  // The resolved model deliberately overrides QA_AGENT_MODEL from preparation.
+  if (outcome?.model && state.tools?.agent) state.tools.agent.model = outcome.model;
   const outcomeMissing = !fs.existsSync(outcomePath);
   const isCancelled = Boolean(cancelled || signal?.aborted || state.reason === 'cancelled');
   let parsed = {
@@ -1004,9 +1173,15 @@ async function main() {
   try {
     if (options.command === 'prepare') {
       const result = await prepareExecution({ ...options, signal: controller.signal });
-      process.stdout.write(`${JSON.stringify({ state: result.statePath, ready: Boolean(result.state.runtime) })}\n`);
+      process.stdout.write(`${JSON.stringify(result.output)}\n`);
     } else if (options.command === 'agent') {
       await runAgentStep({ statePath: options.statePath, signal: controller.signal });
+      process.stdout.write(`${JSON.stringify({ outcome: path.join(path.dirname(options.statePath), 'agent-outcome.json') })}\n`);
+    } else if (options.command === 'mark-agent-start') {
+      const marker = await markAgentStart({ statePath: options.statePath });
+      process.stdout.write(`${JSON.stringify({ agent_start: marker })}\n`);
+    } else if (options.command === 'record-agent') {
+      await recordAgentOutcome(options);
       process.stdout.write(`${JSON.stringify({ outcome: path.join(path.dirname(options.statePath), 'agent-outcome.json') })}\n`);
     } else {
       const result = await finalizeExecution({
@@ -1032,11 +1207,14 @@ module.exports = Object.freeze({
   ExecutionError,
   INTERNAL_DEADLINE_MS,
   agentPrompt,
+  agentTimeoutMinutes,
   deadlineFromEpoch,
   deadlineFromJobStart,
   finalizeExecution,
+  markAgentStart,
   parseCli,
   prepareExecution,
+  recordAgentOutcome,
   resultContract,
   runAgentStep,
   runExecution,

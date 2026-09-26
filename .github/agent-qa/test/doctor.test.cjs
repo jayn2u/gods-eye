@@ -106,6 +106,68 @@ test('agentTokenReadiness keeps the whitespace rule', () => {
   assert.deepEqual(agentTokenReadiness(''), { present: false, wellFormed: true });
 });
 
+test('the default Copilot doctor ignores missing Claude Code and Bun binaries', async (t) => {
+  const f = fixture(t);
+  const versions = check(await runDoctor({
+    env: {
+      ...f.env,
+      QA_CLAUDE_BIN: path.join(f.temp, 'missing-claude'),
+      QA_BUN_BIN: path.join(f.temp, 'missing-bun'),
+    },
+  }), 'tool_versions');
+
+  assert.equal(versions.agent, 'copilot');
+  assert.equal(versions.pinned, 'node,copilot,playwright_mcp');
+  assert.equal(versions.copilot, '1.0.83');
+  assert.equal(versions.claude, undefined);
+  assert.equal(versions.bun, undefined);
+});
+
+test('the Claude doctor checks Claude Code and Bun pins and selects Claude auth', async (t) => {
+  const f = fixture(t);
+  const claude = path.join(f.temp, 'claude');
+  const bun = path.join(f.temp, 'bun');
+  executable(claude, "echo '2.1.283 (Claude Code)'");
+  executable(bun, "echo '1.3.14'");
+  const env = { ...f.env, QA_CLAUDE_BIN: claude, QA_BUN_BIN: bun };
+  delete env.QA_COPILOT_TOKEN;
+  const prepared = await runDoctor({ env, phase: 'prepare', agent: 'claude' });
+  const prepareAuth = check(prepared, 'subscription_auth');
+  assert.equal(prepareAuth.ok, true);
+  assert.equal(prepareAuth.token_source, 'agent-step');
+  assert.equal(prepareAuth.required, false);
+
+  const status = await runDoctor({
+    env: { ...env, QA_CLAUDE_TOKEN: SECRET }, phase: 'status', agent: 'claude',
+  });
+  const versions = check(status, 'tool_versions');
+  assert.equal(versions.agent, 'claude');
+  assert.equal(versions.pinned, 'node,claude,bun,playwright_mcp');
+  assert.equal(versions.claude, '2.1.283');
+  assert.equal(versions.bun, '1.3.14');
+  assert.equal(versions.copilot, undefined);
+  assert.equal(versions.ok, process.versions.node === '24.12.0');
+  const statusAuth = check(status, 'subscription_auth');
+  assert.equal(statusAuth.ok, true);
+  assert.equal(statusAuth.token_source, 'QA_CLAUDE_TOKEN');
+});
+
+test('a Claude Code version drift fails the selected-agent tool check', async (t) => {
+  const f = fixture(t);
+  const claude = path.join(f.temp, 'claude');
+  const bun = path.join(f.temp, 'bun');
+  executable(claude, "echo '2.1.282 (Claude Code)'");
+  executable(bun, "echo '1.3.14'");
+  const report = await runDoctor({
+    env: { ...f.env, QA_CLAUDE_BIN: claude, QA_BUN_BIN: bun }, agent: 'claude',
+  });
+  const versions = check(report, 'tool_versions');
+
+  assert.equal(versions.claude, '2.1.282');
+  assert.equal(versions.pinned, 'node,claude,bun,playwright_mcp');
+  assert.equal(versions.ok, false);
+});
+
 test('reports ready from a workflow-supplied Copilot token and non-secret metadata', (t) => {
   const f = fixture(t);
   const result = run(f.env);

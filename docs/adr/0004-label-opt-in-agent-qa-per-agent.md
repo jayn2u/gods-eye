@@ -2,6 +2,8 @@
 
 Status: accepted (2026-09-25)
 
+Update (2026-09-26): the `agent-qa` label and nine unused default labels were deleted from the repository; Claude Agent QA shipped as described below.
+
 ## Context
 
 Agent QA ran one browser agent, the GitHub Copilot CLI, from a single `agent-qa.yml` workflow. It
@@ -57,6 +59,10 @@ Two labels on one pull request double the queue time for that head, because both
 runner. Two workflows, two report workflows, and two evidence branches are more files than one
 parameterized workflow; in return a job never holds another agent's credential, and each reporter
 owns exactly one comment and one branch, so two publications never race.
+
+During the agent step the candidate's runtime shares the runner's Unix user with the Claude action, so
+the Claude token is protected by the admission trust model (only authors with write permission are
+admitted), exactly as the Copilot token is.
 
 The work lands in two pull requests: the Copilot rename, trigger removal, profile registry, and step
 split first, validated live, then the Claude adapter and workflows.

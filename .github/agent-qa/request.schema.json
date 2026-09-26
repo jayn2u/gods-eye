@@ -7,7 +7,7 @@
   "required": ["schema_version", "agent", "repository", "pr_number", "head", "base", "controller_sha", "run", "author", "admitted_at"],
   "properties": {
     "schema_version": { "const": 1 },
-    "agent": { "enum": ["copilot"] },
+    "agent": { "enum": ["copilot", "claude"] },
     "repository": { "const": "jayn2u/gods-eye" },
     "pr_number": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
     "head": {
