@@ -163,8 +163,16 @@ function fixtureAdapters(overrides = {}) {
           else {
             const result = JSON.parse(await fsp.readFile(path.join(fixtureRoot, 'agent-result.json'), 'utf8'));
             if (overrides.canary) {
-              result.summary = 'OPENAI_API_KEY=sk_test_canary_123456 sk-ant-oat01-abcdef… '
+              result.scenarios[0].actual = 'OPENAI_API_KEY=sk_test_canary_123456 sk-ant-oat01-abcdef… '
                 + 'CLAUDE_CODE_OAUTH_TOKEN=x TOKEN_CANARY_ALPHA';
+            }
+            if (overrides.jsonCanary) {
+              result.scenarios[0].actual = JSON.stringify({
+                CLAUDE_CODE_OAUTH_TOKEN: 'oauth-json-secret',
+                ANTHROPIC_API_KEY: 'anthropic-json-secret',
+                OPENAI_API_KEY: 'openai-json-secret',
+                GITHUB_TOKEN: 'github-json-secret',
+              });
             }
             await fsp.writeFile(paths.privateResult, JSON.stringify(result));
           }
@@ -500,6 +508,14 @@ test('A complete adapter-backed execution emits a validated no-findings public a
   await fsp.rm(durable, { recursive: true, force: true });
   await fsp.mkdir(durableEvidence, { recursive: true });
   await fsp.cp(result.evidence, durable, { recursive: true });
+});
+
+test('public reports redact JSON-quoted environment credentials', async (t) => {
+  const { report, reportPath } = await executeCase(t, { jsonCanary: true });
+  assert.equal(report.status, 'no_findings');
+  assert.match(report.scenarios[0].actual, /\[redacted\]/u);
+  const reportText = await fsp.readFile(reportPath, 'utf8');
+  assert.doesNotMatch(reportText, /oauth-json-secret|anthropic-json-secret|openai-json-secret|github-json-secret/u);
 });
 
 test('Failure matrix keeps infrastructure honest, checks source integrity, and always cleans owned state', async (t) => {

@@ -59,6 +59,37 @@ function collectRefs(value, refs = []) {
   return refs;
 }
 
+function splitClaudeArgs(value) {
+  const words = [];
+  let word = '';
+  let quote = null;
+  let started = false;
+  let escaped = false;
+  for (const character of value) {
+    if (escaped) {
+      word += character;
+      escaped = false;
+    } else if (character === '\\' && quote !== "'") {
+      escaped = true;
+    } else if (quote && character === quote) {
+      quote = null;
+    } else if (!quote && (character === "'" || character === '"')) {
+      quote = character;
+      started = true;
+    } else if (!quote && /\s/u.test(character)) {
+      if (started) words.push(word);
+      word = '';
+      started = false;
+    } else {
+      word += character;
+      started = true;
+    }
+  }
+  if (quote || escaped) throw new Error('Unclosed argument quote or escape');
+  if (started) words.push(word);
+  return words;
+}
+
 async function temporary(t) {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gods-eye-claude-test-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -116,6 +147,37 @@ test('maps Claude authentication, rate-limit, and max-turn errors', () => {
   assert.match(limited.process_error.message, /rate limit/iu);
 });
 
+test('classifies text authentication errors without matching author or unrelated OAuth text', () => {
+  for (const error of [
+    'authentication failed', 'authorization failed', 'unauthorized', 'unauthorised',
+    'invalid token', 'invalid API key', 'invalid credentials', 'oauth token expired',
+  ]) {
+    const outcome = claudeOutcome({
+      messages: [{ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [error] }],
+      conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+    });
+    assert.equal(outcome.process_error.code, 'AUTH_REQUIRED', error);
+  }
+  for (const error of ['author wrote a note', 'OAuth callback returned a page']) {
+    const outcome = claudeOutcome({
+      messages: [{ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [error] }],
+      conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+    });
+    assert.equal(outcome.process_error.code, 'AGENT_FAILED', error);
+  }
+});
+
+test('classifies text rate and usage limits', () => {
+  for (const error of ['rate limit reached', 'usage limit reached']) {
+    const outcome = claudeOutcome({
+      messages: [{ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [error] }],
+      conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+    });
+    assert.equal(outcome.process_error.code, 'RATE_LIMITED', error);
+    assert.match(outcome.process_error.message, /rate limit/iu);
+  }
+});
+
 test('classifies an agent error and sanitizes its returned error details', () => {
   const outcome = claudeOutcome({
     messages: [{
@@ -131,6 +193,20 @@ test('classifies an agent error and sanitizes its returned error details', () =>
   assert.doesNotMatch(JSON.stringify(outcome.process_error), /sk-ant-oat01-abcdef|secret-value/u);
 });
 
+test('sanitizes JSON-quoted environment credentials in Claude errors', () => {
+  const outcome = claudeOutcome({
+    messages: [{
+      type: 'result',
+      subtype: 'error_during_execution',
+      is_error: true,
+      errors: ['{"CLAUDE_CODE_OAUTH_TOKEN":"oauth-json-secret","ANTHROPIC_API_KEY": "anthropic-json-secret"}'],
+    }],
+    conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+  });
+
+  assert.doesNotMatch(JSON.stringify(outcome.process_error), /oauth-json-secret|anthropic-json-secret/u);
+});
+
 test('distinguishes missing credentials and a cancelled empty execution log', () => {
   assert.equal(claudeOutcome({
     messages: [], conclusion: 'success', stepOutcome: 'success', tokenReady: false,
@@ -141,6 +217,18 @@ test('distinguishes missing credentials and a cancelled empty execution log', ()
   assert.equal(claudeOutcome({
     messages: [], conclusion: 'success', stepOutcome: 'success', tokenReady: true,
   }).process_error.code, 'AGENT_NO_OUTPUT');
+});
+
+test('classifies a cancelled or failed partial log without a result message as cancelled', () => {
+  const messages = [initMessage(), { type: 'assistant', message: { content: [] } }];
+  for (const stepOutcome of ['cancelled', 'failure']) {
+    const outcome = claudeOutcome({
+      messages, conclusion: 'failure', stepOutcome, tokenReady: true,
+    });
+    assert.equal(outcome.process_error.code, 'CANCELLED', stepOutcome);
+    assert.equal(outcome.model, MODEL);
+    assert.equal(outcome.result, null);
+  }
 });
 
 test('reads both JSON-array and JSON-lines execution logs', async (t) => {
@@ -200,17 +288,30 @@ test('writes private Claude config, exact permissions, and a self-contained resu
   await assert.rejects(writeClaudeInputs({ claudeDir: forbiddenDir, server, resultSchema }));
 });
 
-test('creates Claude CLI arguments with strict tools and quotes paths containing spaces', () => {
+test('creates Claude CLI arguments with an inline schema and strict browser tools', () => {
   const configPath = '/private/claude/mcp-config.json';
   const schemaPath = '/private/claude/result.schema.json';
-  const expected = [
+  const text = claudeArgs({ mcpConfigPath: configPath, schemaPath, resultSchema });
+  const args = splitClaudeArgs(text);
+  assert.deepEqual(args.slice(0, 9), [
     '--model', 'opus', '--strict-mcp-config', '--mcp-config', configPath,
     '--allowedTools', CLAUDE_ALLOWED_TOOLS.join(','),
     '--disallowedTools', CLAUDE_DENIED_TOOL_NAMES.join(','),
-    '--json-schema', schemaPath,
-  ].join(' ');
-  assert.equal(claudeArgs({ mcpConfigPath: configPath, schemaPath }), expected);
-  assert.match(claudeArgs({ mcpConfigPath: '/private data/mcp.json', schemaPath }), /--mcp-config "\/private data\/mcp\.json"/u);
+  ]);
+  assert.equal(args[9], '--json-schema');
+  assert.equal(args.length, 11);
+  assert.deepEqual(JSON.parse(args[10]), resultSchema);
+  assert.equal(args.includes(schemaPath), false);
+  assert.equal(splitClaudeArgs(claudeArgs({
+    mcpConfigPath: '/private data/mcp.json', resultSchema,
+  }))[4], '/private data/mcp.json');
+});
+
+test('rejects a schema containing a single quote before building Claude CLI arguments', () => {
+  const unsafeSchema = { ...resultSchema, title: "owner's schema" };
+  assert.throws(() => claudeArgs({
+    mcpConfigPath: '/private/claude/mcp-config.json', resultSchema: unsafeSchema,
+  }), { code: 'SCHEMA_QUOTE_UNSAFE' });
 });
 
 test('shares the existing Playwright MCP command while preserving Copilot config shape', () => {
