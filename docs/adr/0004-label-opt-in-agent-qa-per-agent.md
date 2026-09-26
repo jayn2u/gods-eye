@@ -2,6 +2,8 @@
 
 Status: accepted (2026-09-25)
 
+Update (2026-09-26): the `agent-qa` label and nine unused default labels were deleted from the repository; Claude Agent QA shipped as described below.
+
 ## Context
 
 Agent QA ran one browser agent, the GitHub Copilot CLI, from a single `agent-qa.yml` workflow. It
