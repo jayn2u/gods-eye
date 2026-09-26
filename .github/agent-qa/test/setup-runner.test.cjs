@@ -225,6 +225,7 @@ test('the unit unsets provider credentials and pins Copilot, Claude Code, and Bu
   for (const name of [
     'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY',
     'COPILOT_GITHUB_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR',
   ]) {
     assert.match(unit, new RegExp(`UnsetEnvironment=.*\\b${name}\\b`), name);
   }
@@ -284,6 +285,25 @@ test('start restarts the service so a rewritten unit cannot keep running the old
   const calls = fs.readFileSync(path.join(f.state, 'systemctl-calls'), 'utf8');
   assert.match(calls, /daemon-reload/);
   assert.match(calls, /restart gods-eye-agent-qa-runner\.service/);
+});
+
+test('the unit template unsets every Claude provider override', () => {
+  const source = fs.readFileSync(setup, 'utf8');
+  const line = source.split('\n').find((entry) => entry.startsWith('UnsetEnvironment='));
+  assert.ok(line, 'UnsetEnvironment line');
+  const names = line.slice('UnsetEnvironment='.length).trim().split(/\s+/u);
+  for (const name of [
+    'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_BASE_URL', 'CLAUDE_CONFIG_DIR',
+  ]) assert.ok(names.includes(name), name);
+});
+
+test('help says the Claude token reaches only the action input and QA_CLAUDE_TOKEN is manual', () => {
+  const output = execFileSync('bash', [setup, '--help'], { encoding: 'utf8' });
+  assert.match(output, /claude_code_oauth_token/u);
+  assert.match(output, /CLAUDE_TOKEN/u);
+  assert.match(output, /QA_CLAUDE_TOKEN[^.]*only[^.]*manual[^.]*doctor(?:\.cjs)? --json/su);
+  assert.doesNotMatch(output, /passes in as QA_COPILOT_TOKEN or QA_CLAUDE_TOKEN/u);
 });
 
 test('help exposes only the non-destructive lifecycle commands', () => {

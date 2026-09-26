@@ -32,6 +32,9 @@ const { sanitizeText } = require('./redact.cjs');
 const INTERNAL_DEADLINE_MS = 25 * 60 * 1000;
 const MAX_DIFF_BYTES = 100 * 1024;
 const MAX_EVENT_BYTES = 50 * 1024 * 1024;
+const MAX_AGENT_TIMEOUT_MINUTES = 25;
+// A step timeout fires at its budget, so a step that ran this close to it is treated as timed out.
+const AGENT_TIMEOUT_GRACE_SECONDS = 30;
 const qaRoot = fs.realpathSync(__dirname);
 const scenarioContract = require('./scenarios.json');
 const resultSchema = require('./agent-result.schema.json');
@@ -52,6 +55,7 @@ function usage() {
     'Usage:',
     '  node execute.cjs prepare --request <absolute-path> --candidate <absolute-path> --evidence <absolute-path> --job-start <timestamp>',
     '  node execute.cjs agent --state <absolute-path>',
+    '  node execute.cjs mark-agent-start --state <absolute-path>',
     '  node execute.cjs record-agent --state <absolute-path> --execution-file <absolute-path|empty> --conclusion <success|failure|empty> --step-outcome <success|failure|cancelled|skipped|empty> [--token-missing]',
     '  node execute.cjs finalize --state <absolute-path> [--cancelled]',
     '',
@@ -63,6 +67,7 @@ function parseCli(argv) {
   const flagsByCommand = {
     prepare: ['--request', '--candidate', '--evidence', '--job-start'],
     agent: ['--state'],
+    'mark-agent-start': ['--state'],
     'record-agent': ['--state', '--execution-file', '--conclusion', '--step-outcome'],
     finalize: ['--state'],
   };
@@ -134,9 +139,22 @@ function preparationOutput({ statePath, state }) {
       agent_home: state.agent_paths.agent_home,
       work_dir: state.agent_paths.work_dir,
       settings: claude.settings,
+      agent_timeout_minutes: state.agent_timeout_minutes,
     });
   }
   return output;
+}
+
+// The Claude action runs as a workflow step, so the internal deadline measured from job start can only
+// bound it through the step's timeout-minutes, which takes whole minutes.
+function agentTimeoutMinutes(deadlineEpochMs, now = Date.now()) {
+  const minutes = Math.floor((deadlineEpochMs - now) / 60_000);
+  return Math.min(MAX_AGENT_TIMEOUT_MINUTES, Math.max(1, Number.isFinite(minutes) ? minutes : 1));
+}
+
+function validAgentTimeoutMinutes(value) {
+  return Number.isInteger(value) && value >= 1 && value <= MAX_AGENT_TIMEOUT_MINUTES
+    ? value : MAX_AGENT_TIMEOUT_MINUTES;
 }
 
 function deadlineFromJobStart(jobStart, clocks = {}) {
@@ -322,6 +340,7 @@ function mapFailure(error, text = '') {
   if (error?.code === 'AUTH_REQUIRED') return 'auth_required';
   if (error?.code === 'CANCELLED') return 'cancelled';
   if (error?.code === 'RATE_LIMITED') return 'rate_limited';
+  if (error?.code === 'AGENT_SETUP_FAILED') return 'setup_failed';
   if (['MAX_TURNS', 'AGENT_FAILED', 'AGENT_NO_OUTPUT'].includes(error?.code)) return 'invalid_output';
   if (error?.code === 'DEADLINE_EXCEEDED' || /timed?\s*out|deadline/iu.test(combined)) return 'timeout';
   if (/rate.?limit|too many requests|\b429\b|quota/iu.test(combined)) return 'rate_limited';
@@ -692,6 +711,7 @@ async function prepareExecution(options, adapters = {}) {
     };
     state.prompt_path = promptPath;
     state.agent_paths = agentPaths;
+    if (agentPaths.claude) state.agent_timeout_minutes = agentTimeoutMinutes(state.deadline_epoch_ms);
   } catch (error) {
     if (error?.code === 'STALE_CANDIDATE') state.stale = true;
     if (options.signal?.aborted || error?.code === 'CANCELLED') {
@@ -840,7 +860,30 @@ async function runAgentStep({ statePath, signal }, adapters = {}) {
   return outcome;
 }
 
-async function recordAgentOutcome({ statePath, executionFile = '', conclusion = '', stepOutcome = '', tokenMissing = false }) {
+async function markAgentStart({ statePath, now = Date.now() }) {
+  const state = readExecutionState(statePath);
+  const marker = path.join(state.private_root, 'agent-start.json');
+  await writeExecutionState(marker, { started_epoch_ms: now });
+  return marker;
+}
+
+// True only when the Claude step started and then ran for its whole timeout-minutes budget.
+function agentStepTimedOut(state, now) {
+  const marker = path.join(state.private_root, 'agent-start.json');
+  let started;
+  try {
+    started = readBoundedJson(marker)?.started_epoch_ms;
+  } catch {
+    return false;
+  }
+  if (!Number.isFinite(started)) return false;
+  const budgetSeconds = validAgentTimeoutMinutes(state.agent_timeout_minutes) * 60;
+  return (now - started) / 1000 >= budgetSeconds - AGENT_TIMEOUT_GRACE_SECONDS;
+}
+
+async function recordAgentOutcome({
+  statePath, executionFile = '', conclusion = '', stepOutcome = '', tokenMissing = false, now = Date.now(),
+}) {
   const state = readExecutionState(statePath);
   if (executionFile && !path.isAbsolute(executionFile)) {
     throw new ExecutionError('INVALID_PATH', '--execution-file must be an absolute path or empty');
@@ -864,6 +907,7 @@ async function recordAgentOutcome({ statePath, executionFile = '', conclusion = 
     conclusion,
     stepOutcome,
     tokenReady: !tokenMissing,
+    timedOut: agentStepTimedOut(state, now),
   });
   if (readErrorDetails && claude.process_error) claude.process_error.details = readErrorDetails;
   const privatePath = (value, fallback) => privateChildPath(state.private_root, value)
@@ -1133,6 +1177,9 @@ async function main() {
     } else if (options.command === 'agent') {
       await runAgentStep({ statePath: options.statePath, signal: controller.signal });
       process.stdout.write(`${JSON.stringify({ outcome: path.join(path.dirname(options.statePath), 'agent-outcome.json') })}\n`);
+    } else if (options.command === 'mark-agent-start') {
+      const marker = await markAgentStart({ statePath: options.statePath });
+      process.stdout.write(`${JSON.stringify({ agent_start: marker })}\n`);
     } else if (options.command === 'record-agent') {
       await recordAgentOutcome(options);
       process.stdout.write(`${JSON.stringify({ outcome: path.join(path.dirname(options.statePath), 'agent-outcome.json') })}\n`);
@@ -1160,9 +1207,11 @@ module.exports = Object.freeze({
   ExecutionError,
   INTERNAL_DEADLINE_MS,
   agentPrompt,
+  agentTimeoutMinutes,
   deadlineFromEpoch,
   deadlineFromJobStart,
   finalizeExecution,
+  markAgentStart,
   parseCli,
   prepareExecution,
   recordAgentOutcome,

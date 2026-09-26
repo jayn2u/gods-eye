@@ -18,6 +18,7 @@ jobs:
       contents: read
     outputs:
       pr_number: ${{ steps.identity.outputs.pr_number }}
+      skip: ${{ steps.identity.outputs.skip }}
     steps:
       - name: Check out immutable trusted publisher code
         # actions/checkout v4
@@ -59,6 +60,14 @@ jobs:
               core.setFailed('Untrusted or malformed Copilot Agent QA workflow_run metadata');
               return;
             }
+            // A label event for another label runs the QA workflow only to be ignored, so it has no
+            // report to publish. Skip it cleanly instead of failing on its intentionally untyped name.
+            const ignored = /^Copilot Agent QA ignored label event ([0-9]+)$/u.exec(run.name ?? '');
+            if (run.name === run.display_title && ignored && Number(ignored[1]) === run.id) {
+              core.info(`Skipping ignored label event run: ${run.name}`);
+              core.setOutput('skip', 'true');
+              return;
+            }
             const identity = reporter.parseWorkflowRunIdentity(run);
             if (!identity) {
               core.setFailed('Copilot Agent QA run name did not contain a trusted identity');
@@ -72,6 +81,7 @@ jobs:
   publish-evidence:
     name: Publish accepted Copilot Agent QA screenshots
     needs: correlate
+    if: needs.correlate.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -124,7 +134,7 @@ jobs:
     needs:
       - correlate
       - publish-evidence
-    if: always() && needs.correlate.result == 'success'
+    if: always() && needs.correlate.result == 'success' && needs.correlate.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     permissions:
       actions: read

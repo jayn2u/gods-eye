@@ -30,10 +30,12 @@ the same global one-job-at-a-time queue.
 
 Each workflow also receives label events for the other Agent Profile. Such an event gets a run name
 like `<Agent> Agent QA ignored label event <run id>` and its `admission` job is skipped. Its unique
-concurrency group means it neither cancels nor supersedes an in-progress Agent QA run. The
-corresponding report workflow cannot correlate a trusted pull-request identity, so that workflow
-run fails closed: it appears red in the Actions UI and writes nothing. This is expected for an ignored
-label event; no browser QA result was produced.
+concurrency group means it neither cancels nor supersedes an in-progress Agent QA run. This is a
+behaviour change: an unrelated label event, such as adding the Claude QA Label, previously re-ran or
+cancelled Copilot QA and no longer does. The corresponding report workflow recognizes the trusted
+ignored-event run name, logs it, and skips cleanly: it publishes no screenshots, writes no comment,
+and does not fail. Any other run whose metadata or name it cannot trust still fails closed and writes
+nothing. No browser QA result was produced for an ignored label event.
 
 The trusted `Copilot Agent QA`, `Copilot Agent QA Report`, `Claude Agent QA`, and
 `Claude Agent QA Report` workflows become active only after their reviewed change reaches the default
@@ -70,9 +72,13 @@ unset claude_token
 Never echo the token or leave it in a terminal capture. The `printf %s` form avoids adding a newline
 when piping it. The user unit unsets `OPENAI_API_KEY`,
 `AZURE_OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, and `COPILOT_GITHUB_TOKEN`, so no
-ambient provider credential can be inherited; it also unsets `CLAUDE_CODE_OAUTH_TOKEN`. Each agent
+ambient provider credential can be inherited; it also unsets `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `CLAUDE_CONFIG_DIR`. The Claude
+action step blanks the same Anthropic variables and sets `ACTIONS_STEP_DEBUG` to `false`. Each agent
 step keeps `GITHUB_TOKEN` and `GH_TOKEN` empty, so an agent holds only its own provider credential
-and no repository access.
+and no repository access. The Claude token reaches only the action's `claude_code_oauth_token` input
+and, as `CLAUDE_TOKEN`, the token readiness step; `QA_CLAUDE_TOKEN` is only for a manual
+`doctor.cjs --json` check from a shell.
 
 `register` uses the already authenticated GitHub CLI to obtain a short-lived registration token; do
 not copy, print, or save that token.
@@ -113,8 +119,10 @@ that user's access. Do not expand eligibility to untrusted contributors.
 Each agent workflow passes the execution-state file path to later steps as `STATE_PATH`. `prepare`
 runs the doctor with `phase: prepare`, starts the fixture runtime, runs the deterministic baseline,
 and writes the prompt. It does not receive an agent token; only the matching agent step receives its
-secret. The job has a 25-minute internal deadline from job start, with a 25-minute GitHub step limit
-as a backstop for the agent action.
+secret. The job has a 25-minute internal deadline from job start. The Copilot agent step enforces it
+itself, with a 25-minute GitHub step limit as a backstop. The Claude action cannot see the internal
+deadline, so `prepare` converts what remains of it into whole minutes (at least 1, at most 25) and the
+Claude step uses that as its `timeout-minutes`.
 
 `finalize` runs under `always()`. It verifies the Browser Journal, writes the report, and stops the
 handed-off runtime using its manifest. A run interrupted between steps is cleaned up by `finalize`;
@@ -125,19 +133,27 @@ include `finalize`.
 
 Claude runs through
 `anthropics/claude-code-base-action@7456abb892dcd39cd63025550e1726fe65b7c5d2`. The workflow sets
-`NODE_VERSION` to `24.12.0` and limits the action step to `timeout-minutes: 25`. Claude Code `2.1.283`
+`NODE_VERSION` to `24.12.0` and bounds the action step with the remaining internal deadline in whole
+minutes, never more than 25. Claude Code `2.1.283`
 and Bun `1.3.14` come from the runner's locked toolchain. `setup-runner.sh install` uses `npm ci
 --ignore-scripts`, so it supplies the pinned platform executables directly to the action instead of
 letting the action's installer download Claude Code. The runner unit exposes them as `QA_CLAUDE_BIN`
-and `QA_BUN_BIN`.
+and `QA_BUN_BIN`. The action still runs its own `setup-node` and `bun install --production` in the
+runner's shared `_actions` directory on every run. Each Claude run therefore depends on the network and,
+for supply chain, on the pinned action's own lockfile.
 
 Each run has a run-scoped `HOME` and a `CLAUDE_WORKING_DIR` outside the candidate checkout. The
 prepared Claude directory contains a strict MCP configuration for the Playwright MCP server, and the
-workflow passes it with `--strict-mcp-config --mcp-config`. Claude's `--allowedTools` list contains
-only the 14 `mcp__playwright__<tool>` names declared by `scenarios.json` under
-`browser.allowed_tools`. Its denied list is `Bash`, `Read`, `Write`, `Edit`, `MultiEdit`,
-`NotebookEdit`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `Task`, and `TodoWrite`. The same lists
-are written to the run's settings file; the result schema is passed inline with `--json-schema`.
+workflow passes it with `--strict-mcp-config --mcp-config`. `--allowedTools` only pre-approves tools
+and `--disallowedTools` only removes the names it lists, so on their own the CLI would still expose its
+other built-in tools. The workflow therefore passes `--tools TodoWrite`, which narrows the built-in
+set to `TodoWrite`, and the denied list then removes `TodoWrite`, so no built-in tool remains. Only
+the 14 `mcp__playwright__<tool>` names declared by `scenarios.json` under `browser.allowed_tools`
+remain; they are also the `--allowedTools` list. The denied list is `Bash`, `Read`, `Write`, `Edit`,
+`MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, `LS`, `WebFetch`, `WebSearch`, `Task`, and `TodoWrite`.
+The permission mode is `dontAsk`, so a tool outside the allowed list is refused rather than prompted
+for, and `--max-turns 200` bounds the conversation. The allowed and denied lists are also written to
+the run's settings file; the result schema is passed inline with `--json-schema`.
 
 The workflow invokes `--model opus`. This is an intentional alias exception: it follows the newest
 Opus model, and the report records the model resolved by that run.
@@ -223,9 +239,10 @@ a changed lock rebuilds it and unrelated source changes do not. A per-run cache 
 exhausted the internal deadline before the browser agent started. The cache and the environments survive runs and are
 not cleaned with them; delete them by hand if a corrupt download has to be discarded.
 
-A run that reaches the agent step's 25-minute GitHub backstop still enters `finalize` before the job
-ends. The internal deadline starts at job start, so it ends work before this later step limit and
-leaves time for cleanup. The browser agent is invoked directly rather than through a lock wrapper,
+A run whose agent step reaches its GitHub step limit still enters `finalize` before the job ends. The
+internal deadline starts at job start and bounds both agents: Copilot's supervisor stops at it, and the
+Claude step's `timeout-minutes` is what remains of it when `prepare` finishes. Either way work ends
+within 25 minutes of job start and leaves time for cleanup. The browser agent is invoked directly rather than through a lock wrapper,
 so the supervisor terminates the agent's own process group and no lock survives to block later runs.
 The runner's orphan-process cleanup handles anything still left at job end. If a report says
 `setup_failed`, the job log names the failed prerequisite. The report's `phases` field records how
@@ -276,8 +293,11 @@ Claude uses `auth_required` when its token is missing or invalid, including HTTP
 responses. Recreate the `CLAUDE_CODE_OAUTH_TOKEN` secret from `claude setup-token`
 and store it with `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo jayn2u/gods-eye`; if piping the token,
 use `printf %s`, never `echo`, and keep it out of logs and captures. `rate_limited` means Claude
-returned HTTP 429 or a usage limit response. `timeout` means the Claude step hit its 25-minute step
-limit or was cancelled mid-run. `invalid_output` means Claude hit max turns, returned an agent error,
+returned HTTP 429 or a usage limit response. `timeout` means the Claude step ran for its whole budget,
+the remaining internal deadline, without producing a result. A failed or cancelled Claude step that
+ends earlier than that without a result reports `setup_failed`, because the action failed before
+Claude produced anything (for example its own `setup-node` or `bun install`); a cancelled job still
+reports `cancelled`. `invalid_output` means Claude hit max turns, returned an agent error,
 or produced no result. These are Agent QA outcomes, not product findings.
 
 A `timeout` report names the phase that consumed the budget in the job log, as

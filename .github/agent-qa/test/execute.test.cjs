@@ -11,7 +11,9 @@ const test = require('node:test');
 const {
   ALLOWED_TOOLS,
   INTERNAL_DEADLINE_MS,
+  agentTimeoutMinutes,
   deadlineFromJobStart,
+  markAgentStart,
   prepareExecution,
   parseCli,
   recordAgentOutcome,
@@ -220,6 +222,11 @@ function successfulClaudeMessages(result, durationMs = 2345) {
   ];
 }
 
+// Writes the agent-start marker as if the Claude step had started `elapsedMs` before `now`.
+async function markStartedAgo(statePath, elapsedMs, now = Date.now()) {
+  await markAgentStart({ statePath, now: now - elapsedMs });
+}
+
 async function recordClaudeOutcome(bundle, statePath, {
   messages = [], executionFile = '', conclusion = '', stepOutcome = '', tokenMissing = false,
 } = {}) {
@@ -266,11 +273,97 @@ test('CLI parsing and the single wall-to-monotonic deadline preserve the task co
     'record-agent', '--state', '/tmp/state.json', '--execution-file', 'execution.json',
     '--conclusion', 'success', '--step-outcome', 'success',
   ]), { code: 'INVALID_PATH' });
+  assert.deepEqual(parseCli(['mark-agent-start', '--state', '/x/state.json']), {
+    command: 'mark-agent-start', statePath: '/x/state.json', cancelled: false,
+  });
+  assert.throws(() => parseCli(['mark-agent-start', '--state', 'state.json']), { code: 'INVALID_PATH' });
+  assert.throws(() => parseCli(['mark-agent-start']), { code: 'USAGE' });
   const deadline = deadlineFromJobStart('2026-09-07T09:00:00Z', {
     wallNow: Date.parse('2026-09-07T09:02:00Z'),
     monotonicNow: 25_000,
   });
   assert.equal(deadline, 25_000 + INTERNAL_DEADLINE_MS - 120_000);
+});
+
+test('the Claude step budget is the whole minutes left before the internal deadline, from 1 to 25', () => {
+  const now = Date.parse('2026-09-07T09:00:00Z');
+  const minute = 60 * 1000;
+  assert.equal(agentTimeoutMinutes(now + INTERNAL_DEADLINE_MS, now), 25);
+  assert.equal(agentTimeoutMinutes(now + 40 * minute, now), 25);
+  assert.equal(agentTimeoutMinutes(now + 18 * minute + 59_999, now), 18);
+  assert.equal(agentTimeoutMinutes(now + 18 * minute, now), 18);
+  assert.equal(agentTimeoutMinutes(now + 59_999, now), 1);
+  assert.equal(agentTimeoutMinutes(now, now), 1);
+  assert.equal(agentTimeoutMinutes(now - 5 * minute, now), 1);
+});
+
+test('mark-agent-start records the agent start time privately inside the private root', async (t) => {
+  const b = await claudeBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const marker = await markAgentStart({ statePath, now: 1_790_000_000_000 });
+  assert.equal(marker, path.join(state.private_root, 'agent-start.json'));
+  assert.deepEqual(JSON.parse(await fsp.readFile(marker, 'utf8')), { started_epoch_ms: 1_790_000_000_000 });
+  assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+
+  const before = Date.now();
+  const cli = childProcess.spawnSync(process.execPath, [
+    path.join(qaRoot, 'execute.cjs'), 'mark-agent-start', '--state', statePath,
+  ], { encoding: 'utf8' });
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(JSON.parse(cli.stdout), { agent_start: marker });
+  const started = JSON.parse(await fsp.readFile(marker, 'utf8')).started_epoch_ms;
+  assert.ok(Number.isInteger(started) && started >= before && started <= Date.now());
+  assert.equal(fs.statSync(marker).mode & 0o777, 0o600);
+
+  const rejected = childProcess.spawnSync(process.execPath, [
+    path.join(qaRoot, 'execute.cjs'), 'mark-agent-start', '--state', path.join(b.root, 'state.json'),
+  ], { encoding: 'utf8' });
+  assert.notEqual(rejected.status, 0);
+});
+
+test('record-agent separates an early Claude action failure from a step that used up its budget', async (t) => {
+  const minute = 60 * 1000;
+  const cases = [
+    ['failure without a start marker', null, 'failure', 'setup_failed'],
+    ['cancelled without a start marker', null, 'cancelled', 'setup_failed'],
+    ['failure shortly after start', 2 * minute, 'failure', 'setup_failed'],
+    ['failure just short of the budget', 24 * minute - 31_000, 'failure', 'setup_failed'],
+    ['failure at the budget less the grace', 24 * minute - 30_000, 'failure', 'timeout'],
+    ['cancelled after the budget', 25 * minute, 'cancelled', 'timeout'],
+  ];
+  for (const [label, elapsed, stepOutcome, reason] of cases) {
+    const b = await claudeBundle(t);
+    const { statePath, state } = await prepareExecution(b.options, b.adapters);
+    assert.equal(state.agent_timeout_minutes, 24, label);
+    const now = Date.now();
+    if (elapsed !== null) await markStartedAgo(statePath, elapsed, now);
+    const outcome = await recordAgentOutcome({ statePath, executionFile: '', conclusion: '', stepOutcome, now });
+    assert.equal(outcome.process_error.code, reason === 'timeout' ? 'CANCELLED' : 'AGENT_SETUP_FAILED', label);
+    if (reason === 'setup_failed') {
+      assert.equal(outcome.process_error.message, 'The Claude action failed before producing a result', label);
+    }
+    const { report } = await finalizeExecution({ statePath }, b.adapters);
+    assert.equal(report.status, 'incomplete', label);
+    assert.equal(report.reason, reason, label);
+  }
+});
+
+test('a partial Claude log from an early failure reports setup_failed with its model preserved', async (t) => {
+  const b = await claudeBundle(t, { env: { QA_AGENT_MODEL: 'opus' } });
+  const { statePath } = await prepareExecution(b.options, b.adapters);
+  await markStartedAgo(statePath, 5_000);
+  const executionFile = path.join(b.root, 'partial.jsonl');
+  await fsp.writeFile(executionFile, [
+    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-4-5-20250929' }),
+    JSON.stringify({ type: 'assistant', message: { content: [] } }),
+  ].join('\n'));
+
+  const outcome = await recordAgentOutcome({ statePath, executionFile, conclusion: 'failure', stepOutcome: 'failure' });
+  assert.equal(outcome.process_error.code, 'AGENT_SETUP_FAILED');
+  assert.equal(outcome.model, 'claude-opus-4-5-20250929');
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.reason, 'setup_failed');
+  assert.equal(report.tools.agent.model, 'claude-opus-4-5-20250929');
 });
 
 test('prepare writes Claude inputs and returns the Claude action outputs', async (t) => {
@@ -297,8 +390,11 @@ test('prepare writes Claude inputs and returns the Claude action outputs', async
   assert.equal(prepared.output.state, prepared.statePath);
   assert.equal(prepared.output.ready, true);
   assert.deepEqual(Object.keys(prepared.output).sort(), [
-    'agent_home', 'claude_args', 'prompt', 'ready', 'settings', 'state', 'work_dir',
+    'agent_home', 'agent_timeout_minutes', 'claude_args', 'prompt', 'ready', 'settings', 'state', 'work_dir',
   ]);
+  // The job started just now, so the whole 25-minute budget minus prepare's own time remains.
+  assert.equal(prepared.output.agent_timeout_minutes, 24);
+  assert.equal(prepared.state.agent_timeout_minutes, 24);
   assert.equal(prepared.output.prompt, prepared.state.prompt_path);
   assert.equal(prepared.output.agent_home, prepared.state.agent_paths.agent_home);
   assert.equal(prepared.output.work_dir, prepared.state.agent_paths.work_dir);
@@ -370,6 +466,7 @@ test('record-agent classifies missing token, skipped execution, cancellation, an
 
   const cancelled = await claudeBundle(t);
   const cancelledPrepared = await prepareExecution(cancelled.options, cancelled.adapters);
+  await markStartedAgo(cancelledPrepared.statePath, 25 * 60 * 1000);
   await recordClaudeOutcome(cancelled, cancelledPrepared.statePath, { stepOutcome: 'cancelled' });
   const cancelledReport = await finalizeExecution({ statePath: cancelledPrepared.statePath }, cancelled.adapters);
   assert.equal(cancelledReport.report.reason, 'timeout');
@@ -418,6 +515,7 @@ test('record-agent maps Claude rate limits and invalid agent outputs to report r
 test('a cancelled Claude log with a truncated trailing line retains its model and finalizes as timeout', async (t) => {
   const b = await claudeBundle(t, { env: { QA_AGENT_MODEL: 'opus' } });
   const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  await markStartedAgo(statePath, 25 * 60 * 1000);
   const executionFile = path.join(b.root, 'truncated.jsonl');
   await fsp.writeFile(executionFile, [
     JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-4-5-20250929' }),
@@ -473,9 +571,10 @@ test('record-agent writes an outcome when an execution log exceeds the read limi
   assert.equal((await fsp.stat(executionFile)).size, size);
 });
 
-test('record-agent records a failed action with an unreadable log as a timeout', async (t) => {
+test('record-agent records a failed action with an unreadable log after its budget as a timeout', async (t) => {
   const b = await claudeBundle(t);
   const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  await markStartedAgo(statePath, 25 * 60 * 1000);
   const executionFile = path.join(b.root, 'PRIVATE_LOG_PATH');
   await fsp.mkdir(executionFile);
 

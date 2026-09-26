@@ -38,6 +38,13 @@ function claudeArgs({ mcpConfigPath, resultSchema }) {
   return [
     '--model', 'opus',
     '--strict-mcp-config', '--mcp-config', quotePath(mcpConfigPath),
+    // --allowedTools only pre-approves and --disallowedTools only removes the names it lists, so the
+    // CLI would still expose its other built-ins. --tools narrows the built-in set to TodoWrite, which
+    // the deny list then removes, leaving only the Playwright MCP tools. An empty --tools value is not
+    // used because the action's argument parser turns it into a valueless flag.
+    '--tools', 'TodoWrite',
+    '--permission-mode', 'dontAsk',
+    '--max-turns', '200',
     '--allowedTools', claudeAllowedTools().join(','),
     '--disallowedTools', CLAUDE_DENIED_TOOLS.join(','),
     '--json-schema', `'${schemaJson}'`,
@@ -161,7 +168,7 @@ function processError(code, message, details = null) {
   };
 }
 
-function claudeOutcome({ messages, conclusion, stepOutcome, tokenReady }) {
+function claudeOutcome({ messages, conclusion, stepOutcome, tokenReady, timedOut = false }) {
   const entries = Array.isArray(messages) ? messages : [];
   const init = entries.find(message => message?.type === 'system' && message.subtype === 'init');
   const model = typeof init?.model === 'string' && VERSION_PATTERN.test(init.model) ? init.model : null;
@@ -172,26 +179,24 @@ function claudeOutcome({ messages, conclusion, stepOutcome, tokenReady }) {
       result: null,
     };
   }
-  if (entries.length === 0) {
-    const cancelled = ['cancelled', 'failure'].includes(stepOutcome);
-    return {
-      process_error: processError(
-        cancelled ? 'CANCELLED' : 'AGENT_NO_OUTPUT',
-        cancelled ? 'Claude Code execution was cancelled or timed out' : 'Claude Code returned no execution messages',
-      ),
-      model,
-      result: null,
-    };
-  }
-
   const resultMessage = [...entries].reverse().find(message => message?.type === 'result');
   if (!resultMessage) {
-    const cancelled = ['cancelled', 'failure'].includes(stepOutcome);
+    // A failed or cancelled step without a result is a timeout only when the step used up its budget;
+    // otherwise the action itself failed before Claude could produce anything.
+    const interrupted = ['cancelled', 'failure'].includes(stepOutcome);
+    if (interrupted && timedOut) {
+      return {
+        process_error: processError('CANCELLED', 'Claude Code execution was cancelled or timed out'),
+        model,
+        result: null,
+      };
+    }
     return {
-      process_error: processError(
-        cancelled ? 'CANCELLED' : 'AGENT_NO_OUTPUT',
-        cancelled ? 'Claude Code execution was cancelled or timed out' : 'Claude Code returned no result message',
-      ),
+      process_error: interrupted
+        ? processError('AGENT_SETUP_FAILED', 'The Claude action failed before producing a result')
+        : processError('AGENT_NO_OUTPUT', entries.length === 0
+          ? 'Claude Code returned no execution messages'
+          : 'Claude Code returned no result message'),
       model,
       result: null,
     };
@@ -200,7 +205,7 @@ function claudeOutcome({ messages, conclusion, stepOutcome, tokenReady }) {
   const details = sanitizeText(errorText(resultMessage), '');
   const subtype = typeof resultMessage.subtype === 'string' ? resultMessage.subtype : '';
   const apiStatus = Number(resultMessage.api_error_status);
-  const authError = /\bauth(?:entication|orization)?\b|unauthori[sz]ed|invalid (?:token|api key|credentials)|oauth token (?:expired|revoked|invalid)/iu.test(details);
+  const authError = /\bauth(?:entication|orization)?\b|\bauth(?:entication|orization)_failed\b|unauthori[sz]ed|invalid (?:token|api key|credentials)|oauth token (?:expired|revoked|invalid)/iu.test(details);
   if ([401, 403].includes(apiStatus) || authError) {
     return {
       process_error: processError('AUTH_REQUIRED', `Claude Code authentication failed${apiStatus ? ` (HTTP ${apiStatus})` : ''}`, details),

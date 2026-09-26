@@ -151,6 +151,7 @@ test('classifies text authentication errors without matching author or unrelated
   for (const error of [
     'authentication failed', 'authorization failed', 'unauthorized', 'unauthorised',
     'invalid token', 'invalid API key', 'invalid credentials', 'oauth token expired',
+    'authentication_failed', 'authorization_failed',
   ]) {
     const outcome = claudeOutcome({
       messages: [{ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [error] }],
@@ -164,6 +165,23 @@ test('classifies text authentication errors without matching author or unrelated
       conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
     });
     assert.equal(outcome.process_error.code, 'AGENT_FAILED', error);
+  }
+});
+
+test('classifies an underscore authentication error in a realistic error result text', () => {
+  for (const code of ['authentication_failed', 'authorization_failed']) {
+    const outcome = claudeOutcome({
+      messages: [initMessage(), {
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        api_error_status: null,
+        result: `API Error: 401 {"type":"error","error":{"type":"${code}","message":"OAuth token rejected"}}`,
+      }],
+      conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+    });
+    assert.equal(outcome.process_error.code, 'AUTH_REQUIRED', code);
+    assert.equal(outcome.model, MODEL);
   }
 });
 
@@ -212,23 +230,33 @@ test('distinguishes missing credentials and a cancelled empty execution log', ()
     messages: [], conclusion: 'success', stepOutcome: 'success', tokenReady: false,
   }).process_error.code, 'AUTH_REQUIRED');
   assert.equal(claudeOutcome({
-    messages: [], conclusion: 'cancelled', stepOutcome: 'cancelled', tokenReady: true,
+    messages: [], conclusion: 'cancelled', stepOutcome: 'cancelled', tokenReady: true, timedOut: true,
   }).process_error.code, 'CANCELLED');
+  const early = claudeOutcome({
+    messages: [], conclusion: 'failure', stepOutcome: 'failure', tokenReady: true,
+  }).process_error;
+  assert.equal(early.code, 'AGENT_SETUP_FAILED');
+  assert.equal(early.message, 'The Claude action failed before producing a result');
   assert.equal(claudeOutcome({
     messages: [], conclusion: 'success', stepOutcome: 'success', tokenReady: true,
   }).process_error.code, 'AGENT_NO_OUTPUT');
 });
 
-test('classifies a cancelled or failed partial log without a result message as cancelled', () => {
+test('classifies a cancelled or failed partial log without a result message by whether the budget ran out', () => {
   const messages = [initMessage(), { type: 'assistant', message: { content: [] } }];
   for (const stepOutcome of ['cancelled', 'failure']) {
-    const outcome = claudeOutcome({
-      messages, conclusion: 'failure', stepOutcome, tokenReady: true,
-    });
-    assert.equal(outcome.process_error.code, 'CANCELLED', stepOutcome);
-    assert.equal(outcome.model, MODEL);
-    assert.equal(outcome.result, null);
+    for (const [timedOut, code] of [[true, 'CANCELLED'], [false, 'AGENT_SETUP_FAILED']]) {
+      const outcome = claudeOutcome({
+        messages, conclusion: 'failure', stepOutcome, tokenReady: true, timedOut,
+      });
+      assert.equal(outcome.process_error.code, code, `${stepOutcome}/${timedOut}`);
+      assert.equal(outcome.model, MODEL);
+      assert.equal(outcome.result, null);
+    }
   }
+  assert.equal(claudeOutcome({
+    messages, conclusion: 'success', stepOutcome: 'success', tokenReady: true, timedOut: true,
+  }).process_error.code, 'AGENT_NO_OUTPUT');
 });
 
 test('reads both JSON-array and JSON-lines execution logs', async (t) => {
@@ -311,18 +339,38 @@ test('creates Claude CLI arguments with an inline schema and strict browser tool
   const schemaPath = '/private/claude/result.schema.json';
   const text = claudeArgs({ mcpConfigPath: configPath, schemaPath, resultSchema });
   const args = splitClaudeArgs(text);
-  assert.deepEqual(args.slice(0, 9), [
+  assert.deepEqual(args.slice(0, 15), [
     '--model', 'opus', '--strict-mcp-config', '--mcp-config', configPath,
+    '--tools', 'TodoWrite', '--permission-mode', 'dontAsk', '--max-turns', '200',
     '--allowedTools', CLAUDE_ALLOWED_TOOLS.join(','),
     '--disallowedTools', CLAUDE_DENIED_TOOL_NAMES.join(','),
   ]);
-  assert.equal(args[9], '--json-schema');
-  assert.equal(args.length, 11);
-  assert.deepEqual(JSON.parse(args[10]), resultSchema);
+  assert.equal(args[15], '--json-schema');
+  assert.equal(args.length, 17);
+  assert.deepEqual(JSON.parse(args[16]), resultSchema);
   assert.equal(args.includes(schemaPath), false);
   assert.equal(splitClaudeArgs(claudeArgs({
     mcpConfigPath: '/private data/mcp.json', resultSchema,
   }))[4], '/private data/mcp.json');
+});
+
+test('confines Claude to the Playwright MCP tools with no surviving built-in tool', () => {
+  const args = splitClaudeArgs(claudeArgs({ mcpConfigPath: '/private/claude/mcp-config.json', resultSchema }));
+  const value = (flag) => {
+    const index = args.indexOf(flag);
+    assert.notEqual(index, -1, flag);
+    assert.equal(args.indexOf(flag, index + 1), -1, `${flag} appears once`);
+    return args[index + 1];
+  };
+  // --tools narrows the built-in set to TodoWrite, and the deny list then removes TodoWrite too.
+  assert.equal(value('--tools'), 'TodoWrite');
+  assert.ok(value('--disallowedTools').split(',').includes('TodoWrite'));
+  assert.equal(value('--permission-mode'), 'dontAsk');
+  assert.equal(value('--max-turns'), '200');
+  const allowed = value('--allowedTools').split(',');
+  assert.equal(allowed.length, 14);
+  assert.ok(allowed.every((tool) => tool.startsWith('mcp__playwright__')));
+  assert.equal(args.includes(''), false);
 });
 
 test('rejects a schema containing a single quote before building Claude CLI arguments', () => {

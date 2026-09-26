@@ -60,5 +60,9 @@ runner. Two workflows, two report workflows, and two evidence branches are more 
 parameterized workflow; in return a job never holds another agent's credential, and each reporter
 owns exactly one comment and one branch, so two publications never race.
 
+During the agent step the candidate's runtime shares the runner's Unix user with the Claude action, so
+the Claude token is protected by the admission trust model (only authors with write permission are
+admitted), exactly as the Copilot token is.
+
 The work lands in two pull requests: the Copilot rename, trigger removal, profile registry, and step
 split first, validated live, then the Claude adapter and workflows.

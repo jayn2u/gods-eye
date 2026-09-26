@@ -73,8 +73,9 @@ function runInlineCorrelation(payload, workflowFile = 'copilot-agent-qa-report.y
     process.execPath,
     ['-e', `
       const context = { payload: ${JSON.stringify(payload)} };
-      const result = { failed: null, outputs: {} };
+      const result = { failed: null, outputs: {}, infos: [] };
       const core = {
+        info(message) { result.infos.push(message); },
         setFailed(message) { result.failed = message; },
         setOutput(name, value) { result.outputs[name] = value; },
       };
@@ -401,13 +402,26 @@ test('Claude workflow uses the pinned action and isolates OAuth credentials', ()
 
   assert.equal(agent.uses, claudeAction);
   assert.equal(agent.if, "steps.token.outputs.ready == 'true' && steps.prepare.outputs.claude_args != ''");
-  assert.equal(agent['timeout-minutes'], 25);
+  assert.equal(agent['timeout-minutes'], "${{ fromJSON(steps.prepare.outputs.agent_timeout_minutes || '25') }}");
   assert.equal(agent.env.HOME, '${{ steps.prepare.outputs.agent_home }}');
   assert.equal(agent.env.CLAUDE_WORKING_DIR, '${{ steps.prepare.outputs.work_dir }}');
   assert.equal(agent.env.NODE_VERSION, '24.12.0');
-  for (const key of ['GITHUB_TOKEN', 'GH_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY']) {
-    assert.equal(agent.env[key], '');
+  for (const key of [
+    'GITHUB_TOKEN', 'GH_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY',
+    'ANTHROPIC_MODEL', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+  ]) {
+    assert.equal(agent.env[key], '', key);
   }
+  assert.equal(agent.env.ACTIONS_STEP_DEBUG, 'false');
+
+  const markStart = steps[steps.indexOf(agent) - 1];
+  assert.equal(markStart.id, 'agent_start');
+  assert.equal(markStart.if, agent.if);
+  assert.equal(markStart.uses, undefined);
+  assert.equal(markStart.env.STATE_PATH, '${{ steps.prepare.outputs.state }}');
+  assert.equal(markStart.env.GITHUB_TOKEN, '');
+  assert.equal(markStart.env.GH_TOKEN, '');
+  assert.match(markStart.run, /execute\.cjs" mark-agent-start --state "\$STATE_PATH"/u);
   assert.equal(agent.with.prompt_file, '${{ steps.prepare.outputs.prompt }}');
   assert.equal(agent.with.claude_code_oauth_token, '${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}');
   assert.equal(agent.with.path_to_claude_code_executable, '${{ steps.paths.outputs.qa_root }}/toolchain/node_modules/@anthropic-ai/claude-code-linux-x64/claude');
@@ -419,6 +433,7 @@ test('Claude workflow uses the pinned action and isolates OAuth credentials', ()
   assert.equal(prepare.env.GH_TOKEN, '');
   assert.match(prepare.run, /claude_args/u);
   assert.match(prepare.run, /settings/u);
+  assert.match(prepare.run, /agent_timeout_minutes/u);
 
   assert.match(record.if, /always\(\)/u);
   assert.equal(record.env.EXECUTION_FILE, '${{ steps.agent.outputs.execution_file }}');
@@ -542,7 +557,7 @@ for (const profile of Object.values(PROFILES)) {
     };
     const prepareJson = JSON.stringify({
       state: statePath,
-      ...(profile.agent === 'claude' && emitJson ? claudeValues : {}),
+      ...(profile.agent === 'claude' && emitJson ? { ...claudeValues, agent_timeout_minutes: 18 } : {}),
     });
     const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', prepare.run], {
       encoding: 'utf8',
@@ -568,11 +583,14 @@ for (const profile of Object.values(PROFILES)) {
     if (outputFailure) assert.match(result.stderr, /EISDIR/u);
     const outputs = parseGithubOutputs(fs.readFileSync(outputPath, 'utf8'));
     assert.equal(outputs.state, statePath);
-    if (profile.agent === 'claude' && emitJson && !outputFailure) assert.deepEqual(
-      Object.fromEntries(Object.keys(claudeValues).map((key) => [key, outputs[key]])),
-      claudeValues,
-    );
-    else assert.deepEqual(Object.keys(outputs), ['state']);
+    if (profile.agent === 'claude' && emitJson && !outputFailure) {
+      assert.deepEqual(
+        Object.fromEntries(Object.keys(claudeValues).map((key) => [key, outputs[key]])),
+        claudeValues,
+      );
+      assert.equal(outputs.agent_timeout_minutes, '18');
+      assert.equal(JSON.parse(outputs.agent_timeout_minutes), 18);
+    } else assert.deepEqual(Object.keys(outputs), ['state']);
   }
   });
 }
@@ -761,16 +779,41 @@ for (const profile of Object.values(PROFILES)) {
     const correlation = runInlineCorrelation({
       repository: state.repository, workflow_run: ignoredRun,
     }, profile.reportWorkflowFile);
-    assert.match(correlation.failed, /run name did not contain a trusted identity/u);
-    assert.deepEqual(correlation.outputs, {});
+    assert.equal(correlation.failed, null);
+    assert.deepEqual(correlation.outputs, { skip: 'true' });
+    assert.ok(correlation.infos.some((message) => message.includes(ignoredRun.name)));
     const reporter = parseWorkflow(profile.reportWorkflowFile);
     const identityStep = reporter.jobs.correlate.steps.find((step) => step.id === 'identity');
     assert.equal(identityStep['continue-on-error'], undefined);
     assert.equal(reporter.jobs.correlate['continue-on-error'], undefined);
+    assert.equal(reporter.jobs.correlate.outputs.skip, '${{ steps.identity.outputs.skip }}');
     assert.equal(reporter.jobs['publish-evidence'].needs, 'correlate');
-    assert.equal(reporter.jobs['publish-evidence'].if, undefined);
+    assert.equal(reporter.jobs['publish-evidence'].if, "needs.correlate.outputs.skip != 'true'");
     assert.deepEqual(reporter.jobs.publish.needs, ['correlate', 'publish-evidence']);
-    assert.equal(reporter.jobs.publish.if, "always() && needs.correlate.result == 'success'");
+    assert.equal(
+      reporter.jobs.publish.if,
+      "always() && needs.correlate.result == 'success' && needs.correlate.outputs.skip != 'true'",
+    );
+
+    const otherAgent = Object.values(PROFILES).find(({ agent }) => agent !== profile.agent);
+    for (const [label, mutate] of [
+      ['name-title mismatch', (run) => { run.display_title = `${profile.workflowName} PR #42 head ${'a'.repeat(40)}`; }],
+      ['other agent name', (run) => { run.name = `${otherAgent.workflowName} ignored label event 101`; run.display_title = run.name; }],
+      ['non-numeric run id', (run) => { run.name = `${profile.workflowName} ignored label event 1a`; run.display_title = run.name; }],
+      ['trailing text', (run) => { run.name = `${profile.workflowName} ignored label event 101 x`; run.display_title = run.name; }],
+      ['leading text', (run) => { run.name = `x ${profile.workflowName} ignored label event 101`; run.display_title = run.name; }],
+      ['different run id', (run) => { run.name = `${profile.workflowName} ignored label event 102`; run.display_title = run.name; }],
+      ['forged workflow path', (run) => { run.path = `${profile.workflowPath}.evil`; }],
+      ['wrong event', (run) => { run.event = 'pull_request'; }],
+    ]) {
+      const forged = structuredClone(ignoredRun);
+      mutate(forged);
+      const rejected = runInlineCorrelation({
+        repository: state.repository, workflow_run: forged,
+      }, profile.reportWorkflowFile);
+      assert.ok(rejected.failed, `${label} must fail`);
+      assert.deepEqual(rejected.outputs, {}, `${label} must not skip or emit a PR number`);
+    }
   });
 }
 
