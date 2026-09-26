@@ -46,23 +46,6 @@ const modelIds = {
   l14336: 'openai/clip-vit-large-patch14-336',
 } as const
 
-const modelCatalog = (lastReady = true) => ({
-  default_model_id: modelIds.b16,
-  models: [
-    { model_id: modelIds.b32, label: 'ViT-B/32', ready: true, active_index_version: 'fixture-clip-vit-b-32-v1', gallery_count: 1, guidance: null },
-    { model_id: modelIds.b16, label: 'ViT-B/16', ready: true, active_index_version: 'fixture-clip-vit-b-16-v1', gallery_count: 1, guidance: null },
-    { model_id: modelIds.l14, label: 'ViT-L/14', ready: true, active_index_version: 'fixture-clip-vit-l-14-v1', gallery_count: 1, guidance: null },
-    {
-      model_id: modelIds.l14336,
-      label: 'ViT-L/14@336px',
-      ready: lastReady,
-      active_index_version: lastReady ? 'fixture-clip-vit-l-14-336-v1' : null,
-      gallery_count: lastReady ? 1 : null,
-      guidance: lastReady ? null : `Model '${modelIds.l14336}' is not prepared. Run './gods-eye prepare --model-id ${modelIds.l14336}'.`,
-    },
-  ],
-})
-
 const searchResponse = (query: string, modelId: string, indexVersion: string) => ({
   query,
   model_id: modelId,
@@ -159,6 +142,10 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
   }
   let firstSearch: Route | null = null
   const journal = createJournal()
+  const throwHarnessInputError = (message: string): never => {
+    journal.append('harness_error', { message })
+    throw new BrowserHarnessInputError(message)
+  }
   const scenarios = scenarioContract()
   let currentScenario: string | null = null
   let pendingType: { target: ObservedTarget; value: string } | null = null
@@ -187,7 +174,41 @@ async function installBrowserHarness(options: InitOptions): Promise<void> {
   await page.route('**/api/models', async (route) => {
     state.catalogRequests += 1
     if (state.profile === 'unprepared-model' || (state.profile === 'recover-409' && state.search409Count === 1)) {
-      await route.fulfill({ json: modelCatalog(false) })
+      const response = await route.fetch()
+      if (!response.ok()) {
+        throwHarnessInputError(`Upstream model catalog returned HTTP ${response.status()}`)
+      }
+      let catalog: unknown
+      try {
+        catalog = await response.json()
+      } catch {
+        throwHarnessInputError('Upstream model catalog response is not valid JSON')
+      }
+      if (typeof catalog !== 'object' || catalog === null) {
+        throwHarnessInputError('Upstream model catalog response is not an object')
+      }
+      const models = Reflect.get(catalog, 'models')
+      if (!Array.isArray(models)) {
+        throwHarnessInputError('Upstream model catalog response has no models array')
+      }
+      const target = models.find((model: unknown) => (
+        typeof model === 'object' && model !== null && Reflect.get(model, 'model_id') === modelIds.l14336
+      ))
+      if (typeof target !== 'object' || target === null) {
+        throwHarnessInputError(`Upstream model catalog does not include ${modelIds.l14336}`)
+      }
+      await route.fulfill({
+        json: {
+          ...catalog,
+          models: models.map((model: unknown) => model === target ? {
+            ...target,
+            ready: false,
+            active_index_version: null,
+            gallery_count: null,
+            guidance: `Model '${modelIds.l14336}' is not prepared. Run './gods-eye prepare --model-id ${modelIds.l14336}'.`,
+          } : model),
+        },
+      })
       return
     }
     await route.continue()

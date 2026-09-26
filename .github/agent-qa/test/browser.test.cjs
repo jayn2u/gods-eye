@@ -82,10 +82,11 @@ test('Given the trusted agent prompt, when inspected, then source edits and retr
 function fakePage({ evaluate = async () => undefined } = {}) {
   const bindings = new Map();
   const journal = [];
+  const routes = new Map();
   const frame = { url: () => 'http://127.0.0.1:41111/' };
   const pageUrl = 'http://127.0.0.1:41111/';
   const page = {
-    route: async () => undefined,
+    route: async (pattern, handler) => { routes.set(pattern, handler); },
     exposeBinding: async (name, callback) => { bindings.set(name, callback); },
     addInitScript: async () => undefined,
     evaluate,
@@ -93,7 +94,7 @@ function fakePage({ evaluate = async () => undefined } = {}) {
     mainFrame: () => frame,
     url: () => pageUrl,
   };
-  return { page, bindings, listeners: journal, frame };
+  return { page, bindings, listeners: journal, frame, routes };
 }
 
 test('Given an unknown scenario, when the trusted control parses it, then the request is rejected', async () => {
@@ -103,6 +104,133 @@ test('Given an unknown scenario, when the trusted control parses it, then the re
   const control = bindings.get('__godsEyeQaControl');
   await assert.rejects(async () => control({}, 'selectScenario', 'external-navigation'), /Unknown scenario/);
   await assert.rejects(async () => control({}, 'selectProfile', 'normal'), /Unknown browser harness command/);
+});
+
+test('Given an unprepared model profile, when the catalog is intercepted, then only that model availability is changed', async () => {
+  const upstreamCatalog = {
+    default_model_id: 'openai/clip-vit-base-patch16',
+    catalog_revision: 'fixture-v2',
+    models: [
+      {
+        model_id: 'openai/clip-vit-base-patch16',
+        label: 'ViT-B/16',
+        ready: true,
+        active_index_version: 'fixture-b16-v2',
+        gallery_count: 1,
+        guidance: null,
+        group: 'reference',
+        paired_baseline_id: null,
+        verified: true,
+        registered_at: '2026-09-24T12:34:56Z',
+        evaluation_ready: false,
+      },
+      {
+        model_id: 'openai/clip-vit-large-patch14-336',
+        label: 'ViT-L/14@336px',
+        ready: true,
+        active_index_version: 'fixture-l14-336-v2',
+        gallery_count: 2,
+        guidance: null,
+        group: 'reference',
+        paired_baseline_id: 'baseline-l14-336',
+        verified: false,
+        registered_at: '2026-09-25T01:02:03Z',
+        evaluation_ready: true,
+      },
+      {
+        model_id: 'labclip:fixture-model',
+        label: 'Fine-tuned fixture',
+        ready: true,
+        active_index_version: 'fixture-ft-v2',
+        gallery_count: 1,
+        guidance: null,
+        group: 'fine-tuned',
+        paired_baseline_id: 'openai/clip-vit-base-patch16',
+        verified: true,
+        registered_at: '2026-09-23T00:00:00Z',
+        evaluation_ready: true,
+      },
+    ],
+  };
+  const originalUpstreamCatalog = structuredClone(upstreamCatalog);
+  const expectedCatalog = structuredClone(upstreamCatalog);
+  expectedCatalog.models[1] = {
+    ...expectedCatalog.models[1],
+    ready: false,
+    active_index_version: null,
+    gallery_count: null,
+    guidance: "Model 'openai/clip-vit-large-patch14-336' is not prepared. Run './gods-eye prepare --model-id openai/clip-vit-large-patch14-336'.",
+  };
+  const { page, bindings, routes } = fakePage();
+  const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+  await installBrowserHarness({ page });
+  await bindings.get('__godsEyeQaControl')({ page }, 'selectScenario', 'unprepared-model');
+
+  let fulfilled;
+  const route = {
+    fetch: async () => ({ ok: () => true, json: async () => upstreamCatalog }),
+    fulfill: async (options) => { fulfilled = options; },
+    continue: async () => assert.fail('the unprepared profile must fulfil the transformed catalog'),
+  };
+  await routes.get('**/api/models')(route);
+
+  assert.deepEqual(fulfilled, { json: expectedCatalog });
+  assert.deepEqual(upstreamCatalog, originalUpstreamCatalog, 'the upstream catalog must not be mutated');
+});
+
+test('Given an unusable upstream catalog, when the unprepared profile intercepts it, then the harness input is rejected', async (t) => {
+  const invalidResponses = [
+    {
+      name: 'non-OK response',
+      response: { ok: () => false, status: () => 502 },
+      message: /HTTP 502/,
+    },
+    {
+      name: 'non-object JSON',
+      response: { ok: () => true, status: () => 200, json: async () => null },
+      message: /not an object/,
+    },
+    {
+      name: 'missing models array',
+      response: { ok: () => true, status: () => 200, json: async () => ({ models: {} }) },
+      message: /no models array/,
+    },
+    {
+      name: 'missing 336 model',
+      response: { ok: () => true, status: () => 200, json: async () => ({ models: [] }) },
+      message: /does not include openai\/clip-vit-large-patch14-336/,
+    },
+    {
+      name: 'invalid JSON',
+      response: {
+        ok: () => true,
+        status: () => 200,
+        json: async () => { throw new SyntaxError('invalid JSON'); },
+      },
+      message: /valid JSON/,
+    },
+  ];
+
+  for (const { name, response, message } of invalidResponses) {
+    await t.test(name, async () => {
+      const { page, bindings, routes } = fakePage();
+      const { installBrowserHarness } = require(resolve(qaRoot, 'browser-init.ts'));
+      await installBrowserHarness({ page });
+      await bindings.get('__godsEyeQaControl')({ page }, 'selectScenario', 'unprepared-model');
+      let fulfilled = false;
+      const route = {
+        fetch: async () => response,
+        fulfill: async () => { fulfilled = true; },
+        continue: async () => assert.fail('the unprepared profile must not continue the request'),
+      };
+
+      await assert.rejects(
+        async () => routes.get('**/api/models')(route),
+        (error) => error.name === 'BrowserHarnessInputError' && message.test(error.message),
+      );
+      assert.equal(fulfilled, false);
+    });
+  }
 });
 
 test('Given a receipt request, when the harness serves it, then the predicate is contract text the agent never supplies', async () => {
