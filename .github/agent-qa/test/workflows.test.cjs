@@ -408,10 +408,13 @@ test('Claude workflow uses the pinned action and isolates OAuth credentials', ()
   assert.equal(agent.env.NODE_VERSION, '24.12.0');
   for (const key of [
     'GITHUB_TOKEN', 'GH_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'CODEX_API_KEY', 'GOOGLE_API_KEY',
-    'ANTHROPIC_MODEL', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
   ]) {
     assert.equal(agent.env[key], '', key);
   }
+  // An empty CLAUDE_CONFIG_DIR is not treated as unset: the CLI would use its working directory as the
+  // config home and ignore $HOME/.claude/settings.json. The runner unit unsets it instead.
+  assert.equal(Object.hasOwn(agent.env, 'CLAUDE_CONFIG_DIR'), false);
   assert.equal(agent.env.ACTIONS_STEP_DEBUG, 'false');
 
   const markStart = steps[steps.indexOf(agent) - 1];

@@ -74,7 +74,9 @@ when piping it. The user unit unsets `OPENAI_API_KEY`,
 `AZURE_OPENAI_API_KEY`, `CODEX_API_KEY`, `ANTHROPIC_API_KEY`, and `COPILOT_GITHUB_TOKEN`, so no
 ambient provider credential can be inherited; it also unsets `CLAUDE_CODE_OAUTH_TOKEN`,
 `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`, and `CLAUDE_CONFIG_DIR`. The Claude
-action step blanks the same Anthropic variables and sets `ACTIONS_STEP_DEBUG` to `false`. Each agent
+action step blanks `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, and `ANTHROPIC_MODEL` and sets
+`ACTIONS_STEP_DEBUG` to `false`. It does not set `CLAUDE_CONFIG_DIR` at all: an empty value is not
+treated as unset, and the CLI would then ignore the run's `$HOME/.claude/settings.json`. Each agent
 step keeps `GITHUB_TOKEN` and `GH_TOKEN` empty, so an agent holds only its own provider credential
 and no repository access. The Claude token reaches only the action's `claude_code_oauth_token` input
 and, as `CLAUDE_TOKEN`, the token readiness step; `QA_CLAUDE_TOKEN` is only for a manual

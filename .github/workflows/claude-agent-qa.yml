@@ -258,7 +258,6 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ""
           ANTHROPIC_BASE_URL: ""
           ANTHROPIC_MODEL: ""
-          CLAUDE_CONFIG_DIR: ""
           OPENAI_API_KEY: ""
           CODEX_API_KEY: ""
           GOOGLE_API_KEY: ""
