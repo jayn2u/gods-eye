@@ -9,7 +9,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { crc32, deflateRawSync } = require('node:zlib');
 
-const { admitPullRequest, recheckPullRequest } = require('../controller.cjs');
+const { admitPullRequest, parseRunName, recheckPullRequest, selectLatestGeneration } = require('../controller.cjs');
 const { runExecution } = require('../execute.cjs');
 const { BOT_LOGIN, publishWorkflowRun } = require('../reporter.cjs');
 const { PROFILES, profileFor } = require('../agents/profiles.cjs');
@@ -231,13 +231,13 @@ async function executeAdmittedRequest(t, request) {
 }
 
 function reporterGithub(state, archive) {
-  const comments = [];
+  const comments = structuredClone(state.comments ?? []);
   const mutations = [];
   const github = {
     rest: {
       actions: {
         async getWorkflowRunAttempt() { return { data: structuredClone(state.workflow_run) }; },
-        async listWorkflowRuns() { return { data: { workflow_runs: [structuredClone(state.workflow_run)] } }; },
+        async listWorkflowRuns() { return { data: { workflow_runs: structuredClone(state.workflow_runs ?? [state.workflow_run]) } }; },
         async listWorkflowRunArtifacts() {
           return { data: { artifacts: archive ? [{ id: 501, name: 'copilot-agent-qa-42-100-1', expired: false, workflow_run: { id: 100 } }] : [] } };
         },
@@ -277,7 +277,9 @@ for (const profile of Object.values(PROFILES)) {
   ]);
   assert.equal(Object.hasOwn(trigger, 'branches'), false);
   assert.equal(qa.name, profile.workflowName);
-  assert.equal(qa['run-name'], `${profile.workflowName} PR #${githubExpression('github.event.pull_request.number')} head ${githubExpression('github.event.pull_request.head.sha')}`);
+  assert.equal(qa['run-name'], githubExpression(
+    `(contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != '${profile.label}') && format('${profile.workflowName} ignored label event {0}', github.run_id) || format('${profile.workflowName} PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha)`,
+  ));
   assert.equal(reporter.name, profile.reportWorkflowName);
   assert.deepEqual(reporter.true.workflow_run.workflows, [profile.workflowName]);
   assert.deepEqual(qa.permissions, {});
@@ -398,7 +400,7 @@ test('Claude workflow uses the pinned action and isolates OAuth credentials', ()
   assert.doesNotMatch(token.run, /(?:echo|printf|console\.log|process\.stdout\.write)\([^)]*CLAUDE_TOKEN/u);
 
   assert.equal(agent.uses, claudeAction);
-  assert.equal(agent.if, "steps.token.outputs.ready == 'true'");
+  assert.equal(agent.if, "steps.token.outputs.ready == 'true' && steps.prepare.outputs.claude_args != ''");
   assert.equal(agent['timeout-minutes'], 25);
   assert.equal(agent.env.HOME, '${{ steps.prepare.outputs.agent_home }}');
   assert.equal(agent.env.CLAUDE_WORKING_DIR, '${{ steps.prepare.outputs.work_dir }}');
@@ -430,6 +432,43 @@ test('Claude workflow uses the pinned action and isolates OAuth credentials', ()
 
   for (const step of steps.filter((item) => typeof item.run === 'string')) {
     assert.doesNotMatch(step.run, /\$\{\{\s*steps\./u, `${step.name} interpolates step outputs in run`);
+  }
+});
+
+test('Claude outcome recording distinguishes a missing token from a skipped token check', (t) => {
+  const record = parseWorkflow(PROFILES.claude.workflowFile).jobs.qa.steps.find((step) => step.id === 'record');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gods-eye-record-step-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const controlRoot = path.join(root, 'trusted-control', '.github', 'agent-qa');
+  fs.mkdirSync(controlRoot, { recursive: true });
+  const argsPath = path.join(root, 'recorded-args.json');
+  fs.writeFileSync(path.join(controlRoot, 'execute.cjs'),
+    'require("node:fs").writeFileSync(process.env.RECORD_ARGS, JSON.stringify(process.argv.slice(2)));\n');
+
+  for (const [tokenReady, tokenMissing] of [['true', false], ['false', true], ['', false]]) {
+    const statePath = path.join(root, 'state.json');
+    const executionFile = tokenReady === 'true' ? path.join(root, 'execution.json') : '';
+    const conclusion = tokenReady === 'true' ? 'success' : '';
+    const outcome = tokenReady === 'true' ? 'success' : 'skipped';
+    const recorded = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', record.run], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GITHUB_WORKSPACE: root,
+        RECORD_ARGS: argsPath,
+        STATE_PATH: statePath,
+        EXECUTION_FILE: executionFile,
+        CONCLUSION: conclusion,
+        AGENT_OUTCOME: outcome,
+        TOKEN_READY: tokenReady,
+      },
+    });
+    assert.equal(recorded.status, 0, recorded.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(argsPath, 'utf8')), [
+      'record-agent', '--state', statePath, '--execution-file', executionFile,
+      '--conclusion', conclusion, '--step-outcome', outcome,
+      ...(tokenMissing ? ['--token-missing'] : []),
+    ], `TOKEN_READY=${JSON.stringify(tokenReady)}`);
   }
 });
 
@@ -469,18 +508,30 @@ for (const profile of Object.values(PROFILES)) {
   const mockNode = path.join(mockBin, 'node');
   fs.writeFileSync(mockNode, [
     '#!/usr/bin/env bash',
-    'if [ "$1" = "-e" ] || [ "$#" -eq 0 ]; then exec "$REAL_NODE" "$@"; fi',
+    'if [ "$1" = "-e" ]; then exec "$REAL_NODE" "$@"; fi',
+    'if [ "$#" -eq 0 ]; then',
+    '  if [ "$FAIL_PREPARE_OUTPUT" = "true" ]; then export GITHUB_OUTPUT="$RUNNER_TEMP"; fi',
+    '  exec "$REAL_NODE" "$@"',
+    'fi',
     'if [ "$2" = "prepare" ]; then',
     '  : > "$EXPECTED_STATE_PATH"',
     '  if [ "$EMIT_PREPARE_JSON" = "true" ]; then printf "%s\\n" "$PREPARE_JSON"; fi',
-    '  exit 143',
+    '  exit "$PREPARE_STATUS"',
     'fi',
     'exit 99',
     '',
   ].join('\n'));
   fs.chmodSync(mockNode, 0o700);
 
-  for (const emitJson of [false, true]) {
+  const cases = [
+    { emitJson: false, prepareStatus: 143, outputFailure: false },
+    { emitJson: true, prepareStatus: 143, outputFailure: false },
+    ...(profile.agent === 'claude' ? [
+      { emitJson: true, prepareStatus: 0, outputFailure: false },
+      { emitJson: true, prepareStatus: 0, outputFailure: true },
+    ] : []),
+  ];
+  for (const { emitJson, prepareStatus, outputFailure } of cases) {
     fs.writeFileSync(outputPath, '');
     const claudeValues = {
       claude_args: '--model opus --json-schema {"type":"object","example":"quoted value"}',
@@ -508,13 +559,16 @@ for (const profile of Object.values(PROFILES)) {
         EXPECTED_STATE_PATH: statePath,
         REAL_NODE: process.execPath,
         PREPARE_JSON: prepareJson,
+        PREPARE_STATUS: String(prepareStatus),
+        FAIL_PREPARE_OUTPUT: String(outputFailure),
         EMIT_PREPARE_JSON: String(emitJson),
       },
     });
-    assert.equal(result.status, 143, result.stderr);
+    assert.equal(result.status, outputFailure ? 1 : prepareStatus, result.stderr);
+    if (outputFailure) assert.match(result.stderr, /EISDIR/u);
     const outputs = parseGithubOutputs(fs.readFileSync(outputPath, 'utf8'));
     assert.equal(outputs.state, statePath);
-    if (profile.agent === 'claude' && emitJson) assert.deepEqual(
+    if (profile.agent === 'claude' && emitJson && !outputFailure) assert.deepEqual(
       Object.fromEntries(Object.keys(claudeValues).map((key) => [key, outputs[key]])),
       claudeValues,
     );
@@ -635,6 +689,7 @@ for (const profile of Object.values(PROFILES)) {
   ).agent_qa_run;
   const actualRun = structuredClone(templateRun);
   actualRun.name = templateRun.name.replace('Copilot Agent QA', profile.workflowName);
+  actualRun.display_title = actualRun.name;
   actualRun.path = `${profile.workflowPath}@refs/heads/develop`;
   const actualPayload = {
     repository: { full_name: 'jayn2u/gods-eye' },
@@ -662,6 +717,60 @@ for (const profile of Object.values(PROFILES)) {
     assert.ok(rejected.failed, `${label} must be rejected`);
     assert.deepEqual(rejected.outputs, {}, `${label} must not emit a PR number`);
   }
+  });
+}
+
+for (const profile of Object.values(PROFILES)) {
+  test(`${profile.workflowName} ignored label runs cannot supersede or publish a report`, async () => {
+    const state = structuredClone(events);
+    state.pull_request.labels = [{ name: profile.label }];
+    const decision = await admitPullRequest({ github: admissionGithub(state), ...state.event, agent: profile.agent });
+    assert.equal(decision.status, 'admitted');
+
+    const admittedRun = {
+      ...state.workflow_run,
+      path: `${profile.workflowPath}@refs/heads/develop`,
+      name: `${profile.workflowName} PR #42 head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`,
+    };
+    admittedRun.display_title = admittedRun.name;
+    const ignoredRun = {
+      ...admittedRun,
+      id: 101,
+      name: `${profile.workflowName} ignored label event 101`,
+    };
+    ignoredRun.display_title = ignoredRun.name;
+    assert.equal(ignoredRun.status, 'completed');
+    assert.equal(ignoredRun.conclusion, 'success');
+    assert.equal(parseRunName(ignoredRun.name, profile.agent), null);
+    for (const runs of [[admittedRun, ignoredRun], [ignoredRun, admittedRun]]) {
+      assert.deepEqual(selectLatestGeneration(runs, {
+        agent: profile.agent, prNumber: decision.request.pr_number, headSha: decision.request.head.sha,
+      }), admittedRun);
+    }
+
+    const publication = reporterGithub({
+      ...state,
+      workflow_run: ignoredRun,
+      workflow_runs: [ignoredRun, admittedRun],
+      comments: [{ id: 9001, user: { login: BOT_LOGIN }, body: `${profile.commentMarker}\nExisting advisory report.` }],
+    }, null);
+    const outcome = await publishWorkflowRun({ github: publication.github, workflowRun: ignoredRun });
+    assert.deepEqual(outcome, { status: 'incomplete', reason: 'invalid_run_name' });
+    assert.deepEqual(publication.mutations, []);
+
+    const correlation = runInlineCorrelation({
+      repository: state.repository, workflow_run: ignoredRun,
+    }, profile.reportWorkflowFile);
+    assert.match(correlation.failed, /run name did not contain a trusted identity/u);
+    assert.deepEqual(correlation.outputs, {});
+    const reporter = parseWorkflow(profile.reportWorkflowFile);
+    const identityStep = reporter.jobs.correlate.steps.find((step) => step.id === 'identity');
+    assert.equal(identityStep['continue-on-error'], undefined);
+    assert.equal(reporter.jobs.correlate['continue-on-error'], undefined);
+    assert.equal(reporter.jobs['publish-evidence'].needs, 'correlate');
+    assert.equal(reporter.jobs['publish-evidence'].if, undefined);
+    assert.deepEqual(reporter.jobs.publish.needs, ['correlate', 'publish-evidence']);
+    assert.equal(reporter.jobs.publish.if, "always() && needs.correlate.result == 'success'");
   });
 }
 

@@ -1,5 +1,6 @@
 name: Copilot Agent QA
-run-name: "Copilot Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"
+run-name: >-
+  ${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'copilot-agent-qa') && format('Copilot Agent QA ignored label event {0}', github.run_id) || format('Copilot Agent QA PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha) }}
 
 on:
   pull_request_target:

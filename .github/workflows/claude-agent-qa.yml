@@ -1,5 +1,6 @@
 name: Claude Agent QA
-run-name: "Claude Agent QA PR #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"
+run-name: >-
+  ${{ (contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && github.event.label.name != 'claude-agent-qa') && format('Claude Agent QA ignored label event {0}', github.run_id) || format('Claude Agent QA PR #{0} head {1}', github.event.pull_request.number, github.event.pull_request.head.sha) }}
 
 on:
   pull_request_target:
@@ -196,7 +197,7 @@ jobs:
             printf 'state=%s\n' "$state_path" >> "$GITHUB_OUTPUT"
           fi
           if [ -s "$RUNNER_TEMP/agent-qa-prepare.json" ]; then
-            PREPARE_JSON_FILE="$RUNNER_TEMP/agent-qa-prepare.json" node <<'NODE' || true
+            PREPARE_JSON_FILE="$RUNNER_TEMP/agent-qa-prepare.json" node <<'NODE'
           const crypto = require('node:crypto');
           const fs = require('node:fs');
           const prepared = JSON.parse(fs.readFileSync(process.env.PREPARE_JSON_FILE, 'utf8'));
@@ -228,7 +229,7 @@ jobs:
 
       - name: Run bounded Claude browser QA
         id: agent
-        if: steps.token.outputs.ready == 'true'
+        if: steps.token.outputs.ready == 'true' && steps.prepare.outputs.claude_args != ''
         timeout-minutes: 25
         # anthropics/claude-code-base-action main 2026-09-25
         uses: anthropics/claude-code-base-action@7456abb892dcd39cd63025550e1726fe65b7c5d2
@@ -268,7 +269,7 @@ jobs:
         run: |
           record_args=(--state "$STATE_PATH" --execution-file "$EXECUTION_FILE" \
             --conclusion "$CONCLUSION" --step-outcome "$AGENT_OUTCOME")
-          if [ "$TOKEN_READY" != 'true' ]; then record_args+=(--token-missing); fi
+          if [ "$TOKEN_READY" = 'false' ]; then record_args+=(--token-missing); fi
           node "$GITHUB_WORKSPACE/trusted-control/.github/agent-qa/execute.cjs" record-agent "${record_args[@]}"
 
       - name: Verify the journal, write the report, and stop the runtime
