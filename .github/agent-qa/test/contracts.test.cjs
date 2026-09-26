@@ -304,6 +304,7 @@ test('derives supervisor outcomes in safety precedence order', () => {
   assert.deepEqual(deriveReportOutcome({ ...clean, cancelled: true, infrastructureReason: 'timeout' }), { status: 'cancelled', reason: 'none' });
   assert.deepEqual(deriveReportOutcome({ ...clean, stale: true, agentResult: { ...clean.agentResult, findings: [{}] } }), { status: 'cancelled', reason: 'stale' });
   assert.deepEqual(deriveReportOutcome({ ...clean, infrastructureReason: 'browser_unavailable' }), { status: 'incomplete', reason: 'browser_unavailable' });
+  assert.deepEqual(deriveReportOutcome({ ...clean, infrastructureReason: 'rate_limited' }), { status: 'incomplete', reason: 'rate_limited' });
   assert.deepEqual(deriveReportOutcome({ ...clean, evidenceComplete: false }), { status: 'incomplete', reason: 'invalid_output' });
   assert.deepEqual(deriveReportOutcome({ ...clean, deterministicResults: [] }), { status: 'incomplete', reason: 'setup_failed' });
   assert.deepEqual(deriveReportOutcome({ ...clean, deterministicResults: [{ status: 'not_run' }] }), { status: 'incomplete', reason: 'setup_failed' });
