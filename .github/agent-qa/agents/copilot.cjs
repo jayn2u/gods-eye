@@ -4,11 +4,11 @@ const { spawnSync } = require('node:child_process');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 
-const scenarioContract = require('../scenarios.json');
+const {
+  MCP_SERVER, browserToolNames, extractAgentResult, playwrightServer, stripFence,
+} = require('./mcp.cjs');
 
-const MAX_RESULT_BYTES = 256 * 1024;
-const ALLOWED_TOOLS = Object.freeze([...scenarioContract.browser.allowed_tools]);
-const MCP_SERVER = 'playwright';
+const ALLOWED_TOOLS = Object.freeze(browserToolNames());
 // Copilot CLI resolves tool permissions as `server(tool)` and has no strict-config flag, so every
 // other capability is denied by name and the config file is written into a run-scoped HOME.
 const DENIED_TOOLS = Object.freeze(['shell', 'write', 'str_replace_editor', 'view', 'fetch']);
@@ -22,20 +22,15 @@ class CopilotError extends Error {
   }
 }
 
-function mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal }) {
+function mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal, browsers }) {
+  const server = playwrightServer({ mcpBin, origin, screenshotsRoot, initPage, journal, browsers });
   return {
     mcpServers: {
       [MCP_SERVER]: {
         type: 'local',
-        command: mcpBin,
-        args: [
-          '--browser', 'chromium', '--headless', '--isolated', '--block-service-workers',
-          '--codegen', 'none', '--viewport-size', '1440x1000',
-          '--allowed-origins', origin,
-          '--output-dir', screenshotsRoot,
-          '--init-page', initPage,
-        ],
-        env: { QA_BROWSER_JOURNAL: journal },
+        command: server.command,
+        args: server.args,
+        env: { QA_BROWSER_JOURNAL: server.env.QA_BROWSER_JOURNAL },
         // An array, not a comma-separated string: Copilot discards the whole server entry for a
         // string value, silently, and the agent then reports that no browser tools exist.
         tools: [...ALLOWED_TOOLS],
@@ -50,13 +45,13 @@ function mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal }) {
  * its own HOME and an empty working directory that is not inside the candidate checkout, so no
  * candidate-supplied configuration is discoverable.
  */
-async function prepareCopilotHome({ home, workDir, mcpBin, origin, screenshotsRoot, initPage, journal }) {
+async function prepareCopilotHome({ home, workDir, mcpBin, origin, screenshotsRoot, initPage, journal, browsers }) {
   const configDir = path.join(home, '.copilot');
   await fsp.mkdir(configDir, { recursive: true, mode: 0o700 });
   await fsp.mkdir(workDir, { recursive: true, mode: 0o700 });
   const configPath = path.join(configDir, 'mcp-config.json');
   await fsp.writeFile(journal, '', { mode: 0o600 });
-  const config = mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal });
+  const config = mcpConfig({ mcpBin, origin, screenshotsRoot, initPage, journal, browsers });
   await fsp.writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   for (const forbidden of ['.mcp.json', path.join('.github', 'mcp.json')]) {
     const stray = path.join(workDir, forbidden);
@@ -92,30 +87,6 @@ function copilotArguments({ copilotBin, prompt, model }) {
   return { command: copilotBin, args };
 }
 
-function stripFence(text) {
-  const fenced = /^\s*```(?:json)?\s*\n([\s\S]*?)\n?\s*```\s*$/u.exec(text);
-  return (fenced ? fenced[1] : text).trim();
-}
-
-/**
- * Copilot CLI prints the final document to stdout; there is no output-schema flag. Trusted code
- * extracts it here and the unchanged Ajv validator gates it. No agent write tool is granted, so the
- * agent never touches the file the validator reads.
- */
-function extractAgentResult(stdout) {
-  if (typeof stdout !== 'string' || stdout.length === 0 || stdout.length > MAX_RESULT_BYTES) return null;
-  const candidate = stripFence(stdout);
-  const start = candidate.indexOf('{');
-  const end = candidate.lastIndexOf('}');
-  if (start === -1 || end <= start) return null;
-  try {
-    const value = JSON.parse(candidate.slice(start, end + 1));
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
 async function runCopilot({ runtime, paths, prompt, environment, sanitizedChildEnvironment }) {
   const prepared = await prepareCopilotHome({
     home: paths.agentHome,
@@ -125,6 +96,7 @@ async function runCopilot({ runtime, paths, prompt, environment, sanitizedChildE
     screenshotsRoot: paths.screenshotsRoot,
     initPage: paths.initPage,
     journal: paths.journal,
+    browsers: paths.browsers,
   });
   const childEnvironment = sanitizedChildEnvironment(runtime.supervisor.runRoot, {
     HOME: paths.agentHome,

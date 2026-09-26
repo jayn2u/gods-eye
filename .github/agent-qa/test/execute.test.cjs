@@ -162,7 +162,10 @@ function fixtureAdapters(overrides = {}) {
           if (overrides.invalidResult) await fsp.writeFile(paths.privateResult, '{bad-json');
           else {
             const result = JSON.parse(await fsp.readFile(path.join(fixtureRoot, 'agent-result.json'), 'utf8'));
-            if (overrides.canary) result.summary = 'OPENAI_API_KEY=sk_test_canary_123456 TOKEN_CANARY_ALPHA';
+            if (overrides.canary) {
+              result.summary = 'OPENAI_API_KEY=sk_test_canary_123456 sk-ant-oat01-abcdef… '
+                + 'CLAUDE_CODE_OAUTH_TOKEN=x TOKEN_CANARY_ALPHA';
+            }
             await fsp.writeFile(paths.privateResult, JSON.stringify(result));
           }
         }
@@ -489,7 +492,10 @@ test('A complete adapter-backed execution emits a validated no-findings public a
   assert.equal(fs.existsSync(path.join(result.evidence, '.private-execution')), false);
   assert.equal(fs.existsSync(path.join(result.evidence, 'screenshots', 'untrusted-extra.txt')), false);
   assert.deepEqual((await fsp.readdir(result.evidence)).sort(), ['report.json', 'screenshots']);
-  assert.doesNotMatch(await fsp.readFile(result.reportPath, 'utf8'), /sk_test|TOKEN_CANARY|qa-receipt/);
+  assert.doesNotMatch(
+    await fsp.readFile(result.reportPath, 'utf8'),
+    /sk_test|sk-ant-oat01-abcdef|CLAUDE_CODE_OAUTH_TOKEN=x|TOKEN_CANARY|qa-receipt/,
+  );
   const durable = path.join(durableEvidence, 'adapter-success');
   await fsp.rm(durable, { recursive: true, force: true });
   await fsp.mkdir(durableEvidence, { recursive: true });

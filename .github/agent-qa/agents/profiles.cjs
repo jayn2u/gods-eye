@@ -30,7 +30,10 @@ function define(agent, displayName) {
   });
 }
 
-const PROFILES = Object.freeze({ copilot: define('copilot', 'Copilot') });
+const PROFILES = Object.freeze({
+  copilot: define('copilot', 'Copilot'),
+  claude: define('claude', 'Claude'),
+});
 const AGENTS = Object.freeze(Object.keys(PROFILES));
 
 function profileFor(agent) {

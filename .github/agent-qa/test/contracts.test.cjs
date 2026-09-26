@@ -146,7 +146,11 @@ test('a report must name the agent its request admitted', () => {
     const request = requestFixture();
     const report = reportFixture(root);
     report.tools.agent.name = 'claude';
-    assert.throws(() => validateReport(report, request));
+    assert.throws(() => validateReport(report, request), (error) => {
+      assert.ok(error instanceof ContractError);
+      assert.equal(error.code, 'agent_mismatch');
+      return true;
+    });
     const schema = require('../report.schema.json');
     assert.deepEqual(
       schema.properties.tools.properties.agent.properties.name.enum,

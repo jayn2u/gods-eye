@@ -62,7 +62,7 @@
           ],
           "properties": {
             "name": {
-              "enum": ["copilot"]
+              "enum": ["copilot", "claude"]
             },
             "version": {
               "$ref": "#/$defs/version"
