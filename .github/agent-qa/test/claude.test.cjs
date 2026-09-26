@@ -243,6 +243,24 @@ test('reads both JSON-array and JSON-lines execution logs', async (t) => {
   assert.deepEqual(await readExecutionLog(linesPath), messages);
 });
 
+test('preserves complete JSON-lines messages before a truncated trailing line', async (t) => {
+  const root = await temporary(t);
+  const file = path.join(root, 'truncated.jsonl');
+  const messages = [initMessage(), { type: 'assistant', message: { content: [] } }];
+  await fsp.writeFile(file, `${messages.map((message) => JSON.stringify(message)).join('\r\n')}\r\n\r\n{"type":"result","subtype":`);
+
+  assert.deepEqual(await readExecutionLog(file), messages);
+});
+
+test('rejects an unparseable JSON-lines entry before the last nonempty line', async (t) => {
+  const root = await temporary(t);
+  const file = path.join(root, 'corrupt.jsonl');
+  for (const trailing of [JSON.stringify({ type: 'result', subtype: 'success' }), '{also truncated']) {
+    await fsp.writeFile(file, `${JSON.stringify(initMessage())}\nRAW_LOG_BODY_MUST_STAY_PRIVATE\n${trailing}\n\n`);
+    await assert.rejects(readExecutionLog(file), { code: 'INVALID_EXECUTION_LOG' });
+  }
+});
+
 test('writes private Claude config, exact permissions, and a self-contained result schema', async (t) => {
   const root = await temporary(t);
   const claudeDir = path.join(root, 'claude');

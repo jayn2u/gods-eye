@@ -233,7 +233,7 @@ async function recordClaudeOutcome(bundle, statePath, {
     conclusion,
     stepOutcome,
     tokenMissing,
-  }, bundle.adapters);
+  });
   return { outcome, executionPath };
 }
 
@@ -339,7 +339,7 @@ test('record-agent turns a successful Claude execution and faithful journal into
 
   await recordAgentOutcome({
     statePath, executionFile: executionPath, conclusion: 'success', stepOutcome: 'success',
-  }, b.adapters);
+  });
   assert.deepEqual(JSON.parse(await fsp.readFile(path.join(state.private_root, 'agent-outcome.json'), 'utf8')), outcome);
 
   const { report } = await finalizeExecution({ statePath }, b.adapters);
@@ -386,7 +386,7 @@ test('record-agent classifies missing token, skipped execution, cancellation, an
     executionFile,
     conclusion: 'failure',
     stepOutcome: 'failure',
-  }, unauthorized.adapters);
+  });
   const unauthorizedReport = await finalizeExecution({ statePath: unauthorizedPrepared.statePath }, unauthorized.adapters);
   assert.equal(unauthorizedReport.report.reason, 'auth_required');
   assert.equal(fs.existsSync(executionFile), true);
@@ -413,6 +413,79 @@ test('record-agent maps Claude rate limits and invalid agent outputs to report r
   await recordClaudeOutcome(noOutput, statePath, { stepOutcome: 'skipped' });
   const { report } = await finalizeExecution({ statePath }, noOutput.adapters);
   assert.equal(report.reason, 'invalid_output');
+});
+
+test('a cancelled Claude log with a truncated trailing line retains its model and finalizes as timeout', async (t) => {
+  const b = await claudeBundle(t, { env: { QA_AGENT_MODEL: 'opus' } });
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const executionFile = path.join(b.root, 'truncated.jsonl');
+  await fsp.writeFile(executionFile, [
+    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-4-5-20250929' }),
+    JSON.stringify({ type: 'assistant', message: { content: [] } }),
+    '{"type":"result","subtype":',
+  ].join('\n'));
+
+  const outcome = await recordAgentOutcome({ statePath, executionFile, conclusion: '', stepOutcome: 'cancelled' });
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+  assert.equal(outcome.model, 'claude-opus-4-5-20250929');
+  assert.deepEqual(JSON.parse(await fsp.readFile(path.join(state.private_root, 'agent-outcome.json'), 'utf8')), outcome);
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.reason, 'timeout');
+  assert.equal(report.tools.agent.model, 'claude-opus-4-5-20250929');
+});
+
+test('record-agent persists an invalid-output outcome when a middle log line is corrupt', async (t) => {
+  const b = await claudeBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const executionFile = path.join(b.root, 'corrupt.jsonl');
+  await fsp.writeFile(executionFile, [
+    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-opus-4-5-20250929' }),
+    'RAW_LOG_BODY_MUST_STAY_PRIVATE sk-ant-oat01-private-value',
+    JSON.stringify({ type: 'result', subtype: 'success', result: 'untrusted result' }),
+  ].join('\n'));
+
+  const outcome = await recordAgentOutcome({ statePath, executionFile, conclusion: 'success', stepOutcome: 'success' });
+  assert.equal(outcome.process_error.code, 'AGENT_NO_OUTPUT');
+  assert.match(outcome.process_error.details, /INVALID_EXECUTION_LOG/u);
+  const saved = await fsp.readFile(path.join(state.private_root, 'agent-outcome.json'), 'utf8');
+  assert.deepEqual(JSON.parse(saved), outcome);
+  assert.doesNotMatch(saved, /RAW_LOG_BODY_MUST_STAY_PRIVATE|sk-ant-oat01-private-value|untrusted result/u);
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.reason, 'invalid_output');
+  assert.equal(fs.existsSync(executionFile), true);
+});
+
+test('record-agent writes an outcome when an execution log exceeds the read limit', async (t) => {
+  const b = await claudeBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const executionFile = path.join(b.root, 'oversized.jsonl');
+  const size = 50 * 1024 * 1024 + 1;
+  const handle = await fsp.open(executionFile, 'w');
+  try { await handle.truncate(size); } finally { await handle.close(); }
+
+  const outcome = await recordAgentOutcome({ statePath, executionFile, conclusion: 'success', stepOutcome: 'success' });
+  assert.equal(outcome.process_error.code, 'AGENT_NO_OUTPUT');
+  assert.match(outcome.process_error.details, /EXECUTION_LOG_TOO_LARGE/u);
+  assert.deepEqual(JSON.parse(await fsp.readFile(path.join(state.private_root, 'agent-outcome.json'), 'utf8')), outcome);
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.reason, 'invalid_output');
+  assert.equal((await fsp.stat(executionFile)).size, size);
+});
+
+test('record-agent records a failed action with an unreadable log as a timeout', async (t) => {
+  const b = await claudeBundle(t);
+  const { statePath, state } = await prepareExecution(b.options, b.adapters);
+  const executionFile = path.join(b.root, 'PRIVATE_LOG_PATH');
+  await fsp.mkdir(executionFile);
+
+  const outcome = await recordAgentOutcome({ statePath, executionFile, conclusion: 'failure', stepOutcome: 'failure' });
+  assert.equal(outcome.process_error.code, 'CANCELLED');
+  assert.match(outcome.process_error.details, /EISDIR/u);
+  assert.doesNotMatch(outcome.process_error.details, /PRIVATE_LOG_PATH/u);
+  assert.deepEqual(JSON.parse(await fsp.readFile(path.join(state.private_root, 'agent-outcome.json'), 'utf8')), outcome);
+  const { report } = await finalizeExecution({ statePath }, b.adapters);
+  assert.equal(report.reason, 'timeout');
 });
 
 test('prepare, agent, and finalize in separate calls produce the same report as runExecution', async (t) => {

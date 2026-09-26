@@ -130,14 +130,17 @@ async function readExecutionLog(file) {
     return parsed;
   } catch {
     const messages = [];
-    try {
-      for (const line of text.split(/\r?\n/u)) {
-        if (line.trim()) messages.push(JSON.parse(line));
+    const lines = text.split(/\r?\n/u).filter((line) => line.trim());
+    for (let index = 0; index < lines.length; index += 1) {
+      try {
+        messages.push(JSON.parse(lines[index]));
+      } catch {
+        // An interrupted action may leave only its last JSONL record unfinished.
+        if (index === lines.length - 1) break;
+        throw new ClaudeError('INVALID_EXECUTION_LOG', 'Claude execution log is malformed');
       }
-      return messages;
-    } catch {
-      throw new ClaudeError('INVALID_EXECUTION_LOG', 'Claude execution log is malformed');
     }
+    return messages;
   }
 }
 

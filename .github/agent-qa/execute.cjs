@@ -846,11 +846,17 @@ async function recordAgentOutcome({ statePath, executionFile = '', conclusion = 
     throw new ExecutionError('INVALID_PATH', '--execution-file must be an absolute path or empty');
   }
   let messages = [];
+  let readErrorDetails = null;
   if (executionFile) {
     try {
       messages = await readExecutionLog(path.resolve(executionFile));
     } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
+      if (error?.code !== 'ENOENT') {
+        // Error messages can contain private log contents or paths; retain only the error code.
+        const code = typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(error.code)
+          ? error.code : 'READ_FAILED';
+        readErrorDetails = sanitizeText(`Claude execution log could not be read (${code}).`);
+      }
     }
   }
   const claude = claudeOutcome({
@@ -859,6 +865,7 @@ async function recordAgentOutcome({ statePath, executionFile = '', conclusion = 
     stepOutcome,
     tokenReady: !tokenMissing,
   });
+  if (readErrorDetails && claude.process_error) claude.process_error.details = readErrorDetails;
   const privatePath = (value, fallback) => privateChildPath(state.private_root, value)
     ?? privateChildPath(state.private_root, path.join(state.private_root, fallback));
   const journalPath = privatePath(state.agent_paths?.journal, 'browser-journal.jsonl');
@@ -905,6 +912,7 @@ async function finalizeExecution({ statePath, cancelled = false, signal }, adapt
   if (fs.existsSync(outcomePath)) {
     try { outcome = readBoundedJson(outcomePath, { maxBytes: MAX_EVENT_BYTES }); } catch (error) { outcomeReadError = error; }
   }
+  // The resolved model deliberately overrides QA_AGENT_MODEL from preparation.
   if (outcome?.model && state.tools?.agent) state.tools.agent.model = outcome.model;
   const outcomeMissing = !fs.existsSync(outcomePath);
   const isCancelled = Boolean(cancelled || signal?.aborted || state.reason === 'cancelled');
