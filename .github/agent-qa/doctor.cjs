@@ -10,6 +10,8 @@ const { spawnSync } = require('node:child_process');
 const EXPECTED = Object.freeze({
   runner: '2.337.0',
   copilot: '1.0.83',
+  claude: '2.1.283',
+  bun: '1.3.14',
   playwright_mcp: '0.0.80',
   node: '24.12.0',
   uv: '0.12.6',
@@ -89,7 +91,8 @@ function parseJson(text) {
   }
 }
 
-async function runDoctor({ env = process.env, phase = 'status' } = {}) {
+async function runDoctor({ env = process.env, phase = 'status', agent = 'copilot' } = {}) {
+  if (!['copilot', 'claude'].includes(agent)) throw new Error(`Unsupported Agent QA agent: ${agent}`);
   const home = env.HOME || os.homedir();
   const qaRoot = path.resolve(env.QA_ROOT || path.join(home, '.local/share/gods-eye-agent-qa'));
   const inWorkflow = env.GITHUB_ACTIONS === 'true';
@@ -135,22 +138,31 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
 
   const bins = {
     copilot: env.QA_COPILOT_BIN || path.join(toolchainDir, 'node_modules/.bin/copilot'),
+    claude: env.QA_CLAUDE_BIN || path.join(toolchainDir, 'node_modules/@anthropic-ai/claude-code-linux-x64/claude'),
+    bun: env.QA_BUN_BIN || path.join(toolchainDir, 'node_modules/@oven/bun-linux-x64/bin/bun'),
     playwright_mcp: env.QA_PLAYWRIGHT_MCP_BIN || path.join(toolchainDir, 'node_modules/.bin/playwright-mcp'),
     uv: env.QA_UV_BIN || 'uv',
     pnpm: env.QA_PNPM_BIN || 'pnpm',
   };
   const versions = { node: process.versions.node };
+  const agentTools = agent === 'claude' ? ['claude', 'bun'] : ['copilot'];
+  const versionCommands = [
+    ...agentTools.map((name) => [name, ['--version']]),
+    ['playwright_mcp', ['--version']],
+    ['uv', ['--version']],
+    ['pnpm', ['--version']],
+  ];
   let versionCommandsOk = true;
-  for (const [name, args] of [['copilot', ['--version']], ['playwright_mcp', ['--version']], ['uv', ['--version']], ['pnpm', ['--version']]]) {
+  for (const [name, args] of versionCommands) {
     const result = command(bins[name], args, { env });
     versionCommandsOk &&= result.ok;
     versions[name] = versionFrom(`${result.stdout}\n${result.stderr}`);
   }
-  const pinned = ['node', 'copilot', 'playwright_mcp'];
+  const pinned = ['node', ...agentTools, 'playwright_mcp'];
   const versionsOk = versionCommandsOk
     && pinned.every((name) => versions[name] === EXPECTED[name])
     && ['uv', 'pnpm'].every((name) => typeof versions[name] === 'string' && versions[name].length > 0);
-  add(checks, 'tool_versions', versionsOk, { ...versions, pinned: pinned.join(',') });
+  add(checks, 'tool_versions', versionsOk, { agent, ...versions, pinned: pinned.join(',') });
 
   const browserProbe = env.QA_BROWSER_PROBE_BIN
     ? command(env.QA_BROWSER_PROBE_BIN, [], { cwd: toolchainDir, env, timeout: 30_000 })
@@ -204,7 +216,8 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   // the first run reports auth_required if it does not.
   const foreignVariables = ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY'];
   const foreignEnvironment = foreignVariables.some((name) => Boolean(env[name]));
-  const token = env.QA_COPILOT_TOKEN || '';
+  const tokenVariable = agent === 'claude' ? 'QA_CLAUDE_TOKEN' : 'QA_COPILOT_TOKEN';
+  const token = env[tokenVariable] || '';
   const { present: tokenPresent, wellFormed: tokenWellFormed } = agentTokenReadiness(token);
   // The token reaches the agent only from the workflow secret, so it is absent when an operator runs
   // a read-only check from a shell. Require it inside Actions and report its absence honestly outside.
@@ -212,7 +225,7 @@ async function runDoctor({ env = process.env, phase = 'status' } = {}) {
   add(checks, 'subscription_auth', (prepare || tokenPresent || !inWorkflow) && !foreignEnvironment, {
     token_present: tokenPresent,
     token_well_formed: token.length === 0 || tokenWellFormed,
-    token_source: prepare ? 'agent-step' : tokenPresent ? 'QA_COPILOT_TOKEN' : inWorkflow ? 'missing' : 'workflow-secret',
+    token_source: prepare ? 'agent-step' : tokenPresent ? tokenVariable : inWorkflow ? 'missing' : 'workflow-secret',
     required: prepare ? false : inWorkflow,
     foreign_provider_environment: foreignEnvironment,
   });

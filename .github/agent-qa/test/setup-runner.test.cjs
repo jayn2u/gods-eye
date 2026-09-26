@@ -218,14 +218,19 @@ test('there is no login subcommand and no agent credential is ever written', (t)
   assert.match(started, /Started gods-eye-agent-qa-runner\.service/);
 });
 
-test('the unit unsets every competing provider credential and pins the copilot binary', (t) => {
+test('the unit unsets provider credentials and pins Copilot, Claude Code, and Bun binaries', (t) => {
   const f = fixture(t);
   execFileSync('bash', [setup, 'install'], { env: f.env });
   const unit = fs.readFileSync(path.join(f.systemd, 'gods-eye-agent-qa-runner.service'), 'utf8');
-  for (const name of ['OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY', 'COPILOT_GITHUB_TOKEN']) {
+  for (const name of [
+    'OPENAI_API_KEY', 'AZURE_OPENAI_API_KEY', 'CODEX_API_KEY', 'ANTHROPIC_API_KEY',
+    'COPILOT_GITHUB_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN',
+  ]) {
     assert.match(unit, new RegExp(`UnsetEnvironment=.*\\b${name}\\b`), name);
   }
   assert.match(unit, /QA_COPILOT_BIN=.*node_modules\/\.bin\/copilot/);
+  assert.match(unit, /QA_CLAUDE_BIN=.*node_modules\/@anthropic-ai\/claude-code-linux-x64\/claude/);
+  assert.match(unit, /QA_BUN_BIN=.*node_modules\/@oven\/bun-linux-x64\/bin\/bun/);
   assert.doesNotMatch(unit, /CODEX_HOME|QA_CODEX_BIN/);
 });
 
@@ -286,7 +291,25 @@ test('help exposes only the non-destructive lifecycle commands', () => {
   for (const command of ['install', 'register', 'start', 'status']) assert.match(output, new RegExp(command));
   assert.doesNotMatch(output, /^\s*login\b/mu);
   assert.match(output, /AGENT_QA_COPILOT_TOKEN/);
+  assert.match(output, /CLAUDE_CODE_OAUTH_TOKEN/);
   assert.doesNotMatch(output, /reset|reinstall/);
+});
+
+test('install refuses to use the developer Claude Code home as QA_ROOT', (t) => {
+  const f = fixture(t);
+  const claudeHome = path.join(f.testHome, '.claude');
+  const result = spawnSync('bash', [setup, 'install'], {
+    env: {
+      ...f.env,
+      QA_EXPECTED_USER: os.userInfo().username,
+      QA_ROOT: claudeHome,
+    },
+    encoding: 'utf8',
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /QA_ROOT cannot be the developer Claude Code home/);
+  assert.equal(fs.existsSync(claudeHome), false);
 });
 
 test('malformed commands fail without changing a QA root', (t) => {
