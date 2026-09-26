@@ -1,0 +1,177 @@
+name: Claude Agent QA Report
+
+on:
+  workflow_run:
+    workflows:
+      - Claude Agent QA
+    types:
+      - completed
+
+permissions: {}
+
+jobs:
+  correlate:
+    name: Correlate trusted Claude Agent QA run
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      pr_number: ${{ steps.identity.outputs.pr_number }}
+    steps:
+      - name: Check out immutable trusted publisher code
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-control
+          persist-credentials: false
+
+      - name: Install trusted correlation dependencies
+        run: npm ci --prefix trusted-control/.github/agent-qa --omit=dev
+
+      - name: Parse the typed trusted run identity
+        id: identity
+        # actions/github-script v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const path = require('node:path');
+            const reporter = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              'trusted-control/.github/agent-qa/reporter.cjs',
+            ));
+            const { profileForWorkflowPath } = require(path.join(process.env.GITHUB_WORKSPACE, 'trusted-control/.github/agent-qa/agents/profiles.cjs'));
+            const run = context.payload.workflow_run;
+            const repository = context.payload.repository?.full_name;
+            const trustedPath = profileForWorkflowPath(run?.path)?.agent === 'claude';
+            if (
+              repository !== 'jayn2u/gods-eye'
+              || run?.repository?.full_name !== repository
+              || run?.event !== 'pull_request_target'
+              || run?.status !== 'completed'
+              || !Number.isSafeInteger(run?.id)
+              || run.id <= 0
+              || !Number.isSafeInteger(run?.run_attempt)
+              || run.run_attempt <= 0
+              || !trustedPath
+            ) {
+              core.setFailed('Untrusted or malformed Claude Agent QA workflow_run metadata');
+              return;
+            }
+            const identity = reporter.parseWorkflowRunIdentity(run);
+            if (!identity) {
+              core.setFailed('Claude Agent QA run name did not contain a trusted identity');
+              return;
+            }
+            core.setOutput('pr_number', String(identity.prNumber));
+
+  # Separate from `publish` on purpose: the job that can push to the repository must not be the job
+  # that can write to the pull request. This one holds `contents: write` and no pull-request access,
+  # runs only trusted control code, and pushes nothing but PNGs the harness already accepted.
+  publish-evidence:
+    name: Publish accepted Claude Agent QA screenshots
+    needs: correlate
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      files: ${{ steps.push.outputs.files }}
+    steps:
+      - name: Check out immutable trusted publisher code
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-control
+          persist-credentials: false
+
+      - name: Install trusted publisher dependencies
+        run: npm ci --prefix trusted-control/.github/agent-qa --omit=dev
+
+      - name: Push the validated screenshots to the evidence branch
+        id: push
+        # actions/github-script v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        with:
+          script: |
+            const path = require('node:path');
+            const root = path.join(process.env.GITHUB_WORKSPACE, 'trusted-control/.github/agent-qa');
+            const { prepareEvidencePublication } = require(path.join(root, 'reporter.cjs'));
+            const { publishScreenshots } = require(path.join(root, 'evidence-branch.cjs'));
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            // A failure here must never withhold the advisory comment, so it degrades to no images.
+            try {
+              const prepared = await prepareEvidencePublication({
+                github, workflowRun: context.payload.workflow_run, repository,
+              });
+              if (!prepared) {
+                core.info('Claude Agent QA published no screenshots: the run produced no accepted proof');
+                core.setOutput('files', '[]');
+                return;
+              }
+              const published = await publishScreenshots({ github, repository, ...prepared });
+              core.info(`Claude Agent QA evidence commit ${published.commitSha} on ${published.branch}`);
+              core.setOutput('files', JSON.stringify(published.files));
+            } catch (error) {
+              core.warning(`Claude Agent QA screenshot publication skipped: ${error.code ?? error.message}`);
+              core.setOutput('files', '[]');
+            }
+
+  publish:
+    name: Publish current advisory report
+    needs:
+      - correlate
+      - publish-evidence
+    if: always() && needs.correlate.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: write
+    concurrency:
+      group: gods-eye-claude-agent-qa-report-pr-${{ needs.correlate.outputs.pr_number }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - name: Check out immutable trusted publisher code
+        # actions/checkout v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: trusted-control
+          persist-credentials: false
+
+      - name: Install trusted publisher dependencies
+        run: npm ci --prefix trusted-control/.github/agent-qa --omit=dev
+
+      - name: Publish the independently verified current generation
+        # actions/github-script v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
+        env:
+          EVIDENCE_FILES: ${{ needs.publish-evidence.outputs.files }}
+        with:
+          script: |
+            const path = require('node:path');
+            const { publishWorkflowRun } = require(path.join(
+              process.env.GITHUB_WORKSPACE,
+              'trusted-control/.github/agent-qa/reporter.cjs',
+            ));
+            let evidenceFiles = [];
+            try {
+              const parsed = JSON.parse(process.env.EVIDENCE_FILES || '[]');
+              if (Array.isArray(parsed)) evidenceFiles = parsed;
+            } catch {
+              core.warning('Claude Agent QA evidence file list was unreadable; publishing without screenshots');
+            }
+            const outcome = await publishWorkflowRun({
+              github,
+              workflowRun: context.payload.workflow_run,
+              repository: `${context.repo.owner}/${context.repo.repo}`,
+              evidenceFiles,
+            });
+            core.info(`Claude Agent QA publication: ${JSON.stringify(outcome)}`);
+            if (outcome.status === 'incomplete') {
+              core.setFailed(`Claude Agent QA publication incomplete: ${outcome.reason}`);
+            }
