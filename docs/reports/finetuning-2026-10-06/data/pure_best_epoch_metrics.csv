@@ -1,0 +1,8 @@
+run_id,epoch,metric,source_metric,value_fraction,value_percent,selection_split
+5aec09de,57,text_to_image_R1,val/t2i@1,0.7026631832122803,70.26631832122803,val
+5aec09de,57,text_to_image_R5,val/t2i@5,0.8640792369842529,86.4079236984253,val
+5aec09de,57,text_to_image_R10,val/t2i@10,0.9178304672241211,91.78304672241211,val
+5aec09de,57,text_to_image_mAP,val/t2i_mAP,0.6487312912940979,64.87312912940979,val
+5aec09de,57,text_to_image_mINP,val/t2i_mINP,0.5079966187477112,50.79966187477112,val
+5aec09de,57,image_to_text_R1,val/i2t@1,0.8372319936752319,83.7231993675232,val
+5aec09de,57,average_R1,val/avg@1,0.7699475884437561,76.99475884437561,val

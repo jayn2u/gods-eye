@@ -1,0 +1,6 @@
+dataset,metric,paired_baseline_percent,fine_tuned_demo_percent,delta_percentage_points,query_count,gallery_count,scope
+CUHK-PEDES,R@1,12.475633528265107,70.12670565302143,57.651072124756325,6156,3073,full saved evaluation; supplementary AMP+EMA+GC demo run
+CUHK-PEDES,R@5,27.144249512670566,87.89798570500325,60.75373619233268,6156,3073,full saved evaluation; supplementary AMP+EMA+GC demo run
+CUHK-PEDES,R@10,35.62378167641326,92.72254710851202,57.09876543209876,6156,3073,full saved evaluation; supplementary AMP+EMA+GC demo run
+CUHK-PEDES,mAP,11.115057711048461,63.93675440751,52.821696696461544,6156,3073,full saved evaluation; supplementary AMP+EMA+GC demo run
+CUHK-PEDES,mINP,4.2432649632581745,48.41583174699618,44.172566783738006,6156,3073,full saved evaluation; supplementary AMP+EMA+GC demo run

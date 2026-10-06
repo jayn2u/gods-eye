@@ -1,0 +1,4 @@
+outcome,query_count,sample_total,share_percent,definition
+improved,43,48,89.58333333333333,paired baseline ground-truth rank compared with fine-tuned demo rank
+same,4,48,8.333333333333334,paired baseline ground-truth rank compared with fine-tuned demo rank
+worse,1,48,2.0833333333333335,paired baseline ground-truth rank compared with fine-tuned demo rank

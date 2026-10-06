@@ -1,0 +1,15 @@
+{
+  "run_id": "p8zjr4t3",
+  "group": "rstpreid_itc_adamw",
+  "project": "labclip",
+  "entity": "tonychoi179-jayn2u",
+  "job_type": "train",
+  "output_dir": "/workspace/run/fold_5_of_5",
+  "job_suffix": "itc_adamw",
+  "pipeline_run_id": "20260823T074746-ee5cffb2",
+  "pipeline_result_uri": "s3://lab-runs/2026-08-23/paper-kfold-amp-ema-gc-v2-rstpreid-fold-5-of-5/20260823T074746-ee5cffb2/",
+  "argo_workflow_name": "train-itc-adamw-rstpreid-f5-gvjcx",
+  "argo_workflow_uid": "f78e67aa-2258-4a28-a657-082b4cce5968",
+  "kubernetes_node": "vis-lab",
+  "gpu_product": "NVIDIA GeForce RTX 5070 Ti"
+}
