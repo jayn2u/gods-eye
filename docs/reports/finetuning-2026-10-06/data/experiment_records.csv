@@ -1,0 +1,4 @@
+dataset,run_id,group,job_type,job_suffix,pipeline_run_id,workflow_name,node,gpu,selected_split,selection_metric,local_checkpoint_and_test_result,source_metadata_path
+cuhk-pedes,5zouq9g8,strict-matched-controls-v1,train,infonce_in_batch,20260724T204229-af2e51cb,train-infonce-in-batch-bgnbg,vis-lab,NVIDIA GeForce RTX 5070 Ti,val,,available,/mnt/data/lab_clip/artifacts/downloaded/val-kfold-test/cuhk-pedes/wandb_meta.json
+icfg-pedes,jm3q3fst,icfg-pedes_itc_adamw,train,itc_adamw,20260823T074746-aafd7311,train-itc-adamw-icfg-pedes-f1-mqr98,vis-lab,NVIDIA GeForce RTX 5070 Ti,fold_1_of_5,t2i_r1,available,/mnt/data/lab_clip/artifacts/downloaded/val-kfold-test/icfg-pedes/wandb_meta.json
+rstpreid,p8zjr4t3,rstpreid_itc_adamw,train,itc_adamw,20260823T074746-ee5cffb2,train-itc-adamw-rstpreid-f5-gvjcx,vis-lab,NVIDIA GeForce RTX 5070 Ti,fold_5_of_5,t2i_r1,available,/mnt/data/lab_clip/artifacts/downloaded/val-kfold-test/rstpreid/wandb_meta.json

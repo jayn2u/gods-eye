@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "model_id": "labclip:cuhk-pedes:5a83880a9867",
+  "label": "FT · 5zouq9g8 · val R@1 78.0",
+  "weights_sha256": "5a83880a9867c301a29a20c34d5b2cb73e853695996e3789fdd1c41386b7c91b",
+  "source_sha256": "6d2a515c5a1629f1778ff5a88613e13ffdb5e3b53fa1b382512ad4417967adfb",
+  "source_filename": "best_t2i_eval_compat.pt",
+  "arch": {
+    "model_name": "ViT-B-16",
+    "pretrained": "openai",
+    "img_height": 384,
+    "img_width": 128,
+    "preprocess_mode": "reid"
+  },
+  "verified": true,
+  "registered_at": "2026-09-25T10:36:47.601534Z",
+  "provenance": {
+    "epoch": 9,
+    "global_step": 10640,
+    "best_val_score": 0.7797740995883942,
+    "ema_enabled": true,
+    "train_split": "train",
+    "val_split": "val",
+    "eval_split": "val",
+    "wandb": {
+      "run_id": "5zouq9g8",
+      "project": "labclip",
+      "entity": "tonychoi179-jayn2u",
+      "group": "strict-matched-controls-v1",
+      "pipeline_result_uri": "s3://lab-runs/2026-07-24/train_infonce_in_batch/20260724T204229-af2e51cb/"
+    }
+  },
+  "reference_metrics": {
+    "model": "artifacts/downloaded/val-kfold-test/cuhk-pedes/best_t2i_eval_compat.pt",
+    "dataset": "cuhk-pedes",
+    "domain": "person-reid",
+    "direction": "text-to-image",
+    "checkpoint": "artifacts/downloaded/val-kfold-test/cuhk-pedes/best_t2i_eval_compat.pt",
+    "model_name": "ViT-B-16",
+    "pretrained": "openai",
+    "preprocess_mode": "reid",
+    "split": "test",
+    "query_unit": "captions",
+    "gallery_unit": "images",
+    "queries": 6156,
+    "gallery": 3074,
+    "images": 3074,
+    "texts": 6156,
+    "encoded_queries": 6156,
+    "encoded_gallery": 3074,
+    "encoded_images": 3074,
+    "encoded_texts": 6156,
+    "dropped_queries": 0,
+    "metrics": {
+      "top1": 0.7011046409606934,
+      "top5": 0.8789798617362976,
+      "top10": 0.9272254705429077,
+      "mAP": 0.6393316984176636,
+      "mINP": 0.48427772521972656
+    },
+    "checkpoint_provenance": {
+      "seed": 42,
+      "selection_split": "val",
+      "selection_metric": null,
+      "trainable_parameters": null
+    }
+  }
+}

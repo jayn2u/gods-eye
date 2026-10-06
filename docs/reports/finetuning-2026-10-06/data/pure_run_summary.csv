@@ -1,0 +1,12 @@
+run_id,metric,value,epoch,status,note
+5aec09de,val/t2i@1.max,0.7026631832122803,57,best_validation_or_selection,validation-selected checkpoint
+5aec09de,val/avg@1,0.7694602906703949,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,val/i2t@1,0.8365821838378906,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,val/t2i@5,0.8660279512405396,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,val/t2i@10,0.9186424016952516,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,val/t2i_mAP,0.6491847038269043,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,val/t2i_mINP,0.5086237192153931,60,last_epoch_validation_summary,last observed epoch; do not combine with best-epoch metrics
+5aec09de,best_t2i_epoch,57,57,best_validation_or_selection,validation-selected checkpoint
+5aec09de,best_avg_epoch,57,57,best_validation_or_selection,validation-selected checkpoint
+5aec09de,test/best_t2i@1,0.7026631832122803,,unverified_test_protocol,present in W&B train summary; excluded from official-test claims
+5aec09de,test/best_avg@1,0.7699475884437561,,unverified_test_protocol,present in W&B train summary; excluded from official-test claims

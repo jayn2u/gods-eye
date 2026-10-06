@@ -1,0 +1,35 @@
+{
+  "model": "artifacts/downloaded/val-kfold-test/icfg-pedes/best_t2i.pt",
+  "dataset": "icfg-pedes",
+  "domain": "person-reid",
+  "direction": "text-to-image",
+  "checkpoint": "artifacts/downloaded/val-kfold-test/icfg-pedes/best_t2i.pt",
+  "model_name": "ViT-B-16",
+  "pretrained": "openai",
+  "preprocess_mode": "reid",
+  "split": "test",
+  "query_unit": "captions",
+  "gallery_unit": "images",
+  "queries": 19848,
+  "gallery": 19848,
+  "images": 19848,
+  "texts": 19848,
+  "encoded_queries": 19848,
+  "encoded_gallery": 19848,
+  "encoded_images": 19848,
+  "encoded_texts": 19848,
+  "dropped_queries": 0,
+  "metrics": {
+    "top1": 0.5955259799957275,
+    "top5": 0.7728234529495239,
+    "top10": 0.8319730162620544,
+    "mAP": 0.3674509823322296,
+    "mINP": 0.08291051536798477
+  },
+  "checkpoint_provenance": {
+    "seed": 42,
+    "selection_split": "fold_1_of_5",
+    "selection_metric": "t2i_r1",
+    "trainable_parameters": "all"
+  }
+}

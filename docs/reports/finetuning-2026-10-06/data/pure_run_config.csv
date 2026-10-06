@@ -1,0 +1,21 @@
+run_id,parameter,value,source
+5aec09de,batch_size,64,W&B config snapshot
+5aec09de,dataset,cuhk-pedes,W&B config snapshot
+5aec09de,ema_enabled,False,W&B config snapshot
+5aec09de,eval_split,val,W&B config snapshot
+5aec09de,freeze_backbone,False,W&B config snapshot
+5aec09de,grad_checkpointing_enabled,False,W&B config snapshot
+5aec09de,img_aug,True,W&B config snapshot
+5aec09de,lr,1e-05,W&B config snapshot
+5aec09de,model_name,ViT-B-16,W&B config snapshot
+5aec09de,negative_sampling,"{""mode"": ""in_batch_only""}",W&B config snapshot
+5aec09de,negative_sampling_mode,in_batch_only,W&B config snapshot
+5aec09de,objectives,"{""infonce"": {""weight"": 1.0}}",W&B config snapshot
+5aec09de,precision,fp32,W&B config snapshot
+5aec09de,pretrained,openai,W&B config snapshot
+5aec09de,seed,42,W&B config snapshot
+5aec09de,train_split,train,W&B config snapshot
+5aec09de,weight_decay,0.05,W&B config snapshot
+5aec09de,amp_enabled,False,derived from precision=fp32
+5aec09de,history_epochs_observed,60,W&B scan_history rows
+5aec09de,history_scan_rows,60,W&B scan_history

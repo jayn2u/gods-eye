@@ -1,0 +1,88 @@
+{
+  "source": {
+    "provider": "Weights & Biases",
+    "entity_project": "tonychoi179-jayn2u/labclip",
+    "run_id": "5zouq9g8",
+    "fetched_at_utc": "2026-10-06T01:44:23Z"
+  },
+  "status": "ok",
+  "error_type": null,
+  "identity": {
+    "id": "5zouq9g8",
+    "name": "infonce_in_batch_seed42",
+    "display_name": "infonce_in_batch_seed42",
+    "entity": "tonychoi179-jayn2u",
+    "project": "labclip",
+    "state": "finished",
+    "created_at": "2026-07-24T11:43:53Z",
+    "updated_at": null,
+    "url": "https://wandb.ai/tonychoi179-jayn2u/labclip/runs/5zouq9g8"
+  },
+  "best_t2i_avg1": {
+    "t2i_at_1": {
+      "summary_key": "val/best_t2i@1",
+      "value": 0.7106203436851501
+    },
+    "average_at_1": {
+      "summary_key": "val/best_avg@1",
+      "value": 0.7811552286148071
+    }
+  },
+  "epoch_selection": {
+    "t2i_at_1": {
+      "epoch_key": "best_t2i_epoch",
+      "epoch": 10,
+      "metric_key": "val/best_t2i@1",
+      "metric_value": 0.7106203436851501
+    },
+    "average_at_1": {
+      "epoch_key": "best_avg_epoch",
+      "epoch": 16,
+      "metric_key": "val/best_avg@1",
+      "metric_value": 0.7811552286148071
+    },
+    "summary_epoch_fields": {
+      "best_avg_epoch": 16,
+      "best_t2i_epoch": 10,
+      "early_stop/bad_epochs": 32,
+      "epoch": 42,
+      "expected_processed_annotation_negatives_per_epoch": 0,
+      "expected_processed_candidates_per_epoch": 68096,
+      "expected_processed_examples_per_epoch": 68096,
+      "processed_annotation_negatives_per_epoch": 0,
+      "processed_candidates_per_epoch": 68096,
+      "processed_examples_per_epoch": 68096,
+      "train/epoch_seconds": 280.8021832989907,
+      "updates_per_epoch": 1064
+    },
+    "selection_config_fields": {
+      "epochs": 60
+    }
+  },
+  "relevant_summary": {
+    "best_avg_epoch": 16,
+    "best_t2i_epoch": 10,
+    "early_stop/bad_epochs": 32,
+    "early_stop/plateau_best_t2i": 0.7106203436851501,
+    "epoch": 42,
+    "expected_processed_annotation_negatives_per_epoch": 0,
+    "expected_processed_candidates_per_epoch": 68096,
+    "expected_processed_examples_per_epoch": 68096,
+    "processed_annotation_negatives_per_epoch": 0,
+    "processed_candidates_per_epoch": 68096,
+    "processed_examples_per_epoch": 68096,
+    "train/epoch_seconds": 280.8021832989907,
+    "updates_per_epoch": 1064,
+    "val/avg@1": 0.7710849642753601,
+    "val/best_avg@1": 0.7811552286148071,
+    "val/best_t2i@1": 0.7106203436851501,
+    "val/t2i@1.max": 0.7106203436851501,
+    "val/t2i@10": 0.9165313243865968,
+    "val/t2i@5": 0.8683013916015625,
+    "val/t2i_mAP": 0.6458423733711243,
+    "val/t2i_mINP": 0.500825822353363
+  },
+  "relevant_config": {
+    "epochs": 60
+  }
+}
